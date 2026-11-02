@@ -187,4 +187,10 @@ def test_auth_attempts_are_rate_limited(anon):
     limited = login(anon, unique_name(), "wrong-password")
     assert limited.status_code == 429
     assert error_code(limited) == "rate_limited"
-    assert limited.json()["error"]["retryable"]
+    error = limited.json()["error"]
+    assert error["retryable"]
+    assert error["retry_after"] >= 1
+    assert limited.headers["Retry-After"] == str(error["retry_after"])
+    # Only the auth endpoints are limited.
+    assert anon.get("/health").status_code == 200
+    assert anon.get("/api/auth/me").status_code == 401
