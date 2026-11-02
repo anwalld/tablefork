@@ -1,8 +1,10 @@
 export class ApiError extends Error {
-  constructor(code, message, status) {
+  constructor(code, message, status, retryAfter = null) {
     super(message)
     this.code = code
     this.status = status
+    // Seconds to wait before retrying, when the server says.
+    this.retryAfter = retryAfter
   }
 }
 
@@ -18,6 +20,7 @@ async function request(method, path, body) {
       data.error?.code ?? 'unavailable',
       data.error?.message ?? '服务暂时不可用',
       response.status,
+      data.error?.retry_after ?? null,
     )
   }
   return data

@@ -6,6 +6,7 @@
 
 #include "common/config.h"
 #include "common/util.h"
+#include "services/password_policy.h"
 
 namespace
 {
@@ -32,6 +33,8 @@ std::string resolveIpv4(const std::string &host)
 int main()
 {
     const auto &config = chat::Config::get();
+    // Fails at startup rather than on the first registration.
+    chat::PasswordPolicy::instance();
     drogon::app()
         .addListener("0.0.0.0", 8000)
         .setThreadNum(0)
@@ -60,12 +63,12 @@ int main()
                                     &&callback) {
             if (const auto *error = dynamic_cast<const chat::ApiError *>(&e))
             {
-                callback(chat::jsonResponse(chat::errorBody(*error), error->status()));
+                callback(chat::errorResponse(*error));
                 return;
             }
             LOG_ERROR << req->getPath() << ": " << e.what();
             const auto error = chat::ApiError::unavailable();
-            callback(chat::jsonResponse(chat::errorBody(error), error.status()));
+            callback(chat::errorResponse(error));
         })
         .run();
     return 0;

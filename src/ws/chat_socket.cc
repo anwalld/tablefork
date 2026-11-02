@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "common/util.h"
+#include "services/message_rate_limiter.h"
 #include "services/message_service.h"
 #include "services/room_service.h"
 #include "services/room_worker_pool.h"
@@ -79,6 +80,9 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
                 {
                     throw ApiError::unauthenticated();
                 }
+                // Before saving, so a refused message can be resent later
+                // with the same client_msg_id.
+                co_await MessageRateLimiter::admit(session->userId);
                 const auto message = co_await MessageService::save(
                     *session,
                     roomId,

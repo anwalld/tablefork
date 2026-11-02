@@ -1,6 +1,8 @@
 #include "controllers/auth_controller.h"
 
 #include "common/util.h"
+#include "services/device_store.h"
+#include "services/login_limiter.h"
 #include "services/session_store.h"
 #include "services/user_service.h"
 
@@ -31,11 +33,31 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::login(
     drogon::HttpRequestPtr req)
 {
     const auto &body = jsonBody(req);
-    const auto session = co_await UserService::authenticate(
-        stringField(body, "username"), stringField(body, "password"));
+    const auto username = stringField(body, "username");
+    const auto password = stringField(body, "password");
+
+    // A browser that has logged in as this user before counts its attempts
+    // apart from everyone else, so others guessing the name cannot lock it
+    // out.
+    const auto device = req->getCookie(kDeviceCookie);
+    const bool knownDevice = co_await DeviceStore::owner(device) == username;
+    const auto limitKey = knownDevice ? LoginLimiter::deviceKey(device)
+                                      : LoginLimiter::nameKey(username);
+    co_await LoginLimiter::admit(limitKey);
+
+    const auto session = co_await UserService::authenticate(username, password);
+    co_await LoginLimiter::clear(limitKey);
     const auto token = co_await SessionStore::create(session);
     auto resp = jsonResponse(userJson(session));
     SessionStore::setCookie(resp, token);
+    if (knownDevice)
+    {
+        co_await DeviceStore::refresh(device);
+    }
+    else
+    {
+        DeviceStore::setCookie(resp, co_await DeviceStore::issue(username));
+    }
     co_return resp;
 }
 

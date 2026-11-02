@@ -42,6 +42,7 @@ WORKDIR /src
 COPY CMakeLists.txt ./
 COPY src ./src
 COPY tests/unit ./tests/unit
+COPY data ./data
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCHAT_BUILD_TESTS=ON \
     && cmake --build build -j"$(nproc)" \
     && ctest --test-dir build --output-on-failure
@@ -53,5 +54,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libmariadb3 libhiredis1.1.0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/chat-server /usr/local/bin/chat-server
+COPY data/common-passwords.txt /usr/local/share/chat/common-passwords.txt
 EXPOSE 8000
 CMD ["chat-server"]

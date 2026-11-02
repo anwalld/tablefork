@@ -31,6 +31,9 @@ drogon::HttpResponsePtr jsonResponse(
 
 Json::Value errorBody(const ApiError &error);
 
+// errorBody() as an HTTP response, with Retry-After when the error has one.
+drogon::HttpResponsePtr errorResponse(const ApiError &error);
+
 const Json::Value &jsonBody(const drogon::HttpRequestPtr &req);
 
 // Reads a string field, reporting a missing one as invalid_argument.

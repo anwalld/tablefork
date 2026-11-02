@@ -44,6 +44,7 @@ function makeSocket() {
     onSubscribed: vi.fn(),
     onRoomLeft: vi.fn(),
     onSendResult: vi.fn(),
+    onThrottled: vi.fn(),
     onStatus: vi.fn(),
   }
   return { socket: new ChatSocket(handlers), handlers }
@@ -110,6 +111,33 @@ describe('ChatSocket', () => {
     await vi.advanceTimersByTimeAsync(500)
     latest().open()
     expect(latest().sent).toEqual([])
+    socket.close()
+  })
+
+  it('waits out rate_limited and resends without using up attempts', async () => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    socket.send(7, 'c1', 'hello')
+    const ws = latest()
+    const limited = {
+      type: 'error',
+      client_msg_id: 'c1',
+      error: { code: 'rate_limited', retryable: true, retry_after: 3 },
+    }
+    // More refusals than MAX_ATTEMPTS: none of them may fail the message.
+    for (let round = 0; round < 6; round++) {
+      ws.reply(limited)
+      expect(handlers.onThrottled).toHaveBeenLastCalledWith(7, 'c1', 3)
+      const sent = ws.sent.length
+      await vi.advanceTimersByTimeAsync(2999)
+      expect(ws.sent).toHaveLength(sent)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(ws.sent).toHaveLength(sent + 1)
+      expect(ws.sent.at(-1).client_msg_id).toBe('c1')
+    }
+    expect(handlers.onSendResult).not.toHaveBeenCalled()
+    ws.reply({ type: 'ack', client_msg_id: 'c1', seq: 9 })
+    expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'c1', { ok: true, seq: 9 })
     socket.close()
   })
 

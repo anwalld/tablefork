@@ -1,6 +1,7 @@
 #pragma once
 
 #include <drogon/HttpTypes.h>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -36,6 +37,12 @@ class ApiError : public std::runtime_error
         return retryable_;
     }
 
+    // Seconds the client should wait before retrying, when known.
+    std::optional<int> retryAfter() const
+    {
+        return retryAfter_;
+    }
+
     static ApiError invalidArgument(const std::string &message)
     {
         return {drogon::k400BadRequest, "invalid_argument", message};
@@ -69,9 +76,35 @@ class ApiError : public std::runtime_error
                 true};
     }
 
+    static ApiError tooManyAttempts(int retryAfterSeconds)
+    {
+        ApiError error{drogon::k429TooManyRequests,
+                       "too_many_attempts",
+                       "too many login attempts, retry later",
+                       true};
+        error.retryAfter_ = retryAfterSeconds;
+        return error;
+    }
+
+    static ApiError rateLimited(int retryAfterSeconds)
+    {
+        ApiError error{drogon::k429TooManyRequests,
+                       "rate_limited",
+                       "sending too fast, retry later",
+                       true};
+        error.retryAfter_ = retryAfterSeconds;
+        return error;
+    }
+
+    static ApiError weakPassword(const std::string &message)
+    {
+        return {drogon::k400BadRequest, "weak_password", message};
+    }
+
   private:
     drogon::HttpStatusCode status_;
     std::string code_;
     bool retryable_;
+    std::optional<int> retryAfter_;
 };
 }  // namespace chat

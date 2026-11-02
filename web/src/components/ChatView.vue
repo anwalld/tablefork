@@ -25,7 +25,7 @@ const leaving = shallowRef(null)
 const leaveBusy = ref(false)
 
 const streams = new Map()
-// Messages not yet confirmed, by room: { clientMsgId, content, failed }.
+// Messages not yet confirmed, by room: { clientMsgId, content, failed, throttled }.
 const outbox = reactive(new Map())
 const revision = ref(0)
 
@@ -71,6 +71,11 @@ const socket = new ChatSocket({
     } else if (entry) {
       entry.failed = true
     }
+  },
+  // The socket resends by itself once the wait is over.
+  onThrottled: (roomId, clientMsgId) => {
+    const entry = (outbox.get(roomId) ?? []).find((m) => m.clientMsgId === clientMsgId)
+    if (entry) entry.throttled = true
   },
 })
 
@@ -172,13 +177,14 @@ function send() {
   }
   const clientMsgId = crypto.randomUUID()
   const roomId = activeId.value
-  outbox.set(roomId, [...(outbox.get(roomId) ?? []), { clientMsgId, content, failed: false }])
+  outbox.set(roomId, [...(outbox.get(roomId) ?? []), { clientMsgId, content, failed: false, throttled: false }])
   socket.send(roomId, clientMsgId, content)
   draft.value = ''
 }
 
 function retry(entry) {
   entry.failed = false
+  entry.throttled = false
   socket.send(activeId.value, entry.clientMsgId, entry.content)
 }
 
@@ -319,6 +325,7 @@ onBeforeUnmount(() => {
             <article v-for="entry in pending" :key="entry.clientMsgId" class="message mine pending">
               <div class="meta">
                 <span v-if="entry.failed" class="error">发送失败</span>
+                <span v-else-if="entry.throttled">发送过快，稍后自动重试</span>
                 <span v-else>发送中</span>
                 <button v-if="entry.failed" class="link" @click="retry(entry)">重试</button>
               </div>

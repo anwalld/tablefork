@@ -106,7 +106,21 @@ Json::Value errorBody(const ApiError &error)
     body["error"]["code"] = error.code();
     body["error"]["message"] = error.what();
     body["error"]["retryable"] = error.retryable();
+    if (const auto seconds = error.retryAfter())
+    {
+        body["error"]["retry_after"] = *seconds;
+    }
     return body;
+}
+
+drogon::HttpResponsePtr errorResponse(const ApiError &error)
+{
+    auto resp = jsonResponse(errorBody(error), error.status());
+    if (const auto seconds = error.retryAfter())
+    {
+        resp->addHeader("Retry-After", std::to_string(*seconds));
+    }
+    return resp;
 }
 
 const Json::Value &jsonBody(const drogon::HttpRequestPtr &req)

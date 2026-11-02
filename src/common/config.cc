@@ -1,5 +1,6 @@
 #include "common/config.h"
 
+#include <cerrno>
 #include <cstdlib>
 #include <drogon/utils/Utilities.h>
 
@@ -17,6 +18,11 @@ long envOr(const char *name, long fallback)
 {
     const char *value = std::getenv(name);
     return value && *value ? std::atol(value) : fallback;
+}
+
+int positiveEnvOr(const char *name, long fallback)
+{
+    return static_cast<int>(positiveOr(std::getenv(name), fallback));
 }
 
 Config load()
@@ -42,9 +48,35 @@ Config load()
     c.workerCount = envOr("WORKER_COUNT", 16L);
     c.workerQueueLimit = envOr("WORKER_QUEUE_LIMIT", 1024L);
     c.hotCacheSize = envOr("HOT_CACHE_SIZE", 200L);
+
+    c.passwordBlocklistFile = envOr(
+        "PASSWORD_BLOCKLIST_FILE", "/usr/local/share/chat/common-passwords.txt");
+    c.loginFreeAttempts = positiveEnvOr("LOGIN_FREE_ATTEMPTS", 5);
+    c.loginBackoffBaseSeconds = positiveEnvOr("LOGIN_BACKOFF_BASE_SECONDS", 1);
+    c.loginBackoffMaxSeconds = positiveEnvOr("LOGIN_BACKOFF_MAX_SECONDS", 60);
+    c.loginFailTtlSeconds = positiveEnvOr("LOGIN_FAIL_TTL_SECONDS", 900);
+    c.deviceTtlDays = positiveEnvOr("DEVICE_TTL_DAYS", 180);
+    c.messageRateLimit = positiveEnvOr("MESSAGE_RATE_LIMIT", 30);
+    c.messageRateWindowSeconds = positiveEnvOr("MESSAGE_RATE_WINDOW_SECONDS", 10);
     return c;
 }
 }  // namespace
+
+long positiveOr(const char *text, long fallback)
+{
+    if (!text || !*text)
+    {
+        return fallback;
+    }
+    char *end = nullptr;
+    errno = 0;
+    const long value = std::strtol(text, &end, 10);
+    if (errno || *end || value <= 0 || value > 1000000000L)
+    {
+        return fallback;
+    }
+    return value;
+}
 
 const Config &Config::get()
 {

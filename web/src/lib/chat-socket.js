@@ -5,8 +5,8 @@ const MAX_BACKOFF_MS = 10000
 // The WebSocket connection: reconnects, resubscribes, and resends unacknowledged
 // messages with their original client_msg_id so that the server can deduplicate.
 export class ChatSocket {
-  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onStatus }) {
-    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onStatus }
+  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus }) {
+    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus }
     this.rooms = new Set()
     this.pending = new Map()
     this.backoff = 500
@@ -50,7 +50,14 @@ export class ChatSocket {
   handleError(frame) {
     const entry = this.pending.get(frame.client_msg_id)
     if (!entry) return
-    if (frame.error.retryable && entry.attempts < MAX_ATTEMPTS) {
+    if (frame.error.code === 'rate_limited' && frame.error.retry_after) {
+      // Sending too fast: wait as told and resend. Waiting is not a failed
+      // attempt, so it does not count towards MAX_ATTEMPTS.
+      clearTimeout(entry.timer)
+      entry.attempts -= 1
+      this.handlers.onThrottled?.(entry.roomId, entry.clientMsgId, frame.error.retry_after)
+      entry.timer = setTimeout(() => this.transmit(entry), frame.error.retry_after * 1000)
+    } else if (frame.error.retryable && entry.attempts < MAX_ATTEMPTS) {
       clearTimeout(entry.timer)
       entry.timer = setTimeout(() => this.transmit(entry), 1000 * entry.attempts)
     } else {
