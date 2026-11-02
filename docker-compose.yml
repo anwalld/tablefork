@@ -9,26 +9,12 @@ services:
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
     volumes:
       - mysql-data:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uchat -p$$MYSQL_PASSWORD --silent"]
       interval: 3s
       timeout: 3s
       retries: 40
-
-  migrate:
-    image: mysql:8.4.6
-    entrypoint: ["bash", "/migrate.sh"]
-    environment:
-      MYSQL_HOST: mysql
-      MYSQL_DATABASE: chat
-      MYSQL_USER: chat
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
-    volumes:
-      - ./migrations:/migrations:ro
-      - ./scripts/migrate.sh:/migrate.sh:ro
-    depends_on:
-      mysql:
-        condition: service_healthy
 
   redis-master:
     image: redis:7.4.5
@@ -74,8 +60,8 @@ services:
       WORKER_COUNT: ${WORKER_COUNT:-16}
       WORKER_QUEUE_LIMIT: ${WORKER_QUEUE_LIMIT:-1024}
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
       redis-master:
         condition: service_healthy
     healthcheck:
@@ -88,9 +74,6 @@ services:
     build:
       context: .
       dockerfile: docker/web.Dockerfile
-    environment:
-      AUTH_RATE: ${AUTH_RATE:-10r/m}
-      AUTH_BURST: ${AUTH_BURST:-10}
     ports:
       - "8080:80"
     depends_on:
@@ -113,7 +96,6 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
       SMALL_QUEUE: ${SMALL_QUEUE:-}
-      STRICT_AUTH_RATE: ${STRICT_AUTH_RATE:-}
     depends_on:
       nginx:
         condition: service_healthy

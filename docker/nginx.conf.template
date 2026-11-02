@@ -3,12 +3,6 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
-# Login and registration attempts per client address. A single keep-alive
-# connection can carry many requests, so this has to be counted per request at
-# L7 rather than per connection at L4.
-limit_req_zone $binary_remote_addr zone=auth:10m rate=${AUTH_RATE};
-limit_req_status 429;
-
 server {
     listen 80;
 
@@ -17,24 +11,10 @@ server {
     resolver 127.0.0.11 valid=5s;
     set $app http://app:8000;
 
-    location ~ ^/api/auth/(login|register)$ {
-        limit_req zone=auth burst=${AUTH_BURST} nodelay;
-        error_page 429 = @rate_limited;
-        proxy_pass $app;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
     location /api/ {
         proxy_pass $app;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    location @rate_limited {
-        default_type application/json;
-        charset utf-8;
-        return 429 '{"error":{"code":"rate_limited","message":"尝试次数过多，请稍后再试","retryable":true}}';
     }
 
     location = /health {
