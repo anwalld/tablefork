@@ -31,10 +31,13 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
+    # AUTH_RETRY_AFTER is the time one new attempt takes to accrue at
+    # AUTH_RATE, so clients know how long to wait.
     location @rate_limited {
         default_type application/json;
         charset utf-8;
-        return 429 '{"error":{"code":"rate_limited","message":"尝试次数过多，请稍后再试","retryable":true}}';
+        add_header Retry-After ${AUTH_RETRY_AFTER} always;
+        return 429 '{"error":{"code":"rate_limited","message":"尝试次数过多，请稍后再试","retryable":true,"retry_after":${AUTH_RETRY_AFTER}}}';
     }
 
     location = /health {

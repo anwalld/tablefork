@@ -16,6 +16,13 @@ describe('authErrorText', () => {
     expect(authErrorText(new ApiError('invalid_argument', 'x', 400))).toContain('至少 10 个字符')
   })
 
+  it('explains limit errors that carry no wait time', () => {
+    expect(authErrorText(new ApiError('rate_limited', 'x', 429))).toBe('尝试次数过多，请稍后再试')
+    expect(authErrorText(new ApiError('too_many_attempts', 'x', 429))).toBe(
+      '尝试次数过多，请稍后再试',
+    )
+  })
+
   it('falls back for unknown errors', () => {
     expect(authErrorText(new Error('network'))).toBe('服务暂时不可用，请稍后再试')
   })

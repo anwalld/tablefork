@@ -102,6 +102,7 @@ services:
     environment:
       AUTH_RATE: ${AUTH_RATE:-10r/m}
       AUTH_BURST: ${AUTH_BURST:-10}
+      AUTH_RETRY_AFTER: ${AUTH_RETRY_AFTER:-6}
     ports:
       - "8080:80"
     depends_on:

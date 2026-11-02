@@ -41,8 +41,8 @@ key = login_fail:u:<sha256(用户名)>   （有设备令牌时用 login_fail:d:<
 脚本：
   if now < next_at          -> 返回 拒绝，retry_after = ceil((next_at - now) / 1000)
   count = count + 1
-  if count > FREE           -> next_at = now + min(BASE * 2^(count - FREE - 1), MAX)
-  PEXPIRE key TTL
+  if count >= FREE          -> next_at = now + min(BASE * 2^(count - FREE), MAX)
+  EXPIRE key TTL
   返回 允许
 校验成功 -> DEL key
 校验失败 -> 不再做额外操作（这次尝试在校验前已经计入）
@@ -51,12 +51,14 @@ key = login_fail:u:<sha256(用户名)>   （有设备令牌时用 login_fail:d:<
 - **为什么在校验前计数，而不是失败后计数**：如果失败后才计数，攻击者并发发出 1000 个请求，它们都会在第一次失败被记录之前通过检查。在校验前计数，并发请求也会逐个累加。代价是成功登录在脚本里也会被计一次，但随后就被清零。
 - **为什么用 `next_at`，而不是让服务器 sleep**：sleep 会让连接一直挂着，被拒绝的请求也会占用资源。直接返回 429 和 `retry_after`，客户端自己等待。
 - **用户名 key 用 SHA-256**：用户名可能包含任意字符，hash 之后 key 的长度固定。不存在的用户名也用同样的方式计数，行为与存在的用户名一致。
+- 用完第 FREE 次就开始等待：默认第 5 次之后等 1 秒，第 6 次之后等 2 秒，依此类推。等待时间表由 C++ 的 `backoffSchedule()` 生成（例如 `1,2,4,8,16,32,60`），作为参数传给脚本，所以退避规则只有一处实现，并有单元测试。
+- 时间取 Redis 的 `TIME`，多个实例之间不受各自时钟偏差影响。
 - 默认值：`FREE=5`、`BASE=1s`、`MAX=60s`、`TTL=15min`。连续攻击时，每个账号每分钟大约 1 次，一天约 1440 次；有 10 位以上长度和黑名单约束时，这个速率猜不出密码。TTL 是从最后一次尝试起算的，停止尝试 15 分钟后计数恢复。
 - 备选方案：滑动窗口计数（ZSET）。拒绝的原因：要存每次的时间戳，指数退避用 `next_at` 一个字段就能表达。
 
 ### D2 设备令牌
 
-- 登录成功后，如果请求没有带属于该用户名的有效 `chat_device`，就生成 32 字节随机令牌，下发 Cookie `chat_device`，属性为 `HttpOnly`、`SameSite=Lax`、`Path=/api/auth`、`Max-Age=180 天`，`Secure` 跟随 `COOKIE_SECURE`。
+- 登录成功后，如果请求没有带属于该用户名的有效 `chat_device`，就生成 48 个字符的随机令牌（与会话令牌相同，由 `secureRandomString(48)` 生成），下发 Cookie `chat_device`，属性为 `HttpOnly`、`SameSite=Lax`、`Path=/api/auth`、`Max-Age=180 天`，`Secure` 跟随 `COOKIE_SECURE`。
 - Redis 中存 `device:<sha256(令牌)>` -> 用户名，TTL 180 天，每次用它登录成功就续期。与会话一样只存哈希。
 - 登录时，如果 `chat_device` 有效且对应的用户名与请求中的用户名相同，就用 `login_fail:d:<hash>` 计数，否则用 `login_fail:u:<hash>`。
 - `Path=/api/auth`：只有认证接口能收到这个 Cookie，其他请求不带它。
@@ -123,11 +125,21 @@ weak_password       400   不可重试 注册密码不合规
 
 ### D8 测试中的限额
 
-全部测试会频繁注册、登录和发消息。沿用 `f431c93` 的做法：`scripts/test.sh` 先用很宽松的限额跑全部测试，再用默认值单独跑限流相关的测试。登录延迟和消息限流的测试大多使用新用户名，所以默认值下也能跑；需要更快触发的测试，通过测试专用的小阈值单独运行。
+全部测试会频繁注册、登录和发消息，所以 `scripts/test.sh` 分两轮，最后按正常配置重启：
+
+```text
+第一轮  放开 Nginx 限流和消息限流，登录计数有效期缩短到 5 秒
+        -> 运行全部测试，包括登录延迟（默认的免费次数和退避）和计数过期
+第二轮  消息限额改为每 2 秒 5 条，Nginx 用默认值
+        -> 先跑消息限流测试，再跑 Nginx 限流测试（它会用掉认证请求的额度，所以放最后）
+最后    按正常配置重启
+```
+
+登录延迟的测试在默认的免费次数和退避下也能快速完成，只有计数过期需要缩短有效期。消息限流在默认的每 10 秒 30 条下要等很久，所以用小限额。
 
 ### D9 前端
 
-- 登录页：遇到 `too_many_attempts` 或 `rate_limited` 时，显示“请 N 秒后再试”并倒计时，期间禁用提交按钮。
+- 登录页：遇到 `too_many_attempts` 或 `rate_limited` 时，显示“请 N 秒后再试”并倒计时，期间禁用提交按钮。Nginx 的 429 也带 `retry_after`（`AUTH_RETRY_AFTER`，默认 6 秒，即每分钟 10 次的间隔）和 `Retry-After` 头；万一缺少等待时间，显示“尝试次数过多，请稍后再试”。
 - 注册页：说明“至少 10 个字符，不能是常见密码或与用户名相同”，并显示 `weak_password` 的具体原因。
 - `ChatSocket`：收到 `rate_limited` 时，按 `retry_after` 等待后重发，这类重试不计入 `MAX_ATTEMPTS`。界面显示“发送过快，稍后自动重试”。
 
