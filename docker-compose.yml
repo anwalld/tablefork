@@ -1,0 +1,106 @@
+services:
+  mysql:
+    image: mysql:8.4.6
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set it in .env, see .env.example}
+      MYSQL_DATABASE: chat
+      MYSQL_USER: chat
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uchat -p$$MYSQL_PASSWORD --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  redis-master:
+    image: redis:7.4.5
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDISCLI_AUTH\""]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+    volumes:
+      - redis-master-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis-replica:
+    image: redis:7.4.5
+    command: ["sh", "-c", "exec redis-server --appendonly yes --replicaof redis-master 6379 --requirepass \"$$REDISCLI_AUTH\" --masterauth \"$$REDISCLI_AUTH\""]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+    volumes:
+      - redis-replica-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
+      REDIS_HOST: ${REDIS_HOST:-redis-master}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      WORKER_COUNT: ${WORKER_COUNT:-16}
+      WORKER_QUEUE_LIMIT: ${WORKER_QUEUE_LIMIT:-1024}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: tests/integration
+    environment:
+      BASE_URL: http://nginx
+      WS_URL: ws://nginx/ws
+      ORIGIN: http://localhost:8080
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+      SMALL_QUEUE: ${SMALL_QUEUE:-}
+    depends_on:
+      nginx:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
+  redis-master-data:
+  redis-replica-data:

@@ -1,0 +1,47 @@
+schema: spec-driven
+
+context: |
+  Language: zh-CN
+  All artifacts must be written in zh-CN.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  项目背景：
+  - CppAiServer 是一个基于 C++20 的多人 AI 聊天室，接入多个不同的 AI 模型，提供类似 AI 伙伴的体验。
+  - 产品形态是多人加多个 AI：同一个房间里可以有多名用户和多个 AI 成员。
+  - 按公开服务设计，需要支持多实例部署。
+
+  技术栈：
+  - 接入层：Nginx，分为 L4 和 L7 两层。
+  - 后端：C++20 + Drogon。
+  - 数据存储：MySQL 和 Redis。
+  - AI：独立的 AI 服务，负责接入不同模型。
+  - 前端：Vue。
+  - 构建：CMake。
+  - 部署：Docker。
+  - 版本管理：Git。
+
+  约束：
+  - Homebrew 版 Drogon 未启用 MySQL 和 Redis 支持，需要从源码构建。
+  - Drogon 的 HttpClient 不支持流式读取响应，模型流式调用需要另行实现。
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

@@ -1,0 +1,17 @@
+--- a/orm_lib/src/mysql_impl/MysqlConnection.cc
++++ b/orm_lib/src/mysql_impl/MysqlConnection.cc
+@@ -183,8 +183,12 @@ void MysqlConnection::disconnect()
+     auto f = pro.get_future();
+     loop_->runInLoop([thisPtr, &pro]() {
+         thisPtr->status_ = ConnectStatus::Bad;
+-        thisPtr->channelPtr_->disableAll();
+-        thisPtr->channelPtr_->remove();
++        // channelPtr_ is null when mysql_real_connect_start failed immediately.
++        if (thisPtr->channelPtr_)
++        {
++            thisPtr->channelPtr_->disableAll();
++            thisPtr->channelPtr_->remove();
++        }
+         thisPtr->mysqlPtr_.reset();
+         pro.set_value(1);
+     });
