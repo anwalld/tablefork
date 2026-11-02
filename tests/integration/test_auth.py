@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -136,3 +137,17 @@ def test_login_with_control_characters_looks_like_unknown_user(anon):
     response = login(anon, unique_name() + "\u0000x")
     assert response.status_code == 401
     assert response.json() == login(anon, unique_name()).json()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("STRICT_AUTH_RATE"),
+    reason="needs the default AUTH_RATE and AUTH_BURST on Nginx",
+)
+def test_auth_attempts_are_rate_limited(anon):
+    statuses = [login(anon, unique_name(), "wrong-password").status_code for _ in range(30)]
+    assert statuses[0] == 401
+    assert 429 in statuses
+    limited = login(anon, unique_name(), "wrong-password")
+    assert limited.status_code == 429
+    assert error_code(limited) == "rate_limited"
+    assert limited.json()["error"]["retryable"]

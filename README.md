@@ -20,7 +20,11 @@ docker compose up -d --build --wait
 curl http://localhost:8080/health
 ```
 
-数据库结构来自 `migrations/`，只在 MySQL 数据卷为空时执行。清空全部数据：
+数据库结构来自 `migrations/`。每次启动时 `migrate` 服务先按文件名顺序执行还没执行过的迁移，记录在 `schema_migrations` 表里，完成后应用才会启动。
+
+修改表结构时新增一个文件，例如 `migrations/002_add_ai_members.sql`，不要修改已执行过的文件。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库后再重启。
+
+清空全部数据：
 
 ```bash
 docker compose down -v
@@ -37,6 +41,8 @@ scripts/test.sh
 ```
 
 脚本先在容器内运行单元测试，再启动完整环境并运行 `tests/integration` 下的集成测试。传给脚本的参数会交给 pytest，例如 `scripts/test.sh -k rooms`。
+
+登录和注册由 Nginx 按客户端地址限流，默认每分钟 10 次，可以突发 10 次，超出返回 429 和 `rate_limited`，通过 `.env` 的 `AUTH_RATE` 和 `AUTH_BURST` 调整。测试会频繁注册，所以脚本先放开限制运行全部测试，再恢复默认值单独测试限流。
 
 队列满的测试需要极小的队列，默认跳过。单独运行时，环境变量要在两条命令中都生效：
 
@@ -121,7 +127,7 @@ docker compose --profile test run --rm tests python load_test.py <房间数> <�
 |---|---|
 | `src/` | C++ 后端 |
 | `web/` | Vue 前端 |
-| `migrations/` | 数据库结构 |
+| `migrations/` | 数据库迁移，由 `scripts/migrate.sh` 执行 |
 | `docker/` | Nginx 配置和 Drogon 补丁 |
 | `tests/` | 单元测试和集成测试 |
 

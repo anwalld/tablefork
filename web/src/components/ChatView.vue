@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api, ApiError } from '../lib/api.js'
 import { ChatSocket } from '../lib/chat-socket.js'
+import { leave, prepareLeave } from '../lib/leave.js'
 import { RoomStream } from '../lib/room-stream.js'
 import { fetchAllRooms } from '../lib/rooms.js'
 import { exportRoom } from '../lib/transcript.js'
@@ -189,13 +190,8 @@ function onKeydown(event) {
 }
 
 async function startLeave() {
-  const room = activeRoom.value
   try {
-    const { members } = await api.members(room.id)
-    leaving.value = {
-      room,
-      isLastHuman: members.filter((m) => m.type === 'human').length === 1,
-    }
+    leaving.value = await prepareLeave(api, activeRoom.value)
   } catch {
     notice.value = '操作失败，请重试'
   }
@@ -213,18 +209,14 @@ async function exportActive() {
 async function confirmLeave() {
   leaveBusy.value = true
   try {
-    const { room, isLastHuman } = leaving.value
-    await api.leave(room.id, isLastHuman)
-    forgetRoom(room.id)
-    leaving.value = null
-    await refreshRooms()
-  } catch (e) {
-    if (e.code === 'confirmation_required') {
-      // Everyone else left while the dialog was open.
-      leaving.value = { ...leaving.value, isLastHuman: true }
-    } else {
-      notice.value = '退出失败，请重试'
+    const { room } = leaving.value
+    leaving.value = await leave(api, leaving.value)
+    if (leaving.value === null) {
+      forgetRoom(room.id)
+      await refreshRooms()
     }
+  } catch {
+    notice.value = '退出失败，请重试'
   } finally {
     leaveBusy.value = false
   }
