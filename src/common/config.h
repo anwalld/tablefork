@@ -28,6 +28,25 @@ struct Config
     size_t workerQueueLimit;
     size_t hotCacheSize;
 
+    // Common passwords that registration rejects, one per line.
+    std::string passwordBlocklistFile;
+
+    // Login delay: attempts allowed before waiting, then a wait that doubles
+    // from the base up to the max. A name's count expires after the TTL.
+    int loginFreeAttempts;
+    int loginBackoffBaseSeconds;
+    int loginBackoffMaxSeconds;
+    int loginFailTtlSeconds;
+    int deviceTtlDays;
+
+    // Messages a user may send per window, across all connections and rooms.
+    int messageRateLimit;
+    int messageRateWindowSeconds;
+
     static const Config &get();
 };
+
+// The positive integer in text, or fallback when text is empty, not a number
+// or not positive.
+long positiveOr(const char *text, long fallback);
 }  // namespace chat

@@ -9,12 +9,30 @@ services:
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uchat -p$$MYSQL_PASSWORD --silent"]
       interval: 3s
       timeout: 3s
       retries: 40
+
+  migrate:
+    image: flyway/flyway:11.14.1
+    command: ["migrate"]
+    environment:
+      # The image ships the MariaDB driver, not MySQL Connector/J; it works with
+      # MySQL 8.4 when the server's public key may be fetched.
+      FLYWAY_URL: jdbc:mariadb://mysql:3306/chat?allowPublicKeyRetrieval=true&useSsl=false
+      FLYWAY_USER: chat
+      FLYWAY_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      # Databases created before Flyway already have V1.
+      FLYWAY_BASELINE_ON_MIGRATE: "true"
+      FLYWAY_BASELINE_VERSION: "1"
+    volumes:
+      - ./migrations:/flyway/sql:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
 
   redis-master:
     image: redis:7.4.5
@@ -59,9 +77,16 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       WORKER_COUNT: ${WORKER_COUNT:-16}
       WORKER_QUEUE_LIMIT: ${WORKER_QUEUE_LIMIT:-1024}
+      LOGIN_FREE_ATTEMPTS: ${LOGIN_FREE_ATTEMPTS:-5}
+      LOGIN_BACKOFF_BASE_SECONDS: ${LOGIN_BACKOFF_BASE_SECONDS:-1}
+      LOGIN_BACKOFF_MAX_SECONDS: ${LOGIN_BACKOFF_MAX_SECONDS:-60}
+      LOGIN_FAIL_TTL_SECONDS: ${LOGIN_FAIL_TTL_SECONDS:-900}
+      DEVICE_TTL_DAYS: ${DEVICE_TTL_DAYS:-180}
+      MESSAGE_RATE_LIMIT: ${MESSAGE_RATE_LIMIT:-30}
+      MESSAGE_RATE_WINDOW_SECONDS: ${MESSAGE_RATE_WINDOW_SECONDS:-10}
     depends_on:
-      mysql:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis-master:
         condition: service_healthy
     healthcheck:
@@ -74,6 +99,9 @@ services:
     build:
       context: .
       dockerfile: docker/web.Dockerfile
+    environment:
+      AUTH_RATE: ${AUTH_RATE:-10r/m}
+      AUTH_BURST: ${AUTH_BURST:-10}
     ports:
       - "8080:80"
     depends_on:
@@ -96,6 +124,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
       SMALL_QUEUE: ${SMALL_QUEUE:-}
+      STRICT_AUTH_RATE: ${STRICT_AUTH_RATE:-}
     depends_on:
       nginx:
         condition: service_healthy

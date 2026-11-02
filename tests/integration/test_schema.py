@@ -42,3 +42,24 @@ def test_deleting_a_room_cascades(room_and_member, db):
         for table in ("messages", "room_members", "room_invites"):
             cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE room_id=%s", (room_id,))
             assert cursor.fetchone()[0] == 0
+
+
+def test_flyway_applied_every_migration(db):
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT version, success FROM flyway_schema_history "
+            "WHERE version IS NOT NULL ORDER BY installed_rank"
+        )
+        rows = cursor.fetchall()
+    # V1 is either applied or recorded as the baseline of an older database.
+    assert [version for version, _ in rows] == ["1", "2"]
+    assert all(success for _, success in rows)
+
+
+def test_legacy_migration_table_is_gone(db):
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'"
+        )
+        assert cursor.fetchone()[0] == 0

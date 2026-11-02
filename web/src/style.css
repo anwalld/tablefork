@@ -105,6 +105,12 @@ button.link {
   color: var(--danger);
 }
 
+.hint {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
 .empty {
   color: var(--muted);
   padding: 16px;

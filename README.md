@@ -20,7 +20,23 @@ docker compose up -d --build --wait
 curl http://localhost:8080/health
 ```
 
-数据库结构来自 `migrations/`，只在 MySQL 数据卷为空时执行。清空全部数据：
+数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
+
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V3__add_ai_members.sql`。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+
+查看迁移状态，或在修正后清理失败记录：
+
+```bash
+docker compose run --rm migrate info
+```
+
+```bash
+docker compose run --rm migrate repair
+```
+
+Flyway 镜像只带 MariaDB 驱动，所以连接地址是 `jdbc:mariadb://`，它可以连接 MySQL 8.4，启动时会提示 8.4 比 Flyway 验证过的版本新，可以忽略。
+
+清空全部数据：
 
 ```bash
 docker compose down -v
@@ -37,6 +53,16 @@ scripts/test.sh
 ```
 
 脚本先在容器内运行单元测试，再启动完整环境并运行 `tests/integration` 下的集成测试。传给脚本的参数会交给 pytest，例如 `scripts/test.sh -k rooms`。
+
+注册时密码至少 10 个字符，不能与用户名相同，也不能是常见密码。常见密码列表在 `data/common-passwords.txt`，取自 [SecLists](https://github.com/danielmiessler/SecLists) 的 `Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt`（MIT 许可），只保留长度至少 10 的条目并转为小写。
+
+登录和注册由 Nginx 按客户端地址限流，默认每分钟 10 次，可以突发 10 次，超出返回 429 和 `rate_limited`，通过 `.env` 的 `AUTH_RATE` 和 `AUTH_BURST` 调整。
+
+应用还按用户名延迟登录，与客户端地址无关：每个用户名有 5 次免费尝试，之后要等 1、2、4 秒……最多 60 秒才能再试，期间返回 429 和 `too_many_attempts`，带 `retry_after`，不校验密码。登录成功会清零，15 分钟没有新尝试也会清零，不会锁号。登录成功的浏览器会收到 `chat_device` Cookie（180 天），之后这台浏览器单独计数，别人猜这个用户名不会拖慢它。这些数值都在 `.env` 的 `LOGIN_*` 和 `DEVICE_TTL_DAYS` 里。
+
+每个用户每 10 秒最多发 30 条消息，所有连接和房间合计，超出的消息返回 `rate_limited` 和 `retry_after`，不会保存，之后可以用同一个 `client_msg_id` 重发。数值在 `.env` 的 `MESSAGE_RATE_*` 里。
+
+测试会频繁注册、登录和发消息，所以脚本先放开 Nginx 和消息的限制、把登录计数的有效期缩短到 5 秒来运行全部测试，再用每 2 秒 5 条的消息限额测试消息限流，用默认值测试 Nginx 限流，最后按正常配置重启。
 
 队列满的测试需要极小的队列，默认跳过。单独运行时，环境变量要在两条命令中都生效：
 
@@ -109,6 +135,20 @@ docker compose --profile test run --rm tests python load_test.py <房间数> <�
 
 全部场景都没有错误。
 
+加入按用户的消息限流后（每条消息多一次 Redis 调用），2026-11-02 在同一台机器上、放宽限额重测两次，`WORKER_COUNT=16`：
+
+| 场景 | 吞吐 | p50 | p99 |
+|---|---|---|---|
+| 1 个房间，5 人发送，各 200 条 | 936 到 943 条/秒 | 5.0 ms | 10.4 到 10.7 ms |
+| 32 个房间，各 1 人发送，各 200 条 | 4604 到 4611 条/秒 | 6.6 ms | 11.7 到 11.8 ms |
+
+吞吐没有下降，反而比上表高，但两次测试时机器的负载不同，这个差别不能归因于代码，只能说明多出的 Redis 调用没有造成明显下降。压测时需要放宽限额：
+
+```bash
+export AUTH_RATE=100000r/m AUTH_BURST=100000 MESSAGE_RATE_LIMIT=100000
+docker compose up -d --wait
+```
+
 默认值：
 
 - `WORKER_COUNT=16`：测试过的配置里吞吐最高。`MYSQL_CONNECTIONS=24` 比它多 8 个连接，留给 HTTP 接口。
@@ -121,7 +161,7 @@ docker compose --profile test run --rm tests python load_test.py <房间数> <�
 |---|---|
 | `src/` | C++ 后端 |
 | `web/` | Vue 前端 |
-| `migrations/` | 数据库结构 |
+| `migrations/` | 数据库迁移，由 Flyway 执行 |
 | `docker/` | Nginx 配置和 Drogon 补丁 |
 | `tests/` | 单元测试和集成测试 |
 

@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 import time
 
 import pytest
@@ -35,10 +37,45 @@ def test_register_invalid_format(anon):
         ("ab", PASSWORD),
         ("x" * 33, PASSWORD),
         (unique_name(), "short"),
+        (unique_name(), "nine-char"),
     ]:
         response = register(anon, username, password)
         assert response.status_code == 400
         assert error_code(response) == "invalid_argument"
+
+
+def test_register_rejects_common_passwords(anon):
+    for password in ["password123", "QwertyUiop"]:
+        response = register(anon, unique_name(), password)
+        assert response.status_code == 400
+        assert error_code(response) == "weak_password"
+
+
+def test_register_rejects_the_username_as_password(anon):
+    name = unique_name() + "Ab"
+    response = register(anon, name, name.lower())
+    assert response.status_code == 400
+    assert error_code(response) == "weak_password"
+
+
+def scrypt_hash(password):
+    """The server's stored format: scrypt$<salt hex>$<key hex>."""
+    salt = secrets.token_bytes(16)
+    key = hashlib.scrypt(
+        password.encode(), salt=salt, n=1 << 15, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=32
+    )
+    return f"scrypt${salt.hex().upper()}${key.hex().upper()}"
+
+
+def test_accounts_with_older_short_passwords_still_log_in(anon, db):
+    name = unique_name()
+    assert register(anon, name).status_code == 201
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET password_hash=%s WHERE username=%s",
+            (scrypt_hash("8chars!!"), name),
+        )
+    assert login(anon, name, "8chars!!").status_code == 200
 
 
 def test_register_counts_characters_not_bytes(anon):

@@ -5,6 +5,7 @@
 
 #include "common/util.h"
 #include "services/password.h"
+#include "services/password_policy.h"
 
 namespace chat
 {
@@ -31,10 +32,12 @@ void validate(const std::string &username, const std::string &password)
             "username must be 3 to 32 printable characters");
     }
     const auto passwordLength = utf8Length(password);
-    if (!passwordLength || *passwordLength < 8 || password.size() > 1024)
+    if (!passwordLength || *passwordLength < 10 || password.size() > 1024)
     {
-        throw ApiError::invalidArgument("password must be at least 8 characters");
+        throw ApiError::invalidArgument(
+            "password must be at least 10 characters");
     }
+    PasswordPolicy::instance().check(username, password);
 }
 }  // namespace
 
