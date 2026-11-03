@@ -55,18 +55,19 @@ service AiGateway {
   rpc StoreKey(StoreKeyRequest) returns (StoreKeyReply);        // 验证、加密、保存
 }
 
-GatewayEvent（C++ -> Python），带 event_id：
-  MessageSaved    房间、seq、发送成员（类型、user_id、AI 标识）、内容、generation_id（AI 消息才有）、
-                  房间快照（人类成员的 user_id 列表、AI 成员的标识、member_id、服务商）
-  MembersChanged  房间快照（AI 被邀请或移出、人加入或退出时）
-  RoomDeleted     房间 id
+GatewayEvent（C++ -> Python），带 instance_id 和 event_id：
+  MessageSaved        房间、seq、发送成员（类型、user_id、AI 标识）、内容、generation_id（AI 消息才有）、
+                      房间快照（人类成员的 member_id 和 user_id、AI 成员的标识、member_id、服务商）
+  MembersChanged      房间快照（AI 被邀请或移出、人加入或退出时）
+  RoomDeleted         房间 id
+  GenerationRejected  房间 id、generation_id（Final 因房间或 AI 成员已失效而无法保存，见 D17）
 
 AiAction（Python -> C++）：
   Ack       event_id
-  Chunk     room_id、generation_id、ai_member_id、文本片段
+  Chunk     room_id、generation_id、ai_member_id、文本增量、attempt、sequence、累计快照（见 D17）
   Final     room_id、generation_id、ai_member_id、完整内容
-  Failed    room_id、generation_id、ai_member_id、通知对象 user_id、原因
-  Notice    room_id、通知对象 user_id、代码（如 api_key_required）、服务商
+  Failed    room_id、generation_id、ai_member_id、通知对象 member_id、代码、原因
+  Notice    room_id、通知对象 member_id、代码（如 api_key_required）、服务商
 ```
 
 - 每个事件都带上房间快照，Python 不需要回查房间成员，也就不需要访问房间表。

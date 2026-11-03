@@ -193,7 +193,8 @@ async def test_messages_during_a_generation_are_answered_once():
     assert finals[1].content.endswith("three")
 
 
-async def test_timeout_fails_without_retry():
+async def test_timeout_fails_once_attempts_run_out():
+    # The harness allows one attempt; retries have their own tests.
     h = Harness(generation_timeout=0.2)
     await h.human_says(ALICE, "#slow please", [ALICE], [CLAUDE])
     await h.settle()
