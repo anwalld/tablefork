@@ -58,9 +58,9 @@ class KeyStore:
             await cursor.execute(
                 # Binary values go as hex: aiomysql 0.3 cannot escape bytes.
                 "INSERT INTO user_api_keys (user_id, provider, ciphertext, nonce, last4) "
-                "VALUES (%s, %s, UNHEX(%s), UNHEX(%s), %s) "
-                "ON DUPLICATE KEY UPDATE ciphertext = VALUES(ciphertext), "
-                "nonce = VALUES(nonce), last4 = VALUES(last4)",
+                "VALUES (%s, %s, UNHEX(%s), UNHEX(%s), %s) AS new "
+                "ON DUPLICATE KEY UPDATE ciphertext = new.ciphertext, "
+                "nonce = new.nonce, last4 = new.last4",
                 (user_id, provider, ciphertext.hex(), nonce.hex(), last4),
             )
             await connection.commit()

@@ -56,6 +56,13 @@ docker compose down -v
 
 修改已有环境的 `MYSQL_PASSWORD` 或 `MYSQL_ROOT_PASSWORD` 时，只改 `.env` 不够，MySQL 的密码保存在数据卷里，要同时用 `ALTER USER` 修改。`AI_MYSQL_PASSWORD` 例外：`db-users` 服务每次启动都会用 root 把 `ai` 账号的密码同步成 `.env` 里的值。
 
+## 会话与受信任设备
+
+- 会话默认 7 天（`SESSION_TTL_SECONDS`）。登出或会话过期后，已打开页面的 WebSocket 会以关闭码 `4401` 断开，前端回到登录页：登出时立即断开，过期时在 `SESSION_CHECK_SECONDS`（默认 30 秒）内断开。
+- 每个用户最多有一台受信任的手机和一台受信任的电脑（按浏览器的 User-Agent 判断，平板算手机）。某类的第一台设备登录后直接受信任；之后另一台同类设备最近 30 天发的消息超过原设备的 1.5 倍时，它在登录或续期时替换原设备。
+- 从受信任设备登出会结束这个用户在所有设备上的会话；从其他设备登出只结束当前会话。
+- 受信任设备的前端每 6 小时调用一次 `POST /api/auth/refresh`，会话不会过期；其他设备的会话照常 7 天过期。
+
 ## AI
 
 ### 密钥和账号
@@ -127,6 +134,24 @@ docker compose --profile test run --rm tests pytest -q test_faults.py -k full_qu
 unset WORKER_COUNT WORKER_QUEUE_LIMIT SMALL_QUEUE
 docker compose up -d --wait app
 ```
+
+### 清理测试数据
+
+集成测试会在数据库里留下大量测试账号和房间。用下面的命令清理，默认只预演并打印数量：
+
+```bash
+docker compose --profile test run --rm tests python cleanup_test_data.py
+```
+
+确认数量后加 `--apply` 才真正删除，全部在一个事务里完成：
+
+```bash
+docker compose --profile test run --rm tests python cleanup_test_data.py --apply
+```
+
+- 默认匹配测试生成的用户名：`u` 加 12 位十六进制，或 `用户u` 加 5 位十六进制。
+- 其他前缀用 `--prefix` 加入（可重复），`--exclude` 排除前缀，默认排除 `realtest_`。
+- 成员全是待删用户的房间整间删除；共享房间里只删待删用户的消息和成员关系，待删用户是群主时，群主转给最早加入的其他人类成员。
 
 ## CLion 开发
 

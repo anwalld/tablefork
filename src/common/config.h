@@ -21,6 +21,8 @@ struct Config
     size_t redisConnections;
 
     int sessionTtlSeconds;
+    // How often each instance checks that its connections' sessions still exist.
+    double sessionCheckSeconds;
     bool cookieSecure;
     std::vector<std::string> allowedOrigins;
 

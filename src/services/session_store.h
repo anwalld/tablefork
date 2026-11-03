@@ -6,6 +6,7 @@
 #include <drogon/utils/coroutine.h>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace chat
 {
@@ -14,6 +15,10 @@ struct Session
     int64_t userId;
     int64_t memberId;
     std::string username;
+    // The device the session was created on (SHA-256 of its device token)
+    // and its kind; empty for sessions from before devices were recorded.
+    std::string device{};
+    std::string deviceKind{};
 };
 
 inline constexpr const char *kSessionCookie = "chat_session";
@@ -26,6 +31,22 @@ class SessionStore
     static drogon::Task<std::string> create(const Session &session);
     static drogon::Task<std::optional<Session>> find(const std::string &token);
     static drogon::Task<> remove(const std::string &token);
+
+    // The Redis key of a token's session; connections are tracked by it.
+    static std::string keyFor(const std::string &token);
+
+    // Ends the session behind token, or every session of its user when
+    // everywhere is set, and announces each ended session key on the
+    // sessions:ended channel so that every instance drops its connections.
+    static drogon::Task<std::vector<std::string>> end(const Session &session,
+                                                      const std::string &token,
+                                                      bool everywhere);
+
+    // Restarts the session's lifetime without changing its token. False when
+    // the session has already ended.
+    static drogon::Task<bool> extend(const Session &session, const std::string &token);
+
+    static constexpr const char *kEndedChannel = "sessions:ended";
 
     // The session behind the request's cookie, or ApiError::unauthenticated().
     static drogon::Task<Session> require(const drogon::HttpRequestPtr &req);

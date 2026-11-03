@@ -1,12 +1,15 @@
 const ACK_TIMEOUT_MS = 5000
 const MAX_ATTEMPTS = 4
 const MAX_BACKOFF_MS = 10000
+// The server closes with this code when the session has ended (logged out or
+// expired). Reconnecting would only be refused, so the client stops.
+export const SESSION_ENDED = 4401
 
 // The WebSocket connection: reconnects, resubscribes, and resends unacknowledged
 // messages with their original client_msg_id so that the server can deduplicate.
 export class ChatSocket {
-  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent }) {
-    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent }
+  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent, onSessionEnded }) {
+    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent, onSessionEnded }
     this.rooms = new Set()
     this.pending = new Map()
     this.backoff = 500
@@ -24,9 +27,14 @@ export class ChatSocket {
       for (const entry of this.pending.values()) this.transmit(entry)
     }
     this.ws.onmessage = (event) => this.dispatch(JSON.parse(event.data))
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
       this.handlers.onStatus(false)
       if (this.closed) return
+      if (event?.code === SESSION_ENDED) {
+        this.closed = true
+        this.handlers.onSessionEnded?.()
+        return
+      }
       setTimeout(() => this.connect(), this.backoff)
       this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF_MS)
     }

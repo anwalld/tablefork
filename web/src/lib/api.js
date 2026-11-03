@@ -36,6 +36,7 @@ export const api = {
   login: (username, password) =>
     request('POST', '/api/auth/login', { username, password }),
   logout: () => request('POST', '/api/auth/logout'),
+  refresh: () => request('POST', '/api/auth/refresh'),
 
   rooms: (limit, offset) => request('GET', `/api/rooms?limit=${limit}&offset=${offset}`),
   createRoom: (name) => request('POST', '/api/rooms', { name }),

@@ -9,6 +9,7 @@
 #include "common/config.h"
 #include "common/util.h"
 #include "services/password_policy.h"
+#include "ws/session_watcher.h"
 
 namespace
 {
@@ -67,6 +68,8 @@ int main()
                            config.redisConnections,
                            false,
                            2.0)
+        // Redis clients exist only once the app runs.
+        .registerBeginningAdvice([] { chat::SessionWatcher::instance().start(); })
         .setExceptionHandler([](const std::exception &e,
                                 const drogon::HttpRequestPtr &req,
                                 std::function<void(const drogon::HttpResponsePtr &)>

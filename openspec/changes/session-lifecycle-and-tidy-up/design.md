@@ -84,13 +84,14 @@ POST /api/auth/refresh
 docker compose --profile test run --rm tests python cleanup_test_data.py [--apply] [--prefix owner_ ...]
 ```
 
-- 默认匹配集成测试的用户名 `^u[0-9a-f]{12}$`；`--prefix` 追加前缀匹配；`--exclude` 排除用户名（默认排除 `realtest_` 开头的账号）。
+- 默认匹配集成测试生成的用户名：`^u[0-9a-f]{12}$`，以及“按字符计数”测试生成的 `^用户u[0-9a-f]{5}$`；`--prefix` 追加前缀匹配；`--exclude` 排除用户名（默认排除 `realtest_` 开头的账号）；`--only-prefixes` 跳过默认规则，只按前缀匹配（脚本自己的测试用它，避免误删并发运行的其他测试的数据）。
+- 开始时显式开启事务：即使调用方的连接开着自动提交，预演也一定会回滚。
 - 在一个事务里，按外键顺序：
   1. 成员全是待删用户（以及 AI）的房间：整间删除，消息、成员关系、邀请和 AI 申请级联删除。
   2. 其余房间里：删除待删成员发的消息、成员关系、待删用户收到的邀请、待删成员提交的 AI 申请。
   3. 待删用户是其余某个房间的群主时，把群主转给该房间最早加入的其余人类成员。
   4. 删除待删成员和用户（API key 级联删除）。
-- 提交后清理 Redis 中被删房间的热缓存和 AI 状态（`room:{id}:recent`、`ai:room:{id}`），以及被删用户的受信任表和会话索引（`trusted:{id}`、`user_sessions:{id}`）。会话键本身让它们自然过期。
+- 提交后清理 Redis：被删房间和“删过消息的共享房间”的热缓存（否则历史查询会从缓存里读到已删的消息）、被删房间的 AI 状态和计时器（`ai:room:{id}`、`ai:timers`、`ai:work`）、被删用户的受信任表和会话索引（`trusted:{id}`、`user_sessions:{id}`）。会话键本身让它们自然过期。
 - 不带 `--apply` 时只打印每一步的数量，然后回滚。
 
 ### D6 小的遗留
@@ -119,6 +120,7 @@ docker compose --profile test run --rm tests python cleanup_test_data.py [--appl
 
 - 登出时：会话的设备 == 受信任表中该类型的设备 -> 结束全部会话；否则只结束当前会话。
 - 登录延迟的设备豁免（上一阶段）不变：任何登录过的设备都有自己的失败计数，与是否受信任无关。
+- Lua 脚本在脚本内部拼接 `device_sends:*` 键名，不兼容 Redis Cluster；当前是单主 Redis，换成 Cluster 时要改为由调用方传入全部键。
 - 为什么把设备记进会话：WebSocket 收不到设备 Cookie（它只在 `/api/auth` 下发送），发消息时只能从会话里找到设备。这样设备 Cookie 的作用范围不用扩大。
 
 ## Risks / Trade-offs
