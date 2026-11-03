@@ -99,6 +99,7 @@ services:
       DEVICE_TTL_DAYS: ${DEVICE_TTL_DAYS:-180}
       MESSAGE_RATE_LIMIT: ${MESSAGE_RATE_LIMIT:-30}
       MESSAGE_RATE_WINDOW_SECONDS: ${MESSAGE_RATE_WINDOW_SECONDS:-10}
+      SESSION_CHECK_SECONDS: ${SESSION_CHECK_SECONDS:-30}
       # The app runs without the AI service and connects when it appears.
       AI_GATEWAY: ai:50051
       AI_GRPC_TOKEN: ${AI_GRPC_TOKEN:?set it in .env, see .env.example}

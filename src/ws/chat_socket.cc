@@ -6,12 +6,14 @@
 
 #include "ai/ai_events.h"
 #include "common/util.h"
+#include "services/device_trust.h"
 #include "services/message_rate_limiter.h"
 #include "services/message_service.h"
 #include "services/room_service.h"
 #include "services/room_worker_pool.h"
 #include "services/session_store.h"
 #include "ws/room_hub.h"
+#include "ws/session_watcher.h"
 
 namespace chat
 {
@@ -103,6 +105,7 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
                 {
                     co_await MessageService::distribute(message);
                     co_await reportMessage(message);
+                    co_await DeviceTrust::countSend(session->device);
                 }
             });
     };
@@ -141,6 +144,8 @@ void ChatSocket::handleNewConnection(
     connection->setContext(std::make_shared<SocketContext>(
         SocketContext{req->attributes()->get<Session>("session"),
                       req->getCookie(kSessionCookie)}));
+    SessionWatcher::instance().add(connection,
+                                   SessionStore::keyFor(req->getCookie(kSessionCookie)));
     connection->setPingMessage("", std::chrono::seconds(30));
 }
 
@@ -189,5 +194,6 @@ void ChatSocket::handleConnectionClosed(
     const drogon::WebSocketConnectionPtr &connection)
 {
     RoomHub::instance().removeConnection(connection);
+    SessionWatcher::instance().remove(connection);
 }
 }  // namespace chat

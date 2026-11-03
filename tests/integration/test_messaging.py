@@ -1,8 +1,10 @@
+import hashlib
 import threading
 import time
 import uuid
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 from websockets.exceptions import InvalidStatus
 
 from conftest import CONFIRM_DELETE, ORIGIN, Socket, error_code
@@ -97,12 +99,31 @@ def test_send_to_deleted_room(make_user, make_room, make_socket):
     assert socket.post(room_id)["error"]["code"] == "room_not_found"
 
 
-def test_send_after_logout_is_unauthenticated(make_user, make_room, make_socket):
+def test_logout_closes_the_connection(make_user, make_room, make_socket):
     user = make_user()
     room_id = make_room(user)
     socket = make_socket(user)
     user.post("/api/auth/logout")
-    assert socket.post(room_id)["error"]["code"] == "unauthenticated"
+    with pytest.raises(ConnectionClosed) as closed:
+        socket.post(room_id)
+    assert closed.value.rcvd.code == 4401
+
+
+def test_send_after_the_session_ended_is_unauthenticated(make_user, make_room, make_socket, redis):
+    # A session that expired is noticed by the next periodic check; until
+    # then every message is still checked on its own.
+    user = make_user()
+    room_id = make_room(user)
+    socket = make_socket(user)
+    token = user.session.cookies.get("chat_session")
+    # Keep the periodic check (MGET) from closing the socket first.
+    redis.execute_command("ACL", "SETUSER", "default", "-mget")
+    try:
+        redis.delete("session:" + hashlib.sha256(token.encode()).hexdigest().upper())
+        reply = socket.post(room_id)
+    finally:
+        redis.execute_command("ACL", "SETUSER", "default", "+mget")
+    assert reply["error"]["code"] == "unauthenticated"
 
 
 def test_malformed_frame_gets_an_error(make_user, make_socket):

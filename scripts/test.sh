@@ -30,10 +30,11 @@ ai_test_env() {
 
 (
     export AUTH_RATE=100000r/m AUTH_BURST=100000 LOGIN_FAIL_TTL_SECONDS=5
-    export MESSAGE_RATE_LIMIT=100000 AI_CHAIN_P=0
+    export MESSAGE_RATE_LIMIT=100000 AI_CHAIN_P=0 SESSION_CHECK_SECONDS=1
     ai_test_env
     docker compose up -d --build --wait
-    docker compose --profile test run --rm -e SHORT_LOGIN_TTL=5 -e AI_TESTS=1 tests pytest -q "$@"
+    docker compose --profile test run --rm -e SHORT_LOGIN_TTL=5 -e AI_TESTS=1 \
+        -e SHORT_SESSION_CHECK=1 tests pytest -q "$@"
 
     run_phase() {
         docker compose --profile test run --rm -e AI_PHASE="$1" tests pytest -q test_ai_faults.py
@@ -67,6 +68,7 @@ ai_test_env() {
         pytest -q test_message_rate.py \
             test_ai_replies.py::test_ais_pick_up_each_other \
             test_ai_replies.py::test_ai_replies_do_not_use_up_the_users_limit \
+            test_sessions.py::test_refresh_is_not_rate_limited_by_nginx \
             test_auth.py::test_auth_attempts_are_rate_limited
 )
 

@@ -15,7 +15,7 @@ import SettingsDialog from './SettingsDialog.vue'
 const ROOM_POLL_MS = 10000
 
 const props = defineProps({ user: { type: Object, required: true } })
-defineEmits(['logout'])
+const emit = defineEmits(['logout', 'session-ended'])
 
 const rooms = ref([])
 const activeId = ref(null)
@@ -88,6 +88,8 @@ function streamFor(roomId) {
 }
 
 const socket = new ChatSocket({
+  // Logged out elsewhere or expired: back to the login screen.
+  onSessionEnded: () => emit('session-ended'),
   onStatus: (up) => {
     connected.value = up
     if (!up) {

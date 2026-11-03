@@ -41,6 +41,7 @@ Config load()
     c.redisConnections = envOr("REDIS_CONNECTIONS", 4L);
 
     c.sessionTtlSeconds = static_cast<int>(envOr("SESSION_TTL_SECONDS", 604800L));
+    c.sessionCheckSeconds = static_cast<double>(positiveOr(std::getenv("SESSION_CHECK_SECONDS"), 30));
     c.cookieSecure = envOr("COOKIE_SECURE", 0L) != 0;
     c.allowedOrigins = drogon::utils::splitString(
         envOr("ALLOWED_ORIGINS", "http://localhost:8080"), ",");

@@ -26,9 +26,9 @@ class FakeWebSocket {
     this.onopen()
   }
 
-  drop() {
+  drop(code = 1006) {
     this.readyState = 3
-    this.onclose()
+    this.onclose({ code })
   }
 
   reply(frame) {
@@ -47,6 +47,7 @@ function makeSocket() {
     onThrottled: vi.fn(),
     onStatus: vi.fn(),
     onEvent: vi.fn(),
+    onSessionEnded: vi.fn(),
   }
   return { socket: new ChatSocket(handlers), handlers }
 }
@@ -150,6 +151,26 @@ describe('ChatSocket', () => {
     latest().reply({ type: 'role_changed', room_id: 7, member_id: 2, role: 'admin' })
     expect(handlers.onEvent.mock.calls.map(([frame]) => frame.type)).toEqual(['ai_chunk', 'role_changed'])
     expect(handlers.onEvent).toHaveBeenCalledWith(chunk)
+    socket.close()
+  })
+
+  it('stops for good when the session has ended', async () => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    latest().drop(4401)
+    expect(handlers.onSessionEnded).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(FakeWebSocket.all).toHaveLength(1)
+    socket.close()
+  })
+
+  it('reconnects after an ordinary close', async () => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    latest().drop(1006)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(FakeWebSocket.all).toHaveLength(2)
+    expect(handlers.onSessionEnded).not.toHaveBeenCalled()
     socket.close()
   })
 
