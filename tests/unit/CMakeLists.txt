@@ -1,5 +1,6 @@
 add_executable(chat-unit-tests
     main.cc
+    ai_gateway_test.cc
     errors_test.cc
     login_limiter_test.cc
     message_rate_limiter_test.cc

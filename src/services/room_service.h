@@ -4,6 +4,7 @@
 #include <drogon/utils/coroutine.h>
 #include <json/json.h>
 #include <string>
+#include <vector>
 
 #include "services/session_store.h"
 
@@ -27,6 +28,24 @@ class RoomService
                                     int64_t roomId,
                                     bool confirmDelete);
     static drogon::Task<Json::Value> members(Session session, int64_t roomId);
+
+    // Makes another human member the owner; the caller, who must be the
+    // owner, becomes an ordinary member. Returns the new owner's member id.
+    static drogon::Task<int64_t> transferOwner(Session session,
+                                               int64_t roomId,
+                                               std::string username);
+    // Appoints or dismisses an admin; only the owner may. Returns the
+    // member's id.
+    static drogon::Task<int64_t> setAdmin(Session session,
+                                          int64_t roomId,
+                                          std::string username,
+                                          bool admin);
+    // The caller's role, or ApiError::roomNotFound() for a non-member and
+    // ApiError::forbidden() when the role is not one of those allowed.
+    static drogon::Task<std::string> requireRole(
+        int64_t memberId,
+        int64_t roomId,
+        std::vector<std::string> allowed);
     // The room's last_seq, or ApiError::roomNotFound() for a non-member.
     static drogon::Task<int64_t> requireMember(int64_t memberId, int64_t roomId);
 };

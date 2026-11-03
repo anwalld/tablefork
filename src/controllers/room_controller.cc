@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "ai/ai_events.h"
 #include "common/util.h"
 #include "services/message_service.h"
 #include "services/room_service.h"
@@ -21,6 +22,16 @@ int64_t pageLimit(const drogon::HttpRequestPtr &req)
         throw ApiError::invalidArgument("limit must be 1 to 100");
     }
     return limit;
+}
+
+drogon::Task<> announceRole(int64_t roomId, int64_t memberId, const char *role)
+{
+    Json::Value event;
+    event["type"] = "role_changed";
+    event["room_id"] = Json::Int64(roomId);
+    event["member_id"] = Json::Int64(memberId);
+    event["role"] = role;
+    co_await RoomHub::instance().publish(roomId, toJsonString(event));
 }
 }  // namespace
 
@@ -53,7 +64,9 @@ RoomController::Response RoomController::join(drogon::HttpRequestPtr req,
                                               std::string roomId)
 {
     const auto session = co_await SessionStore::require(req);
-    co_await RoomService::join(session, parseRoomId(roomId));
+    const auto id = parseRoomId(roomId);
+    co_await RoomService::join(session, id);
+    co_await reportMembersChanged(id);
     co_return jsonResponse(Json::objectValue);
 }
 
@@ -72,6 +85,11 @@ RoomController::Response RoomController::leave(drogon::HttpRequestPtr req,
         roomWorkers().submitUnbounded(id, [id]() -> drogon::Task<> {
             co_await MessageService::dropCache(id);
         });
+        reportRoomDeleted(id);
+    }
+    else
+    {
+        co_await reportMembersChanged(id);
     }
     co_await RoomHub::instance().removeMember(id, session.memberId);
     Json::Value body;
@@ -85,6 +103,43 @@ RoomController::Response RoomController::members(drogon::HttpRequestPtr req,
     const auto session = co_await SessionStore::require(req);
     co_return jsonResponse(
         co_await RoomService::members(session, parseRoomId(roomId)));
+}
+
+RoomController::Response RoomController::transferOwner(drogon::HttpRequestPtr req,
+                                                       std::string roomId)
+{
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto owner = co_await RoomService::transferOwner(
+        session, id, stringField(jsonBody(req), "username"));
+    if (owner != session.memberId)
+    {
+        co_await announceRole(id, session.memberId, "member");
+        co_await announceRole(id, owner, "owner");
+    }
+    co_return jsonResponse(Json::objectValue);
+}
+
+RoomController::Response RoomController::appointAdmin(drogon::HttpRequestPtr req,
+                                                      std::string roomId,
+                                                      std::string username)
+{
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto member = co_await RoomService::setAdmin(session, id, username, true);
+    co_await announceRole(id, member, "admin");
+    co_return jsonResponse(Json::objectValue);
+}
+
+RoomController::Response RoomController::dismissAdmin(drogon::HttpRequestPtr req,
+                                                      std::string roomId,
+                                                      std::string username)
+{
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto member = co_await RoomService::setAdmin(session, id, username, false);
+    co_await announceRole(id, member, "member");
+    co_return jsonResponse(Json::objectValue);
 }
 
 RoomController::Response RoomController::messages(drogon::HttpRequestPtr req,

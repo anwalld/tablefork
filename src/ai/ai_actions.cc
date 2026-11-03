@@ -1,0 +1,124 @@
+#include "ai/ai_actions.h"
+
+#include <drogon/drogon.h>
+#include <optional>
+
+#include "ai/ai_events.h"
+#include "common/util.h"
+#include "services/message_service.h"
+#include "services/room_worker_pool.h"
+#include "ws/room_hub.h"
+
+namespace chat
+{
+namespace
+{
+drogon::Task<> publish(int64_t roomId, Json::Value event)
+{
+    event["room_id"] = Json::Int64(roomId);
+    co_await RoomHub::instance().publish(roomId, toJsonString(event));
+}
+
+Json::Value failedEvent(int64_t roomId, const std::string &generationId, int64_t aiMemberId)
+{
+    Json::Value event;
+    event["type"] = "ai_failed";
+    event["generation_id"] = generationId;
+    event["member_id"] = Json::Int64(aiMemberId);
+    return event;
+}
+
+Json::Value noticeEvent(int64_t memberId,
+                        const std::string &code,
+                        const std::string &provider,
+                        const std::string &message)
+{
+    Json::Value event;
+    event["type"] = "ai_notice";
+    event["code"] = code;
+    if (!provider.empty())
+    {
+        event["provider"] = provider;
+    }
+    event["message"] = message;
+    event["only_member_ids"].append(Json::Int64(memberId));
+    return event;
+}
+
+drogon::Task<> onChunk(ai::Chunk chunk)
+{
+    Json::Value event;
+    event["type"] = "ai_chunk";
+    event["generation_id"] = chunk.generation_id();
+    event["member_id"] = Json::Int64(chunk.ai_member_id());
+    event["text"] = chunk.text();
+    co_await publish(chunk.room_id(), std::move(event));
+}
+
+void onFinal(ai::Final final)
+{
+    const auto roomId = final.room_id();
+    // Through the room's worker, like a human's message, so seqs stay in
+    // order with everything else sent to the room.
+    roomWorkers().submitUnbounded(roomId, [final = std::move(final)]() -> drogon::Task<> {
+        std::optional<StoredMessage> message;
+        try
+        {
+            message = co_await MessageService::saveAiMessage(
+                final.ai_member_id(), final.room_id(), final.generation_id(), final.content());
+        }
+        catch (const std::exception &e)
+        {
+            // The AI was removed or the room deleted meanwhile.
+            LOG_INFO << "AI reply not stored: " << e.what();
+        }
+        if (!message)
+        {
+            co_await publish(final.room_id(),
+                             failedEvent(final.room_id(), final.generation_id(), final.ai_member_id()));
+        }
+        else if (!message->duplicate)
+        {
+            co_await MessageService::distribute(*message);
+            co_await reportMessage(*message);
+        }
+    });
+}
+
+drogon::Task<> onFailed(ai::Failed failed)
+{
+    co_await publish(failed.room_id(),
+                     failedEvent(failed.room_id(), failed.generation_id(), failed.ai_member_id()));
+    co_await publish(failed.room_id(),
+                     noticeEvent(failed.notify_member_id(), failed.code(), "", failed.message()));
+}
+
+drogon::Task<> onNotice(ai::Notice notice)
+{
+    co_await publish(notice.room_id(),
+                     noticeEvent(notice.notify_member_id(), notice.code(), notice.provider(),
+                                 notice.message()));
+}
+}  // namespace
+
+void handleAiAction(ai::AiAction action)
+{
+    switch (action.body_case())
+    {
+        case ai::AiAction::kChunk:
+            drogon::async_run([chunk = action.chunk()]() -> drogon::Task<> { co_await onChunk(chunk); });
+            break;
+        case ai::AiAction::kFinal:
+            onFinal(action.final());
+            break;
+        case ai::AiAction::kFailed:
+            drogon::async_run([failed = action.failed()]() -> drogon::Task<> { co_await onFailed(failed); });
+            break;
+        case ai::AiAction::kNotice:
+            drogon::async_run([notice = action.notice()]() -> drogon::Task<> { co_await onNotice(notice); });
+            break;
+        default:
+            break;
+    }
+}
+}  // namespace chat

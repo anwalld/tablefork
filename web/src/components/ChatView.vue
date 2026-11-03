@@ -1,12 +1,16 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api, ApiError } from '../lib/api.js'
+import { AiDrafts } from '../lib/ai-drafts.js'
 import { ChatSocket } from '../lib/chat-socket.js'
 import { leave, prepareLeave } from '../lib/leave.js'
+import { insertMention, matchingAis, mentionQuery } from '../lib/mentions.js'
 import { RoomStream } from '../lib/room-stream.js'
 import { fetchAllRooms } from '../lib/rooms.js'
 import { exportRoom } from '../lib/transcript.js'
 import LeaveDialog from './LeaveDialog.vue'
+import MembersPanel from './MembersPanel.vue'
+import SettingsDialog from './SettingsDialog.vue'
 
 const ROOM_POLL_MS = 10000
 
@@ -24,6 +28,18 @@ const messagesEl = ref(null)
 const leaving = shallowRef(null)
 const leaveBusy = ref(false)
 
+const members = ref([])
+const showMembers = ref(false)
+const showSettings = ref(false)
+const requestEvent = shallowRef(null)
+const membersPanel = ref(null)
+const composerEl = ref(null)
+const caret = ref(0)
+
+// AI replies still being generated, shown below the timeline.
+const drafts = new AiDrafts()
+const draftRevision = ref(0)
+
 const streams = new Map()
 // Messages not yet confirmed, by room: { clientMsgId, content, failed, throttled }.
 const outbox = reactive(new Map())
@@ -36,6 +52,16 @@ const timeline = computed(() => {
   const stream = streams.get(activeId.value)
   return stream ? stream.messages : []
 })
+
+const aiDrafts = computed(() => {
+  void draftRevision.value
+  return drafts.forRoom(activeId.value).map((d) => ({
+    ...d,
+    name: members.value.find((m) => m.id === d.memberId)?.name ?? 'AI',
+  }))
+})
+
+const suggestions = computed(() => matchingAis(members.value, mentionQuery(draft.value, caret.value)))
 
 const pending = computed(() => {
   const confirmed = new Set(timeline.value.map((m) => m.client_msg_id))
@@ -57,7 +83,14 @@ function streamFor(roomId) {
 
 const socket = new ChatSocket({
   onStatus: (up) => (connected.value = up),
-  onMessage: (message) => streamFor(message.room_id).receive(message),
+  onMessage: (message) => {
+    if (message.generation_id) {
+      drafts.close(message.generation_id)
+      draftRevision.value++
+    }
+    streamFor(message.room_id).receive(message)
+  },
+  onEvent: (frame) => onRoomEvent(frame),
   // Subscribing first and reading history second means nothing can fall
   // between the two.
   onSubscribed: (roomId) => loadRoom(roomId),
@@ -78,6 +111,52 @@ const socket = new ChatSocket({
     if (entry) entry.throttled = true
   },
 })
+
+function onRoomEvent(frame) {
+  const here = frame.room_id === activeId.value
+  if (frame.type === 'ai_chunk') {
+    drafts.chunk(frame)
+    draftRevision.value++
+  } else if (frame.type === 'ai_failed') {
+    drafts.close(frame.generation_id)
+    draftRevision.value++
+  } else if (frame.type === 'ai_notice') {
+    notice.value = frame.message
+  } else if (frame.type === 'role_changed' || frame.type === 'members_changed') {
+    if (here) loadMembers()
+  } else if (frame.type === 'ai_request') {
+    if (here) requestEvent.value = frame
+    notice.value = '有成员申请邀请 AI，等待你审批'
+  } else if (frame.type === 'ai_request_done') {
+    notice.value = frame.approved ? 'AI 邀请已获批准' : 'AI 邀请被拒绝'
+  }
+}
+
+async function loadMembers() {
+  const room = activeRoom.value
+  if (!room || room.status !== 'joined') {
+    members.value = []
+    return
+  }
+  try {
+    members.value = (await api.members(room.id)).members
+  } catch {
+    members.value = []
+  }
+}
+
+function trackCaret(event) {
+  caret.value = event.target.selectionStart ?? draft.value.length
+}
+
+async function chooseMention(member) {
+  const result = insertMention(draft.value, caret.value, member.name)
+  draft.value = result.text
+  caret.value = result.caret
+  await nextTick()
+  composerEl.value?.setSelectionRange(result.caret, result.caret)
+  composerEl.value?.focus()
+}
 
 async function loadRoom(roomId) {
   const stream = streamFor(roomId)
@@ -189,6 +268,11 @@ function retry(entry) {
 }
 
 function onKeydown(event) {
+  if (event.key === 'Tab' && suggestions.value.length) {
+    event.preventDefault()
+    chooseMention(suggestions.value[0])
+    return
+  }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault()
     send()
@@ -221,8 +305,14 @@ async function confirmLeave() {
       forgetRoom(room.id)
       await refreshRooms()
     }
-  } catch {
-    notice.value = '退出失败，请重试'
+  } catch (e) {
+    if (e.code === 'owner_must_transfer') {
+      leaving.value = null
+      showMembers.value = true
+      notice.value = '你是群主，请先在成员列表里把群主转让给别人'
+    } else {
+      notice.value = '退出失败，请重试'
+    }
   } finally {
     leaveBusy.value = false
   }
@@ -245,6 +335,8 @@ watch([timeline, pending], async () => {
   }
 })
 
+watch(() => [activeId.value, activeRoom.value?.status], loadMembers)
+
 watch(notice, (text) => {
   if (text) setTimeout(() => notice.value === text && (notice.value = ''), 4000)
 })
@@ -265,6 +357,7 @@ onBeforeUnmount(() => {
     <aside class="sidebar">
       <header class="sidebar-head">
         <strong>{{ user.username }}</strong>
+        <button class="link" @click="showSettings = true">设置</button>
         <button class="link" @click="$emit('logout')">退出登录</button>
       </header>
       <form class="inline-form" @submit.prevent="createRoom">
@@ -296,6 +389,9 @@ onBeforeUnmount(() => {
               <input v-model="inviteName" placeholder="邀请用户名" aria-label="邀请用户名" />
               <button>邀请</button>
             </form>
+            <button :class="{ active: showMembers }" @click="showMembers = !showMembers">
+              成员 {{ members.length }}
+            </button>
             <button @click="exportActive">导出</button>
             <button class="danger" @click="startLeave">退出房间</button>
           </template>
@@ -322,6 +418,13 @@ onBeforeUnmount(() => {
               </div>
               <p class="bubble">{{ message.content }}</p>
             </article>
+            <article v-for="d in aiDrafts" :key="d.id" class="message pending">
+              <div class="meta">
+                <span>{{ d.name }}</span>
+                <span>正在输入</span>
+              </div>
+              <p class="bubble">{{ d.text }}</p>
+            </article>
             <article v-for="entry in pending" :key="entry.clientMsgId" class="message mine pending">
               <div class="meta">
                 <span v-if="entry.failed" class="error">发送失败</span>
@@ -334,12 +437,21 @@ onBeforeUnmount(() => {
           </div>
 
           <form class="composer" @submit.prevent="send">
+            <ul v-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及 AI">
+              <li v-for="member in suggestions" :key="member.id">
+                <button type="button" class="link" @click="chooseMention(member)">@{{ member.name }}</button>
+              </li>
+            </ul>
             <textarea
+              ref="composerEl"
               v-model="draft"
               rows="2"
-              placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+              placeholder="输入消息，Enter 发送，Shift + Enter 换行，@ 提及 AI"
               aria-label="消息内容"
               @keydown="onKeydown"
+              @keyup="trackCaret"
+              @click="trackCaret"
+              @input="trackCaret"
             />
             <button class="primary">发送</button>
           </form>
@@ -350,6 +462,25 @@ onBeforeUnmount(() => {
       <p v-if="!connected" class="banner" role="status">连接已断开，正在重连</p>
       <p v-if="notice" class="toast" role="status">{{ notice }}</p>
     </main>
+
+    <MembersPanel
+      v-if="showMembers && activeRoom?.status === 'joined'"
+      ref="membersPanel"
+      :room-id="activeRoom.id"
+      :me="user"
+      :members="members"
+      :request-event="requestEvent"
+      @changed="loadMembers"
+      @notice="notice = $event"
+      @open-settings="showSettings = true"
+      @close="showMembers = false"
+    />
+
+    <SettingsDialog
+      v-if="showSettings"
+      @close="showSettings = false"
+      @changed="membersPanel?.loadAgents()"
+    />
 
     <LeaveDialog
       v-if="leaving"

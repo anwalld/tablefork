@@ -1,3 +1,5 @@
+import os
+
 import pymysql
 import pytest
 
@@ -52,7 +54,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == ["1", "2"]
+    assert [version for version, _ in rows] == ["1", "2", "3"]
     assert all(success for _, success in rows)
 
 
@@ -63,3 +65,81 @@ def test_legacy_migration_table_is_gone(db):
             "WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'"
         )
         assert cursor.fetchone()[0] == 0
+
+
+def test_preset_ai_members_exist(db):
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT p.slug, p.provider, m.type, m.user_id FROM ai_profiles p "
+            "JOIN members m ON m.id = p.member_id ORDER BY p.slug"
+        )
+        rows = cursor.fetchall()
+    assert [(slug, provider) for slug, provider, _, _ in rows] == [
+        ("claude", "anthropic"),
+        ("deepseek", "deepseek"),
+        ("gemini", "gemini"),
+        ("gpt", "openai"),
+    ]
+    assert all(kind == "ai" and user_id is None for _, _, kind, user_id in rows)
+
+
+def test_ai_tables_exist(db):
+    with db.cursor() as cursor:
+        for table in ("ai_member_requests", "user_api_keys"):
+            cursor.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            assert cursor.fetchone()[0] == 1
+
+
+def test_every_room_with_humans_has_one_owner(db):
+    with db.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM rooms r WHERE "
+            "(SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id AND rm.role = 'owner') <> 1"
+        )
+        assert cursor.fetchone()[0] == 0
+
+
+@pytest.fixture
+def ai_db():
+    connection = pymysql.connect(
+        host=os.environ.get("MYSQL_HOST", "mysql"),
+        user="ai",
+        password=os.environ["AI_MYSQL_PASSWORD"],
+        database="chat",
+        autocommit=True,
+    )
+    yield connection
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT COUNT(*) FROM user_api_keys",
+        "SELECT COUNT(*) FROM ai_profiles",
+        "SELECT COUNT(*) FROM messages",
+        "SELECT id, type, display_name FROM members LIMIT 1",
+    ],
+)
+def test_ai_account_reads_what_it_needs(ai_db, query):
+    with ai_db.cursor() as cursor:
+        cursor.execute(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT COUNT(*) FROM users",
+        "SELECT user_id FROM members LIMIT 1",
+        "SELECT COUNT(*) FROM rooms",
+        "DELETE FROM user_api_keys",
+        "UPDATE messages SET content = content WHERE 1 = 0",
+    ],
+)
+def test_ai_account_is_denied_everything_else(ai_db, query):
+    with ai_db.cursor() as cursor, pytest.raises(pymysql.err.OperationalError):
+        cursor.execute(query)

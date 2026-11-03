@@ -46,6 +46,7 @@ function makeSocket() {
     onSendResult: vi.fn(),
     onThrottled: vi.fn(),
     onStatus: vi.fn(),
+    onEvent: vi.fn(),
   }
   return { socket: new ChatSocket(handlers), handlers }
 }
@@ -138,6 +139,17 @@ describe('ChatSocket', () => {
     expect(handlers.onSendResult).not.toHaveBeenCalled()
     ws.reply({ type: 'ack', client_msg_id: 'c1', seq: 9 })
     expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'c1', { ok: true, seq: 9 })
+    socket.close()
+  })
+
+  it('hands AI and room events to the view', () => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    const chunk = { type: 'ai_chunk', room_id: 7, generation_id: 'g', member_id: 3, text: 'hi' }
+    latest().reply(chunk)
+    latest().reply({ type: 'role_changed', room_id: 7, member_id: 2, role: 'admin' })
+    expect(handlers.onEvent.mock.calls.map(([frame]) => frame.type)).toEqual(['ai_chunk', 'role_changed'])
+    expect(handlers.onEvent).toHaveBeenCalledWith(chunk)
     socket.close()
   })
 

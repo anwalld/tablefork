@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "ai/ai_actions.h"
+#include "ai/ai_gateway.h"
 #include "common/config.h"
 #include "common/util.h"
 #include "services/password_policy.h"
@@ -35,6 +37,14 @@ int main()
     const auto &config = chat::Config::get();
     // Fails at startup rather than on the first registration.
     chat::PasswordPolicy::instance();
+    if (!config.aiGateway.empty())
+    {
+        auto gateway = std::make_unique<chat::AiGateway>(
+            chat::AiGateway::Options{config.aiGateway, config.aiToken, drogon::app().getLoop()},
+            chat::handleAiAction);
+        gateway->start();
+        chat::setAiGateway(std::move(gateway));
+    }
     drogon::app()
         .addListener("0.0.0.0", 8000)
         .setThreadNum(0)

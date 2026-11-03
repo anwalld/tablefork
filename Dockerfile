@@ -21,6 +21,10 @@ RUN git clone --depth 1 --branch "${DROGON_VERSION}" --recurse-submodules --shal
 RUN grep -q 'MySQL_lib' /usr/local/lib/cmake/Drogon/DrogonTargets.cmake \
     && grep -q 'Hiredis_lib' /usr/local/lib/cmake/Drogon/DrogonTargets.cmake \
     && echo 'Drogon built with MySQL and Redis support'
+# gRPC for talking to the AI service. Ubuntu's packages, not a source build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+    && rm -rf /var/lib/apt/lists/*
 
 # dev: the image CLion's Docker toolchain builds and debugs in.
 FROM deps AS dev
@@ -32,6 +36,7 @@ WORKDIR /workspace
 FROM deps AS build
 WORKDIR /src
 COPY CMakeLists.txt ./
+COPY proto ./proto
 COPY src ./src
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)"
@@ -40,6 +45,7 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 FROM deps AS unit
 WORKDIR /src
 COPY CMakeLists.txt ./
+COPY proto ./proto
 COPY src ./src
 COPY tests/unit ./tests/unit
 COPY data ./data
@@ -51,7 +57,7 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCHAT_BUILD_TESTS=ON \
 FROM ubuntu:24.04 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl libjsoncpp25 libuuid1 zlib1g libssl3t64 libc-ares2 libbrotli1 \
-        libmariadb3 libhiredis1.1.0 \
+        libmariadb3 libhiredis1.1.0 libgrpc++1.51t64 libprotobuf32t64 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/chat-server /usr/local/bin/chat-server
 COPY data/common-passwords.txt /usr/local/share/chat/common-passwords.txt

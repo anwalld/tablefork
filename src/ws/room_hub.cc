@@ -209,9 +209,31 @@ void RoomHub::onChannelMessage(int64_t roomId, const std::string &payload)
         {
             removeMemberLocally(roomId, (*event)["member_id"].asInt64());
         }
+        else if (event->isMember("only_member_ids"))
+        {
+            // Meant for some members only; they get it without the targets.
+            std::set<int64_t> targets;
+            for (const auto &id : (*event)["only_member_ids"])
+            {
+                targets.insert(id.asInt64());
+            }
+            auto copy = *event;
+            copy.removeMember("only_member_ids");
+            sendToRoom(roomId, toJsonString(copy), &targets);
+        }
+        else
+        {
+            sendToRoom(roomId, payload, nullptr);
+        }
         return;
     }
+    sendToRoom(roomId, payload, nullptr);
+}
 
+void RoomHub::sendToRoom(int64_t roomId,
+                         const std::string &payload,
+                         const std::set<int64_t> *targets)
+{
     std::vector<drogon::WebSocketConnectionPtr> connections;
     {
         std::lock_guard lock(mutex_);
@@ -224,7 +246,10 @@ void RoomHub::onChannelMessage(int64_t roomId, const std::string &payload)
         connections.reserve(room->second.connections.size());
         for (const auto &[connection, memberId] : room->second.connections)
         {
-            connections.push_back(connection);
+            if (!targets || targets->contains(memberId))
+            {
+                connections.push_back(connection);
+            }
         }
     }
     for (const auto &connection : connections)

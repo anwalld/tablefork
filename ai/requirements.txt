@@ -1,0 +1,11 @@
+grpcio==1.85.1
+grpcio-tools==1.85.1
+protobuf==7.36.2
+redis==8.1.0
+aiomysql==0.3.2
+PyMySQL==1.2.3
+cryptography==50.0.2
+openai==3.42.1
+anthropic==2.4.0
+google-genai==2.34.0
+httpx==0.28.1
