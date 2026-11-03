@@ -12,7 +12,8 @@ COPY ai/agents.toml ./
 # test: unit tests, run while building.
 FROM base AS test
 COPY ai/requirements-test.txt ./
-RUN pip install --no-cache-dir -r requirements-test.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 120 --retries 5 -r requirements-test.txt
 COPY ai/tests ./tests
 COPY ai/pytest.ini ./
 RUN python -m pytest -q tests

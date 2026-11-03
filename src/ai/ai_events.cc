@@ -41,7 +41,7 @@ drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
 drogon::Task<> reportMessage(StoredMessage message)
 {
     auto *gateway = aiGateway();
-    if (!gateway || message.duplicate)
+    if (!gateway)
     {
         co_return;
     }
@@ -113,6 +113,16 @@ void reportRoomDeleted(int64_t roomId)
     {
         ai::GatewayEvent event;
         event.mutable_room_deleted()->set_room_id(roomId);
+        gateway->send(std::move(event));
+    }
+}
+void reportGenerationRejected(int64_t roomId, const std::string &generationId)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        event.mutable_generation_rejected()->set_room_id(roomId);
+        event.mutable_generation_rejected()->set_generation_id(generationId);
         gateway->send(std::move(event));
     }
 }

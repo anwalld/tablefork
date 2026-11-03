@@ -14,6 +14,7 @@ from conftest import Client, Socket
 
 PHASE = os.environ.get("AI_PHASE")
 KEY = "test:ai_faults"
+TRIGGER = "@Claude AI 服务停了也要回我"
 
 
 def restore_user(redis):
@@ -32,8 +33,9 @@ def ai_replies(client, room_id):
 
 @pytest.mark.skipif(PHASE != "prepare", reason="part of the ai service fault sequence")
 def test_prepare_room_with_ai(make_user, make_room, redis):
-    alice = make_user()
-    room_id = make_room(alice)
+    # Keep proactive one-human-room messages out of the reconnect assertion.
+    alice, bob = make_user(), make_user()
+    room_id = make_room(alice, bob)
     store_key(alice, "anthropic")
     assert add_ai(alice, room_id, "claude").json()["status"] == "joined"
     redis.hset(KEY, mapping={"room": room_id, "cookie": alice.cookie_header()})
@@ -44,9 +46,9 @@ def test_chat_works_while_ai_service_is_down(redis):
     alice, room_id = restore_user(redis)
     socket = Socket(alice)
     socket.subscribe(room_id)
-    ack = socket.post(room_id, "AI 服务停了也要回我")
+    ack = socket.post(room_id, TRIGGER)
     assert ack["type"] == "ack"
-    assert socket.expect("message")["content"] == "AI 服务停了也要回我"
+    assert socket.expect("message")["content"] == TRIGGER
     socket.close()
     assert ai_replies(alice, room_id) == []
 
@@ -59,7 +61,36 @@ def test_reply_arrives_once_after_reconnecting(redis):
         time.sleep(0.5)
     replies = ai_replies(alice, room_id)
     assert len(replies) == 1
-    assert replies[0]["content"].endswith("AI 服务停了也要回我")
+    assert replies[0]["content"].endswith(TRIGGER)
     # Resent events must not bring a second reply.
     time.sleep(3)
     assert len(ai_replies(alice, room_id)) == 1
+
+
+@pytest.mark.skipif(PHASE != "generating", reason="part of the ai service fault sequence")
+def test_start_a_generation_before_stopping_ai(redis):
+    alice, room_id = restore_user(redis)
+    with __import__('contextlib').closing(Socket(alice)) as socket:
+        socket.subscribe(room_id)
+        assert socket.post(room_id, "@Claude #restart 回复恢复验证")["type"] == "ack"
+        while True:
+            chunk = socket.expect("ai_chunk", timeout=15)
+            if chunk["text"]:
+                redis.hset(KEY, mapping={"generation": chunk["generation_id"]})
+                break
+
+
+@pytest.mark.skipif(PHASE != "recovered", reason="part of the ai service fault sequence")
+def test_generation_recovers_with_one_stored_message(redis):
+    alice, room_id = restore_user(redis)
+    generation = redis.hget(KEY, "generation")
+    deadline = time.time() + 30
+    matching = []
+    while time.time() < deadline:
+        matching = [m for m in ai_replies(alice, room_id) if m["generation_id"] == generation]
+        if matching: break
+        time.sleep(.25)
+    assert len(matching) == 1
+    assert matching[0]["content"].endswith("回复恢复验证")
+    time.sleep(3)
+    assert len([m for m in ai_replies(alice, room_id) if m["generation_id"] == generation]) == 1

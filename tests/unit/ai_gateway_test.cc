@@ -198,3 +198,27 @@ DROGON_TEST(GatewayHandsActionsToTheLoop)
     gateway.stop();
     server->Shutdown();
 }
+
+DROGON_TEST(GatewayRetriesWithoutDisconnectingWhenAckIsMissing)
+{
+    FakeService service;
+    service.ack = false;
+    int port = 0;
+    auto server = serve(service, port);
+    trantor::EventLoopThread loopThread;
+    loopThread.run();
+    chat::AiGateway gateway({"127.0.0.1:" + std::to_string(port), "secret", loopThread.getLoop(),
+                             10000, 50ms, 200ms, 100ms}, [](chat::ai::AiAction) {});
+    gateway.start();
+    gateway.send(deleted(99));
+    REQUIRE(service.waitForEvents(3));
+    {
+        std::lock_guard lock(service.mutex);
+        CHECK(service.events[0] == service.events[1]);
+        CHECK(service.events[1] == service.events[2]);
+        service.ack = true;
+    }
+    CHECK(eventually([&] { return gateway.unackedCount() == 0; }));
+    gateway.stop();
+    server->Shutdown();
+}

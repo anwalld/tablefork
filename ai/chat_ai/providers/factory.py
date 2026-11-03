@@ -25,7 +25,7 @@ class ProviderFactory:
         if provider == "openai":
             return OpenAiCompatible("https://api.openai.com/v1", self.timeout)
         if provider == "deepseek":
-            return OpenAiCompatible("https://api.deepseek.com", self.timeout)
+            return OpenAiCompatible("https://api.deepseek.com", self.timeout, disable_thinking=True)
         if provider == "anthropic":
             return AnthropicProvider(self.timeout)
         if provider == "gemini":

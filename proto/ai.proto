@@ -66,7 +66,13 @@ message GatewayEvent {
     MessageSaved message_saved = 3;
     MembersChanged members_changed = 4;
     RoomDeleted room_deleted = 5;
+    GenerationRejected generation_rejected = 6;
   }
+}
+
+message GenerationRejected {
+  int64 room_id = 1;
+  string generation_id = 2;
 }
 
 message Ack {
@@ -79,6 +85,10 @@ message Chunk {
   string generation_id = 2;
   int64 ai_member_id = 3;
   string text = 4;
+  uint32 attempt = 5;
+  uint32 sequence = 6;
+  bool cumulative = 7;
+  string snapshot = 8;
 }
 
 // A finished reply, to be stored and delivered as an ordinary message.

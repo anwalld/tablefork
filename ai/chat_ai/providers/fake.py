@@ -23,7 +23,7 @@ class FakeProvider:
         self, *, model: str, system: str, messages: list[ChatMessage], api_key: str, max_tokens: int
     ) -> AsyncIterator[str]:
         self._check(api_key)
-        last = messages[-1].content if messages else ""
+        last = next((m.content for m in reversed(messages) if m.role == "user"), "")
         if "#fail" in last:
             raise ProviderError("fake failure")
         if "#slow" in last:
@@ -31,9 +31,11 @@ class FakeProvider:
         name = system.split("，", 1)[0].removeprefix("你是 ").strip()
         text = f"{name}: {last}"
         third = max(1, len(text) // 3)
-        for piece in (text[:third], text[third : 2 * third], text[2 * third :]):
+        for index, piece in enumerate((text[:third], text[third : 2 * third], text[2 * third :])):
             await asyncio.sleep(0.05)
             yield piece
+            if index == 0 and "#restart" in last:
+                await asyncio.sleep(2)
 
     async def validate(self, api_key: str) -> None:
         self._check(api_key)

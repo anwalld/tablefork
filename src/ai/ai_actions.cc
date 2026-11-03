@@ -52,6 +52,10 @@ drogon::Task<> onChunk(ai::Chunk chunk)
     event["generation_id"] = chunk.generation_id();
     event["member_id"] = Json::Int64(chunk.ai_member_id());
     event["text"] = chunk.text();
+    event["attempt"] = chunk.attempt();
+    event["sequence"] = chunk.sequence();
+    event["cumulative"] = chunk.cumulative();
+    if (chunk.cumulative()) event["snapshot"] = chunk.snapshot();
     co_await publish(chunk.room_id(), std::move(event));
 }
 
@@ -67,19 +71,27 @@ void onFinal(ai::Final final)
             message = co_await MessageService::saveAiMessage(
                 final.ai_member_id(), final.room_id(), final.generation_id(), final.content());
         }
+        catch (const ApiError &e)
+        {
+            if (e.code() != "room_not_found" && e.code() != "invalid_argument")
+                co_return;
+            reportGenerationRejected(final.room_id(), final.generation_id());
+        }
         catch (const std::exception &e)
         {
-            // The AI was removed or the room deleted meanwhile.
-            LOG_INFO << "AI reply not stored: " << e.what();
+            // The AI service retains the complete result and will redeliver it.
+            LOG_WARN << "AI reply storage deferred: " << e.what();
+            co_return;
         }
         if (!message)
         {
             co_await publish(final.room_id(),
                              failedEvent(final.room_id(), final.generation_id(), final.ai_member_id()));
         }
-        else if (!message->duplicate)
+        else
         {
-            co_await MessageService::distribute(*message);
+            if (!message->duplicate) co_await MessageService::distribute(*message);
+            // A repeated Final may mean its storage confirmation was lost.
             co_await reportMessage(*message);
         }
     });

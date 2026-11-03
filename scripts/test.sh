@@ -10,6 +10,7 @@ if [[ ! -f .env ]]; then
 fi
 
 docker build --target unit -t cppaiserver-unit .
+docker build -f ai/Dockerfile --target test -t cppaiserver-ai-test .
 docker compose --profile test build tests
 
 # The suite registers, logs in and sends far more often than the limits allow,
@@ -24,6 +25,7 @@ docker compose --profile test build tests
 ai_test_env() {
     export AI_FAKE_PROVIDERS=1 AI_PROACTIVE_P1=1 AI_IDLE_SECONDS=3
     export AI_TIMER_POLL_SECONDS=0.5 AI_GENERATION_TIMEOUT=3
+    export AI_RETRY_BASE_SECONDS=0.1 AI_WORK_LEASE_SECONDS=2 AI_GENERATION_MAX_ATTEMPTS=3
 }
 
 (
@@ -42,6 +44,10 @@ ai_test_env() {
     docker compose start ai
     docker compose up -d --wait ai
     run_phase up
+    run_phase generating
+    docker compose kill -s SIGKILL ai
+    docker compose up -d --wait ai
+    run_phase recovered
 
     # API keys must never reach the logs in the clear.
     if docker compose logs app ai nginx | grep -F "fake-plaintext-marker-7f3a"; then

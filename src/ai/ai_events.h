@@ -13,4 +13,5 @@ namespace chat
 drogon::Task<> reportMessage(StoredMessage message);
 drogon::Task<> reportMembersChanged(int64_t roomId);
 void reportRoomDeleted(int64_t roomId);
+void reportGenerationRejected(int64_t roomId, const std::string &generationId);
 }  // namespace chat

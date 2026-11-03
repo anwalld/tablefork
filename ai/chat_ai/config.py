@@ -38,6 +38,9 @@ class Settings:
     max_output_tokens: int
     generation_timeout: float
     chunk_interval: float
+    generation_max_attempts: int = 3
+    retry_base_seconds: float = 1.0
+    work_lease_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,4 +72,7 @@ class Settings:
             max_output_tokens=_int("AI_MAX_OUTPUT_TOKENS", 1500),
             generation_timeout=_float("AI_GENERATION_TIMEOUT", 60),
             chunk_interval=_float("AI_CHUNK_INTERVAL", 0.1),
+            generation_max_attempts=max(1, _int("AI_GENERATION_MAX_ATTEMPTS", 3)),
+            retry_base_seconds=max(0.1, _float("AI_RETRY_BASE_SECONDS", 1)),
+            work_lease_seconds=max(1.0, _float("AI_WORK_LEASE_SECONDS", 10)),
         )

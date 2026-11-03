@@ -40,3 +40,30 @@ describe('AiDrafts', () => {
     expect(drafts.forRoom(2).map((d) => d.id)).toEqual(['g2'])
   })
 })
+
+
+describe('recovery snapshots', () => {
+  it('replaces an old attempt and ignores late or duplicate snapshots', () => {
+    const drafts = new AiDrafts()
+    const frame = (attempt, sequence, text) => ({ ...chunk('g', 'delta'), snapshot: text, attempt, sequence, cumulative: true })
+    drafts.chunk(frame(1, 1, 'old'))
+    drafts.chunk(frame(2, 1, ''))
+    drafts.chunk(frame(1, 9, 'late old'))
+    drafts.chunk(frame(2, 3, 'new complete'))
+    drafts.chunk(frame(2, 2, 'new'))
+    drafts.chunk(frame(2, 3, 'duplicate'))
+    expect(drafts.forRoom(1).map(d => d.text)).toEqual(['new complete'])
+    drafts.close('g')
+    drafts.chunk(frame(2, 4, 'late'))
+    expect(drafts.forRoom(1)).toEqual([])
+  })
+
+  it('clears disconnected drafts and accepts a complete snapshot after reconnect', () => {
+    const drafts = new AiDrafts()
+    drafts.chunk(chunk('g', 'old partial'))
+    drafts.clear()
+    expect(drafts.forRoom(1)).toEqual([])
+    drafts.chunk({ ...chunk('g', 'last delta'), snapshot: 'full current text', cumulative: true, attempt: 1, sequence: 5 })
+    expect(drafts.forRoom(1)[0].text).toBe('full current text')
+  })
+})

@@ -89,9 +89,9 @@ def test_mentioned_ai_without_key_tells_the_payer():
 
 def test_human_message_resets_proactive_count_and_bumps_epoch():
     state = one_human(CLAUDE)
-    state.proactive_sent = 2
+    state.proactive_mask = 3
     rules.on_human_message(state, ALICE, "back", ALL_KEYS, FixedRandom())
-    assert state.proactive_sent == 0
+    assert state.proactive_mask == 0
     assert state.epoch == 1
 
 
@@ -139,18 +139,20 @@ def test_proactive_messages_then_goodbye_ends_conversation():
     for _ in range(3):
         decision, again = rules.on_idle_timer(state, ALL_KEYS, 1.0, FixedRandom(0.0))
         kinds.append(decision.requests[0].kind)
+        assert state.proactive_mask != 7
+        rules.on_proactive_saved(state, state.epoch, len(kinds) - 1)
     assert kinds == ["proactive", "proactive", "goodbye"]
-    assert again is False
+    assert state.proactive_mask == 7
     assert state.target is None
 
 
 def test_missed_draw_keeps_the_count():
     state = one_human(CLAUDE)
     state.target = "claude"
-    state.proactive_sent = 1
+    state.proactive_mask = 1
     decision, again = rules.on_idle_timer(state, ALL_KEYS, 0.5, FixedRandom(0.9))
     assert decision.requests == [] and again is True
-    assert state.proactive_sent == 1
+    assert state.proactive_mask == 1
 
 
 def test_no_proactive_messages_in_multi_human_rooms():
@@ -166,5 +168,21 @@ def test_after_goodbye_mention_continues_and_silence_restarts():
 
 
 def test_state_round_trips_through_json():
-    state = RoomState(humans=[ALICE], ais=[CLAUDE], target="claude", proactive_sent=1, epoch=3)
+    state = RoomState(humans=[ALICE], ais=[CLAUDE], target="claude", proactive_mask=1, epoch=3)
     assert RoomState.from_json(state.to_json()) == state
+
+
+def test_success_mask_is_idempotent_and_old_rounds_do_not_count():
+    state = one_human(CLAUDE)
+    state.target = 'claude'
+    for slot, expected in [(0, 1), (0, 1), (1, 3), (2, 7)]:
+        rules.on_proactive_saved(state, state.epoch, slot)
+        assert state.proactive_mask == expected
+    assert state.target is None
+    rules.on_human_message(state, ALICE, 'hello', ALL_KEYS, FixedRandom())
+    rules.on_proactive_saved(state, state.epoch - 1, 2)
+    assert state.proactive_mask == 0
+
+
+def test_legacy_proactive_counter_migrates_to_mask():
+    assert RoomState.from_json({'proactive_sent': 2}).proactive_mask == 3

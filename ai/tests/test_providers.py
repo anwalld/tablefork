@@ -174,3 +174,18 @@ async def test_fake_provider():
         await fake.validate("fake-reject")
     with pytest.raises(KeyRejected):
         await fake.validate("sk-real")
+
+
+@pytest.mark.parametrize("name,thinking", [("deepseek", {"type": "disabled"}), ("openai", None)])
+async def test_factory_uses_non_thinking_only_for_deepseek(name, thinking):
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return sse([openai_chunk("好"), "data: [DONE]\n\n"])
+
+    provider = ProviderFactory(10).create(name)
+    async with client(handler) as transport:
+        provider.http_client = transport
+        assert await collect(provider) == ["好"]
+    assert seen.get("thinking") == thinking

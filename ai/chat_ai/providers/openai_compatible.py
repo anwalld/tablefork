@@ -9,10 +9,12 @@ from .base import ChatMessage, KeyRejected, ProviderError
 
 
 class OpenAiCompatible:
-    def __init__(self, base_url: str, timeout: float, http_client: httpx.AsyncClient | None = None):
+    def __init__(self, base_url: str, timeout: float, http_client: httpx.AsyncClient | None = None,
+                 *, disable_thinking: bool = False):
         self.base_url = base_url
         self.timeout = timeout
         self.http_client = http_client
+        self.disable_thinking = disable_thinking
 
     def _client(self, api_key: str) -> openai.AsyncOpenAI:
         return openai.AsyncOpenAI(
@@ -29,9 +31,11 @@ class OpenAiCompatible:
         payload = [{"role": "system", "content": system}] + [
             {"role": m.role, "content": m.content} for m in messages
         ]
+        # DeepSeek defaults to thinking mode; casual chat should not spend tokens on it.
+        options = {"extra_body": {"thinking": {"type": "disabled"}}} if self.disable_thinking else {}
         try:
             response = await self._client(api_key).chat.completions.create(
-                model=model, messages=payload, max_tokens=max_tokens, stream=True
+                model=model, messages=payload, max_tokens=max_tokens, stream=True, **options
             )
             async for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content:

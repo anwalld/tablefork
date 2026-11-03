@@ -75,6 +75,12 @@ function streamFor(roomId) {
       new RoomStream({
         fetchAfter: async (after) => (await api.history(roomId, { after })).messages,
         onChange: () => revision.value++,
+        onMessages: (messages) => {
+          for (const message of messages) {
+            if (message.generation_id) drafts.close(message.generation_id)
+          }
+          draftRevision.value++
+        },
       }),
     )
   }
@@ -82,12 +88,14 @@ function streamFor(roomId) {
 }
 
 const socket = new ChatSocket({
-  onStatus: (up) => (connected.value = up),
-  onMessage: (message) => {
-    if (message.generation_id) {
-      drafts.close(message.generation_id)
+  onStatus: (up) => {
+    connected.value = up
+    if (!up) {
+      drafts.clear()
       draftRevision.value++
     }
+  },
+  onMessage: (message) => {
     streamFor(message.room_id).receive(message)
   },
   onEvent: (frame) => onRoomEvent(frame),
@@ -204,6 +212,8 @@ async function refreshRooms() {
 }
 
 function forgetRoom(roomId) {
+  drafts.clear(roomId)
+  draftRevision.value++
   socket.unsubscribe(roomId)
   streams.get(roomId)?.dispose()
   streams.delete(roomId)

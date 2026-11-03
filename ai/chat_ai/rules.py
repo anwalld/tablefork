@@ -31,7 +31,11 @@ class RoomState:
     # One-human rooms: the AI the human is talking to, if a conversation is on.
     target: str | None = None
     # Proactive messages sent in the current conversation since the human last spoke.
-    proactive_sent: int = 0
+    proactive_mask: int = 0
+    timer_due: float | None = None
+    pending: list[dict] = field(default_factory=list)
+    active: dict | None = None
+    deleted: bool = False
     # Bumped on every human message, so that replies to older messages no
     # longer continue a chain.
     epoch: int = 0
@@ -44,7 +48,9 @@ class RoomState:
             "humans": [[h.member_id, h.user_id] for h in self.humans],
             "ais": [[a.member_id, a.slug, a.provider, a.name] for a in self.ais],
             "target": self.target,
-            "proactive_sent": self.proactive_sent,
+            "proactive_mask": self.proactive_mask,
+            "timer_due": self.timer_due, "pending": self.pending,
+            "active": self.active, "deleted": self.deleted,
             "epoch": self.epoch,
         }
 
@@ -54,7 +60,9 @@ class RoomState:
             humans=[Human(*h) for h in data.get("humans", [])],
             ais=[RoomAi(*a) for a in data.get("ais", [])],
             target=data.get("target"),
-            proactive_sent=data.get("proactive_sent", 0),
+            proactive_mask=data.get("proactive_mask", (1 << min(data.get("proactive_sent", 0), 3)) - 1),
+            timer_due=data.get("timer_due"), pending=data.get("pending", []),
+            active=data.get("active"), deleted=data.get("deleted", False),
             epoch=data.get("epoch", 0),
         )
 
@@ -116,7 +124,7 @@ def on_human_message(
     keys holds the providers the sender has API keys for.
     """
     state.epoch += 1
-    state.proactive_sent = 0
+    state.proactive_mask = 0
     decision = Decision()
     mentioned = mentions(content, state.ais)
 
@@ -178,16 +186,12 @@ def on_idle_timer(state: RoomState, keys: set[str], p1: float, rng: random.Rando
     if len(state.humans) != 1 or state.target is None or state.ai(state.target) is None:
         state.target = None
         return decision, False
-    n = state.proactive_sent + 1
+    n = state.proactive_mask.bit_count() + 1
     if rng.random() >= proactive_probability(p1, n):
         return decision, True
     human = state.humans[0]
     kind = "goodbye" if n >= 3 else "proactive"
     _request(decision, state, Request(state.target, human, kind), keys)
-    state.proactive_sent = n
-    if kind == "goodbye":
-        state.target = None
-        return decision, False
     return decision, True
 
 
@@ -199,3 +203,12 @@ def _request(decision: Decision, state: RoomState, request: Request, keys: set[s
         decision.requests.append(request)
     else:
         decision.missing.append(MissingKey(request.payer, ai.provider))
+
+
+def on_proactive_saved(state: RoomState, epoch: int, slot: int) -> None:
+    """Repeated storage confirmations set the same bit; old rounds cannot count."""
+    if state.epoch != epoch or not 0 <= slot < 3:
+        return
+    state.proactive_mask |= 1 << slot
+    if state.proactive_mask == 7:
+        state.target = None

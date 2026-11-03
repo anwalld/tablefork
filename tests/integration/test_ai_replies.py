@@ -121,7 +121,9 @@ def test_reply_streams_and_only_the_final_text_is_stored(make_user, make_room, m
             break
     assert chunks
     assert {c["generation_id"] for c in chunks} == {final["generation_id"]}
-    assert "".join(c["text"] for c in chunks) == final["content"]
+    assert chunks[-1]["cumulative"] is True
+    assert "".join(c["text"] for c in chunks).strip() == final["content"]
+    assert chunks[-1]["snapshot"].strip() == final["content"]
     history = bob.get(f"/api/rooms/{room_id}/messages").json()["messages"]
     assert [m["member"]["type"] for m in history] == ["human", "ai"]
     assert history[1]["generation_id"] == final["generation_id"]

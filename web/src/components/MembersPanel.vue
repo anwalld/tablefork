@@ -114,7 +114,7 @@ defineExpose({ loadAgents })
     <form v-if="addable.length" class="inline-form" @submit.prevent="addAi">
       <select v-model="chosen" aria-label="选择 AI">
         <option value="" disabled>邀请 AI</option>
-        <option v-for="agent in addable" :key="agent.slug" :value="agent.slug">
+        <option v-for="agent in addable" :key="agent.slug" :value="agent.slug" :disabled="!agent.has_key">
           {{ agent.name }}{{ agent.has_key ? '' : `（需要 ${providerName(agent.provider)} key）` }}
         </option>
       </select>

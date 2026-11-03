@@ -4,7 +4,7 @@
 [agents.deepseek]
 name = "DeepSeek"
 provider = "deepseek"
-model = "deepseek-chat"
+model = "deepseek-flash"
 persona = """
 你是 DeepSeek，一个在多人聊天室里聊天的 AI 伙伴。说话自然、简洁，像朋友一样。
 聊天记录里每条消息前面是发言人的名字。只用你自己的身份说话，不要替别人发言。

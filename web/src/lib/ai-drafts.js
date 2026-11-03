@@ -9,11 +9,28 @@ export class AiDrafts {
     this.closed = new Set()
   }
 
-  chunk({ room_id: roomId, generation_id: id, member_id: memberId, text }) {
+  chunk(frame) {
+    const { room_id: roomId, generation_id: id, member_id: memberId, text } = frame
     if (this.closed.has(id)) return
-    const draft = this.byId.get(id) ?? { id, roomId, memberId, text: '' }
+    const current = this.byId.get(id)
+    if (frame.cumulative) {
+      const attempt = frame.attempt ?? 0
+      const sequence = frame.sequence ?? 0
+      if (current && (attempt < current.attempt ||
+          (attempt === current.attempt && sequence <= current.sequence))) return
+      this.byId.set(id, { id, roomId, memberId, text: frame.snapshot ?? text, attempt, sequence })
+      return
+    }
+    if (current?.attempt > 0) return
+    const draft = current ?? { id, roomId, memberId, text: '' }
     draft.text += text
     this.byId.set(id, draft)
+  }
+
+  clear(roomId) {
+    for (const [id, draft] of this.byId) {
+      if (roomId === undefined || draft.roomId === roomId) this.byId.delete(id)
+    }
   }
 
   // A stored message or a failure ends the generation.

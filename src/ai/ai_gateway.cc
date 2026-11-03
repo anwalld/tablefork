@@ -3,6 +3,7 @@
 #include <drogon/utils/Utilities.h>
 #include <grpcpp/grpcpp.h>
 #include <deque>
+#include <set>
 #include <trantor/utils/Logger.h>
 
 namespace chat
@@ -22,17 +23,26 @@ void setAiGateway(std::unique_ptr<AiGateway> gateway)
     gGateway = std::move(gateway);
 }
 
+// Serializes callbacks with destruction, including already queued timers.
+struct AiGateway::Callbacks
+{
+    std::mutex mutex;
+    AiGateway *owner;
+    explicit Callbacks(AiGateway *value) : owner(value) {}
+};
+
 // One bidirectional stream. gRPC allows a single outstanding write, so writes
 // are queued and the next starts when the previous one is done.
 class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::AiAction>
 {
   public:
     Stream(AiGateway &owner, std::deque<ai::GatewayEvent> initial)
-        : owner_(owner), started_(std::chrono::steady_clock::now())
+        : callbacks_(owner.callbacks_), started_(std::chrono::steady_clock::now())
     {
-        context_.AddMetadata("authorization", "Bearer " + owner_.options_.token);
-        owner_.stub_->async()->Connect(&context_, this);
+        context_.AddMetadata("authorization", "Bearer " + owner.options_.token);
+        owner.stub_->async()->Connect(&context_, this);
         queue_ = std::move(initial);
+        for (const auto &event : queue_) queuedIds_.insert(event.event_id());
         StartRead(&incoming_);
         if (!queue_.empty())
         {
@@ -45,10 +55,11 @@ class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::A
     void write(ai::GatewayEvent event)
     {
         std::lock_guard lock(writeMutex_);
-        if (finished_)
+        if (finished_ || queuedIds_.contains(event.event_id()))
         {
             return;
         }
+        queuedIds_.insert(event.event_id());
         queue_.push_back(std::move(event));
         if (!writing_)
         {
@@ -71,6 +82,7 @@ class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::A
             writing_ = false;
             return;
         }
+        queuedIds_.erase(queue_.front().event_id());
         queue_.pop_front();
         if (!queue_.empty() && !finished_)
         {
@@ -89,7 +101,10 @@ class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::A
             return;
         }
         received_ = true;
-        owner_.onAction(std::move(incoming_));
+        {
+            std::lock_guard lock(callbacks_->mutex);
+            if (callbacks_->owner) callbacks_->owner->onAction(std::move(incoming_));
+        }
         incoming_.Clear();
         StartRead(&incoming_);
     }
@@ -105,15 +120,18 @@ class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::A
             LOG_WARN << "AI gateway stream ended: " << status.error_message();
         }
         const auto lived = std::chrono::steady_clock::now() - started_;
-        owner_.onStreamDone(this, received_ || lived > std::chrono::seconds(5));
+        std::lock_guard lock(callbacks_->mutex);
+        if (callbacks_->owner)
+            callbacks_->owner->onStreamDone(this, received_ || lived > std::chrono::seconds(5));
     }
 
   private:
-    AiGateway &owner_;
+    std::shared_ptr<Callbacks> callbacks_;
     grpc::ClientContext context_;
     ai::AiAction incoming_;
     std::mutex writeMutex_;
     std::deque<ai::GatewayEvent> queue_;
+    std::set<int64_t> queuedIds_;
     bool writing_{false};
     bool finished_{false};
     bool received_{false};
@@ -121,7 +139,8 @@ class AiGateway::Stream : public grpc::ClientBidiReactor<ai::GatewayEvent, ai::A
 };
 
 AiGateway::AiGateway(Options options, ActionHandler handler)
-    : options_(std::move(options)),
+    : callbacks_(std::make_shared<Callbacks>(this)),
+      options_(std::move(options)),
       handler_(std::move(handler)),
       instanceId_(drogon::utils::getUuid()),
       channel_(grpc::CreateChannel(options_.address, grpc::InsecureChannelCredentials())),
@@ -133,23 +152,42 @@ AiGateway::AiGateway(Options options, ActionHandler handler)
 AiGateway::~AiGateway()
 {
     stop();
+    {
+        std::unique_lock lock(mutex_);
+        streamDone_.wait(lock, [this] { return streamFinished_; });
+    }
+    std::lock_guard lock(callbacks_->mutex);
+    callbacks_->owner = nullptr;
 }
 
 void AiGateway::start()
 {
-    options_.loop->queueInLoop([this] { connect(); });
+    const auto callbacks = callbacks_;
+    options_.loop->queueInLoop([callbacks] {
+        std::lock_guard guard(callbacks->mutex);
+        auto *owner = callbacks->owner;
+        if (!owner) return;
+        owner->connect();
+        std::lock_guard lock(owner->mutex_);
+        if (owner->stopped_) return;
+        const auto interval = std::chrono::duration<double>(owner->options_.ackTimeout).count();
+        owner->retryTimer_ = owner->options_.loop->runEvery(interval, [callbacks] {
+            std::lock_guard guard(callbacks->mutex);
+            if (callbacks->owner) callbacks->owner->retryUnacked();
+        });
+    });
 }
 
 void AiGateway::stop()
 {
     std::unique_lock lock(mutex_);
     stopped_ = true;
-    if (stream_)
+    if (retryTimer_)
     {
-        auto *stream = stream_.get();
-        lock.unlock();
-        stream->cancel();
+        options_.loop->invalidateTimer(retryTimer_);
+        retryTimer_ = 0;
     }
+    if (stream_) stream_->cancel();
 }
 
 void AiGateway::connect()
@@ -163,7 +201,9 @@ void AiGateway::connect()
     for (const auto &[id, event] : unacked_)
     {
         initial.push_back(event);
+        lastSent_[id] = std::chrono::steady_clock::now();
     }
+    streamFinished_ = false;
     stream_ = std::make_unique<Stream>(*this, std::move(initial));
 }
 
@@ -176,9 +216,11 @@ void AiGateway::send(ai::GatewayEvent event)
     {
         LOG_ERROR << "AI gateway: too many unacknowledged events, dropping event "
                   << unacked_.begin()->first;
+        lastSent_.erase(unacked_.begin()->first);
         unacked_.erase(unacked_.begin());
     }
     unacked_.emplace(event.event_id(), event);
+    lastSent_[event.event_id()] = std::chrono::steady_clock::now();
     if (stream_)
     {
         stream_->write(std::move(event));
@@ -191,10 +233,14 @@ void AiGateway::onAction(ai::AiAction action)
     {
         std::lock_guard lock(mutex_);
         unacked_.erase(action.ack().event_id());
+        lastSent_.erase(action.ack().event_id());
         return;
     }
     options_.loop->queueInLoop(
-        [this, action = std::move(action)]() mutable { handler_(std::move(action)); });
+        [callbacks = callbacks_, action = std::move(action)]() mutable {
+            std::lock_guard guard(callbacks->mutex);
+            if (callbacks->owner) callbacks->owner->handler_(std::move(action));
+        });
 }
 
 void AiGateway::onStreamDone(Stream *stream, bool wasHealthy)
@@ -209,23 +255,41 @@ void AiGateway::onStreamDone(Stream *stream, bool wasHealthy)
         delay = backoff_;
         backoff_ = std::min(backoff_ * 2, options_.maxBackoff);
     }
-    // The reactor may not be destroyed inside its own OnDone.
-    options_.loop->queueInLoop([this, stream, delay] {
-        std::unique_ptr<Stream> finished;
+    const auto callbacks = callbacks_;
+    options_.loop->queueInLoop([callbacks, stream, delay] {
+        std::lock_guard guard(callbacks->mutex);
+        auto *owner = callbacks->owner;
+        if (!owner) return;
         {
-            std::lock_guard lock(mutex_);
-            if (stream_.get() == stream)
-            {
-                finished = std::move(stream_);
-            }
-            if (stopped_)
-            {
-                return;
-            }
+            std::lock_guard lock(owner->mutex_);
+            if (owner->stream_.get() == stream) owner->stream_.reset();
+            if (owner->stopped_) return;
         }
-        options_.loop->runAfter(std::chrono::duration<double>(delay).count(),
-                                [this] { connect(); });
+        owner->options_.loop->runAfter(std::chrono::duration<double>(delay).count(), [callbacks] {
+            std::lock_guard guard(callbacks->mutex);
+            if (callbacks->owner) callbacks->owner->connect();
+        });
     });
+    {
+        std::lock_guard lock(mutex_);
+        streamFinished_ = true;
+        streamDone_.notify_all();
+    }
+}
+
+void AiGateway::retryUnacked()
+{
+    std::lock_guard lock(mutex_);
+    if (stopped_ || !stream_) return;
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto &[id, event] : unacked_)
+    {
+        if (now - lastSent_[id] >= options_.ackTimeout)
+        {
+            stream_->write(event);
+            lastSent_[id] = now;
+        }
+    }
 }
 
 size_t AiGateway::unackedCount()

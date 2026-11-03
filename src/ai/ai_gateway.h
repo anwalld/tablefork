@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <drogon/utils/coroutine.h>
 #include <functional>
@@ -33,6 +34,7 @@ class AiGateway
         size_t maxUnacked = 10000;
         std::chrono::milliseconds minBackoff{500};
         std::chrono::milliseconds maxBackoff{10000};
+        std::chrono::milliseconds ackTimeout{5000};
     };
 
     AiGateway(Options options, ActionHandler handler);
@@ -59,13 +61,16 @@ class AiGateway
     size_t unackedCount();
 
   private:
+    struct Callbacks;
     class Stream;
     friend class Stream;
 
     void connect();
+    void retryUnacked();
     void onAction(ai::AiAction action);
     void onStreamDone(Stream *stream, bool wasHealthy);
 
+    std::shared_ptr<Callbacks> callbacks_;
     Options options_;
     ActionHandler handler_;
     std::string instanceId_;
@@ -75,7 +80,11 @@ class AiGateway
     std::mutex mutex_;
     int64_t nextEventId_{1};
     std::map<int64_t, ai::GatewayEvent> unacked_;
+    std::map<int64_t, std::chrono::steady_clock::time_point> lastSent_;
     std::unique_ptr<Stream> stream_;
+    std::condition_variable streamDone_;
+    bool streamFinished_{true};
+    trantor::TimerId retryTimer_{0};
     std::chrono::milliseconds backoff_;
     bool stopped_{false};
 };
