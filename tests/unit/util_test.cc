@@ -32,3 +32,12 @@ DROGON_TEST(PrintableTextRejectsControlCharacters)
     CHECK(!isPrintableText("a\xC2\x85"));
     CHECK(!isPrintableText("\xFF"));
 }
+
+DROGON_TEST(Utf8PrefixKeepsWholeCodePoints)
+{
+    CHECK(chat::utf8Prefix("abc", 2) == "ab");
+    CHECK(chat::utf8Prefix("\xE4\xBD\xA0\xE5\xA5\xBD", 1) == "\xE4\xBD\xA0");
+    CHECK(chat::utf8Prefix("\xF0\x9F\x98\x80x", 1) == "\xF0\x9F\x98\x80");
+    CHECK(chat::utf8Prefix("ab", 5) == "ab");
+    CHECK(chat::utf8Prefix("ab", 0).empty());
+}

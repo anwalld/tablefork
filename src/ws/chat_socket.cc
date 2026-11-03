@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 #include <sstream>
 
+#include "ai/ai_events.h"
 #include "common/util.h"
 #include "services/message_rate_limiter.h"
 #include "services/message_service.h"
@@ -101,6 +102,7 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
                 if (!message.duplicate)
                 {
                     co_await MessageService::distribute(message);
+                    co_await reportMessage(message);
                 }
             });
     };

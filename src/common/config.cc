@@ -51,6 +51,8 @@ Config load()
 
     c.passwordBlocklistFile = envOr(
         "PASSWORD_BLOCKLIST_FILE", "/usr/local/share/chat/common-passwords.txt");
+    c.aiGateway = envOr("AI_GATEWAY", "");
+    c.aiToken = envOr("AI_GRPC_TOKEN", "");
     c.loginFreeAttempts = positiveEnvOr("LOGIN_FREE_ATTEMPTS", 5);
     c.loginBackoffBaseSeconds = positiveEnvOr("LOGIN_BACKOFF_BASE_SECONDS", 1);
     c.loginBackoffMaxSeconds = positiveEnvOr("LOGIN_BACKOFF_MAX_SECONDS", 60);

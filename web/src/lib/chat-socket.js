@@ -5,8 +5,8 @@ const MAX_BACKOFF_MS = 10000
 // The WebSocket connection: reconnects, resubscribes, and resends unacknowledged
 // messages with their original client_msg_id so that the server can deduplicate.
 export class ChatSocket {
-  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus }) {
-    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus }
+  constructor({ onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent }) {
+    this.handlers = { onMessage, onSubscribed, onRoomLeft, onSendResult, onThrottled, onStatus, onEvent }
     this.rooms = new Set()
     this.pending = new Map()
     this.backoff = 500
@@ -44,6 +44,9 @@ export class ChatSocket {
       this.settle(frame.client_msg_id, { ok: true, seq: frame.seq })
     } else if (frame.type === 'error') {
       this.handleError(frame)
+    } else {
+      // AI output, role changes and the like: the view decides.
+      this.handlers.onEvent?.(frame)
     }
   }
 

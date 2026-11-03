@@ -8,13 +8,38 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(CHAT_BUILD_TESTS "Build unit tests" OFF)
 
 find_package(Drogon CONFIG REQUIRED)
+find_package(Protobuf REQUIRED)
+# Ubuntu's gRPC package links against c-ares::cares without defining it.
+if(NOT TARGET c-ares::cares)
+    find_library(CARES_LIBRARY cares REQUIRED)
+    add_library(c-ares::cares UNKNOWN IMPORTED)
+    set_target_properties(c-ares::cares PROPERTIES IMPORTED_LOCATION ${CARES_LIBRARY})
+endif()
+find_package(gRPC CONFIG REQUIRED)
+
+# C++ code for proto/ai.proto, shared with the Python AI service.
+set(PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/proto/ai.proto)
+set(PROTO_OUT ${CMAKE_CURRENT_BINARY_DIR}/proto)
+file(MAKE_DIRECTORY ${PROTO_OUT})
+set(PROTO_GENERATED
+    ${PROTO_OUT}/ai.pb.cc ${PROTO_OUT}/ai.pb.h
+    ${PROTO_OUT}/ai.grpc.pb.cc ${PROTO_OUT}/ai.grpc.pb.h)
+add_custom_command(
+    OUTPUT ${PROTO_GENERATED}
+    COMMAND protobuf::protoc
+        --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+        --cpp_out=${PROTO_OUT}
+        --grpc_out=${PROTO_OUT}
+        --plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>
+        ${PROTO_SRC}
+    DEPENDS ${PROTO_SRC})
 
 file(GLOB_RECURSE CHAT_SOURCES CONFIGURE_DEPENDS src/*.cc)
 list(REMOVE_ITEM CHAT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc)
 
-add_library(chat-core STATIC ${CHAT_SOURCES})
-target_include_directories(chat-core PUBLIC src)
-target_link_libraries(chat-core PUBLIC Drogon::Drogon)
+add_library(chat-core STATIC ${CHAT_SOURCES} ${PROTO_GENERATED})
+target_include_directories(chat-core PUBLIC src ${PROTO_OUT})
+target_link_libraries(chat-core PUBLIC Drogon::Drogon gRPC::grpc++ protobuf::libprotobuf)
 
 # Controllers register themselves through static initializers, so the whole
 # library must be linked in.

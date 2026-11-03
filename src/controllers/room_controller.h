@@ -16,6 +16,9 @@ class RoomController : public drogon::HttpController<RoomController>
     ADD_METHOD_TO(RoomController::leave, "/api/rooms/{1}/leave", drogon::Post);
     ADD_METHOD_TO(RoomController::members, "/api/rooms/{1}/members", drogon::Get);
     ADD_METHOD_TO(RoomController::messages, "/api/rooms/{1}/messages", drogon::Get);
+    ADD_METHOD_TO(RoomController::transferOwner, "/api/rooms/{1}/owner", drogon::Post);
+    ADD_METHOD_TO(RoomController::appointAdmin, "/api/rooms/{1}/admins/{2}", drogon::Put);
+    ADD_METHOD_TO(RoomController::dismissAdmin, "/api/rooms/{1}/admins/{2}", drogon::Delete);
     METHOD_LIST_END
 
     using Response = drogon::Task<drogon::HttpResponsePtr>;
@@ -30,5 +33,12 @@ class RoomController : public drogon::HttpController<RoomController>
     Response leave(drogon::HttpRequestPtr req, std::string roomId);
     Response members(drogon::HttpRequestPtr req, std::string roomId);
     Response messages(drogon::HttpRequestPtr req, std::string roomId);
+    Response transferOwner(drogon::HttpRequestPtr req, std::string roomId);
+    Response appointAdmin(drogon::HttpRequestPtr req,
+                          std::string roomId,
+                          std::string username);
+    Response dismissAdmin(drogon::HttpRequestPtr req,
+                          std::string roomId,
+                          std::string username);
 };
 }  // namespace chat

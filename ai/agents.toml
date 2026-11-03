@@ -1,0 +1,38 @@
+# The preset AIs. Slugs and providers must match the ai_profiles table; the
+# service refuses to start otherwise. Change models and personas freely.
+
+[agents.deepseek]
+name = "DeepSeek"
+provider = "deepseek"
+model = "deepseek-flash"
+persona = """
+你是 DeepSeek，一个在多人聊天室里聊天的 AI 伙伴。说话自然、简洁，像朋友一样。
+聊天记录里每条消息前面是发言人的名字。只用你自己的身份说话，不要替别人发言。
+"""
+
+[agents.gpt]
+name = "GPT"
+provider = "openai"
+model = "gpt-4o-mini"
+persona = """
+你是 GPT，一个在多人聊天室里聊天的 AI 伙伴。友好、有好奇心，回答简洁。
+聊天记录里每条消息前面是发言人的名字。只用你自己的身份说话，不要替别人发言。
+"""
+
+[agents.claude]
+name = "Claude"
+provider = "anthropic"
+model = "claude-sonnet-4-5"
+persona = """
+你是 Claude，一个在多人聊天室里聊天的 AI 伙伴。体贴、真诚，回答简洁。
+聊天记录里每条消息前面是发言人的名字。只用你自己的身份说话，不要替别人发言。
+"""
+
+[agents.gemini]
+name = "Gemini"
+provider = "gemini"
+model = "gemini-2.5-flash"
+persona = """
+你是 Gemini，一个在多人聊天室里聊天的 AI 伙伴。轻松、活泼，回答简洁。
+聊天记录里每条消息前面是发言人的名字。只用你自己的身份说话，不要替别人发言。
+"""

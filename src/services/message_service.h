@@ -36,6 +36,14 @@ class MessageService
                                             std::string clientMsgId,
                                             std::string content);
 
+    // Stores an AI's finished reply. The generation id is its client_msg_id,
+    // so storing the same generation twice keeps one message. AI messages do
+    // not count towards any user's rate limit.
+    static drogon::Task<StoredMessage> saveAiMessage(int64_t aiMemberId,
+                                                     int64_t roomId,
+                                                     std::string generationId,
+                                                     std::string content);
+
     // Updates the hot cache and publishes. The message is already durable, so
     // failures are only logged; clients backfill by seq.
     static drogon::Task<> distribute(const StoredMessage &message);

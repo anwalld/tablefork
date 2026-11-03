@@ -86,13 +86,15 @@ def test_other_addresses_share_the_count(anon, name):
 
 
 def test_unknown_names_behave_like_existing_ones(anon, name):
-    unknown = unique_name()
-    use_up_free_attempts(anon, unknown)
-    known = Client()
-    use_up_free_attempts(known, name)
-    a, b = login(anon, unknown), login(known, name)
-    assert a.status_code == b.status_code == 429
-    assert error_code(a) == error_code(b)
+    codes = []
+    for client, username in ((anon, unique_name()), (Client(), name)):
+        use_up_free_attempts(client, username)
+        # Check immediately: filling the other name's budget first can outlast
+        # this name's one-second backoff, especially with password hashing.
+        response = login(client, username)
+        assert_too_many_attempts(response)
+        codes.append(error_code(response))
+    assert codes[0] == codes[1]
 
 
 def test_concurrent_attempts_cannot_slip_through(name):

@@ -43,6 +43,21 @@ class ApiError : public std::runtime_error
         return retryAfter_;
     }
 
+    // The model provider an error is about, when there is one.
+    const std::optional<std::string> &provider() const
+    {
+        return provider_;
+    }
+
+    static ApiError apiKeyRequired(const std::string &provider)
+    {
+        ApiError error{drogon::k400BadRequest,
+                       "api_key_required",
+                       "add an API key for " + provider + " first"};
+        error.provider_ = provider;
+        return error;
+    }
+
     static ApiError invalidArgument(const std::string &message)
     {
         return {drogon::k400BadRequest, "invalid_argument", message};
@@ -58,6 +73,13 @@ class ApiError : public std::runtime_error
     static ApiError roomNotFound()
     {
         return {drogon::k404NotFound, "room_not_found", "room not found"};
+    }
+
+    static ApiError forbidden()
+    {
+        return {drogon::k403Forbidden,
+                "forbidden",
+                "only the room owner or an admin may do this"};
     }
 
     static ApiError unavailable()
@@ -106,5 +128,6 @@ class ApiError : public std::runtime_error
     std::string code_;
     bool retryable_;
     std::optional<int> retryAfter_;
+    std::optional<std::string> provider_;
 };
 }  // namespace chat

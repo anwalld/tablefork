@@ -196,8 +196,10 @@ def test_concurrent_join_and_last_leave_is_consistent(make_user, make_room, db):
             cursor.execute("SELECT COUNT(*) FROM rooms WHERE id=%s", (room_id,))
             exists = cursor.fetchone()[0] == 1
         if results["join"].status_code == 200:
-            # Joined first: the owner was not the last human.
-            assert exists and results["leave"].json()["room_deleted"] is False
+            # Joined first: the owner was not the last human, so must transfer.
+            assert exists
+            assert results["leave"].status_code == 409
+            assert error_code(results["leave"]) == "owner_must_transfer"
         else:
             assert not exists and results["leave"].json()["room_deleted"] is True
 

@@ -7,6 +7,7 @@
 #include <drogon/utils/coroutine.h>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -44,6 +45,11 @@ class RoomHub
     };
 
     void onChannelMessage(int64_t roomId, const std::string &payload);
+    // Sends to every local connection in the room, or only to those of the
+    // targeted members.
+    void sendToRoom(int64_t roomId,
+                    const std::string &payload,
+                    const std::set<int64_t> *targets);
     void removeMemberLocally(int64_t roomId, int64_t memberId);
     void eraseIfEmpty(int64_t roomId);
     std::shared_ptr<drogon::nosql::RedisSubscriber> subscriber();

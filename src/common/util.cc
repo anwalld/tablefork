@@ -5,6 +5,22 @@
 
 namespace chat
 {
+std::string utf8Prefix(std::string_view text, size_t count)
+{
+    size_t end = 0;
+    for (size_t taken = 0; end < text.size() && taken < count; ++taken)
+    {
+        // Skip the lead byte, then any continuation bytes.
+        ++end;
+        while (end < text.size() &&
+               (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80)
+        {
+            ++end;
+        }
+    }
+    return std::string(text.substr(0, end));
+}
+
 std::optional<size_t> utf8Length(std::string_view text)
 {
     size_t count = 0;
@@ -109,6 +125,10 @@ Json::Value errorBody(const ApiError &error)
     if (const auto seconds = error.retryAfter())
     {
         body["error"]["retry_after"] = *seconds;
+    }
+    if (const auto &provider = error.provider())
+    {
+        body["error"]["provider"] = *provider;
     }
     return body;
 }

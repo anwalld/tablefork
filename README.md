@@ -1,6 +1,18 @@
 # CppAiServer
 
-多人加多个 AI 的聊天室。当前阶段实现多人聊天室基础，AI 接入在后续变更中完成。设计见 `openspec/changes/add-chatroom-foundation/design.md`。
+多人加多个 AI 的聊天室。房间里可以有多名用户和 DeepSeek、GPT、Claude、Gemini 四个预置 AI，AI 的调用费用由用户自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
+
+```text
+浏览器 --HTTP/WS--> Nginx --> C++ 聊天服务（Drogon） --> MySQL（权威数据）
+                                   |      ^             --> Redis（会话、热缓存、广播、AI 状态）
+                         房间事件 |      | 回复片段、最终回复、提示
+                     （gRPC 双向流） v      |
+                               Python AI 服务（ai/）--> 各家模型 API
+```
+
+- C++ 聊天服务负责账号、房间、消息和推送；AI 的最终回复也由它保存，`seq` 只在这里分配。
+- Python AI 服务决定 AI 什么时候说话、由哪个 AI 说，调用模型并流式输出，同时负责 API key 的加解密。它的状态都在 Redis，进程本身无状态。
+- 两者通过 `proto/ai.proto` 定义的 gRPC 双向流通信。AI 服务停止时，人和人之间的聊天不受影响，重连后补回期间的事件。
 
 ## 一键启动
 
@@ -22,7 +34,7 @@ curl http://localhost:8080/health
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
-修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V3__add_ai_members.sql`。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V4__add_message_reactions.sql`。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
 
 查看迁移状态，或在修正后清理失败记录：
 
@@ -42,7 +54,43 @@ Flyway 镜像只带 MariaDB 驱动，所以连接地址是 `jdbc:mariadb://`，�
 docker compose down -v
 ```
 
-修改已有环境的 `MYSQL_PASSWORD` 或 `MYSQL_ROOT_PASSWORD` 时，只改 `.env` 不够，MySQL 的密码保存在数据卷里，要同时用 `ALTER USER` 修改。
+修改已有环境的 `MYSQL_PASSWORD` 或 `MYSQL_ROOT_PASSWORD` 时，只改 `.env` 不够，MySQL 的密码保存在数据卷里，要同时用 `ALTER USER` 修改。`AI_MYSQL_PASSWORD` 例外：`db-users` 服务每次启动都会用 root 把 `ai` 账号的密码同步成 `.env` 里的值。
+
+## AI
+
+### 密钥和账号
+
+`.env` 里有三个 AI 相关的密钥，`.env.example` 的注释里写了生成方法：
+
+| 变量 | 用途 | 谁能看到 |
+|---|---|---|
+| `AI_GRPC_TOKEN` | C++ 和 AI 服务之间 gRPC 的共享令牌 | app、ai |
+| `AI_KEY_ENCRYPTION_KEY` | 加密用户 API key 的主密钥（AES-256-GCM），丢失后已保存的 key 全部无法解密 | 只有 ai |
+| `AI_MYSQL_PASSWORD` | AI 服务的 MySQL 账号 `ai` | db-users、ai |
+
+`ai` 账号由一次性的 `db-users` 服务创建，只能读写 `user_api_keys`（不能删除）、读 `ai_profiles` 和 `messages`，以及读 `members` 的 `id`、`type`、`display_name` 三列。root 密码只给 MySQL 和 `db-users`。
+
+### 填写 API key 和邀请 AI
+
+1. 登录后点左上角的“设置”，按服务商填写 API key。保存前会先向服务商验证，之后只显示末 4 位。
+2. 在房间里点“成员”，从“邀请 AI”里选择。群主和管理员邀请时 AI 直接加入；普通成员提交申请，由群主或管理员审批。邀请人必须有对应服务商的 key。
+3. 只有一个人的房间里，AI 回复你的每条消息，冷场时还会主动说话，第 3 条主动发言是告别；多人房间里，用 `@Claude` 这样的方式提及 AI 才会回复。完整规则见 `openspec/specs/ai-replies/spec.md`。
+
+DeepSeek 默认使用 `deepseek-flash`，并在调用时显式关闭思考模式，减少日常聊天的 token 开销。模型与定价以 [DeepSeek 官方价格表](https://api-docs.deepseek.com/quick_start/pricing/) 为准。
+
+预置 AI 的模型名和人设在 `ai/agents.toml`，改完运行 `docker compose up -d --build --wait ai` 重新构建并启动 AI 服务。模型名要按各家当时可用的型号填写。国内网络访问 OpenAI、Anthropic、Gemini 可能需要代理，适配器支持修改 `base_url`。
+
+行为参数（都在 `.env`）：`AI_CHAIN_P`（AI 之间接话的起始概率）、`AI_PROACTIVE_P1`（主动发言的概率）、`AI_IDLE_SECONDS`（冷场多久算冷场）、`AI_CONTEXT_MESSAGES`（带多少条历史）、`AI_GENERATION_TIMEOUT`（单次生成超时秒数）。
+
+### 不用真实 key 在本地试
+
+设置 `AI_FAKE_PROVIDERS=1` 后，所有服务商都换成一个假模型：以 `fake-` 开头的 key 都能通过验证，回复内容是“AI 名字: 最后一条消息”。测试和 CI 都用这种方式，不会调用真实的服务商。
+
+```bash
+AI_FAKE_PROVIDERS=1 AI_IDLE_SECONDS=20 docker compose up -d --build --wait
+```
+
+这只用于本地试用，公开部署时不要打开。
 
 公开部署时，把 `ALLOWED_ORIGINS` 改成实际域名，并在 HTTPS 下设置 `COOKIE_SECURE=1`。
 
@@ -62,7 +110,13 @@ scripts/test.sh
 
 每个用户每 10 秒最多发 30 条消息，所有连接和房间合计，超出的消息返回 `rate_limited` 和 `retry_after`，不会保存，之后可以用同一个 `client_msg_id` 重发。数值在 `.env` 的 `MESSAGE_RATE_*` 里。
 
-测试会频繁注册、登录和发消息，所以脚本先放开 Nginx 和消息的限制、把登录计数的有效期缩短到 5 秒来运行全部测试，再用每 2 秒 5 条的消息限额测试消息限流，用默认值测试 Nginx 限流，最后按正常配置重启。
+测试会频繁注册、登录和发消息，所以脚本分几步：
+
+1. 放开 Nginx 和消息的限制，把登录计数的有效期缩短到 5 秒，AI 服务用假模型、冷场时长 3 秒，运行全部测试。
+2. 先准备一个有 AI 的房间，停掉 AI 服务后发一条消息，确认人和人的聊天照常；再启动 AI 服务，确认这条消息在重连后得到且只得到一次回复。
+3. 检查日志里没有出现测试用的 API key 明文。
+4. 用每 2 秒 5 条的消息限额测试消息限流、AI 之间接话（接话概率设为 1）和 AI 回复不占用户限额，用默认值测试 Nginx 限流。
+5. 按正常配置重启。
 
 队列满的测试需要极小的队列，默认跳过。单独运行时，环境变量要在两条命令中都生效：
 
@@ -161,10 +215,24 @@ docker compose up -d --wait
 |---|---|
 | `src/` | C++ 后端 |
 | `web/` | Vue 前端 |
+| `ai/` | Python AI 服务：触发规则、模型适配器、key 加密 |
+| `proto/` | C++ 和 AI 服务共用的 gRPC 接口 |
 | `migrations/` | 数据库迁移，由 Flyway 执行 |
 | `docker/` | Nginx 配置和 Drogon 补丁 |
+| `scripts/` | 测试脚本、`ai` 账号的授权脚本 |
 | `tests/` | 单元测试和集成测试 |
 
 ## Drogon 补丁
 
 镜像构建时会给 Drogon 1.9.13 打上 `docker/drogon-mysql-disconnect.patch`。未打补丁时，MySQL 不可达会让应用在 `MysqlConnection::disconnect()` 中段错误退出。
+
+
+### AI 回复恢复
+
+房间事件的状态和待生成任务原子保存后才确认，C++ 会重发超时未确认的事件。AI 服务中断后，Redis 中的未完成任务在租约到期后自动恢复，重新生成可能再次产生服务商费用。缺 key 或 key 被拒绝时直接提示用户更新。
+
+`AI_GENERATION_MAX_ATTEMPTS` 控制每条回复的总尝试次数（默认 3），`AI_RETRY_BASE_SECONDS` 控制退避基数（默认 1 秒），`AI_WORK_LEASE_SECONDS` 控制任务租约（默认 10 秒，运行中自动续期）。完整结果会重投直到 C++ 确认保存，重复投递按 `generation_id` 去重。
+
+冷场任务开始前会检查用户是否已重新发言。已开始的冷场回复可以完成，后来的用户消息随后正常回复。主动发言用三个成功位记录，只在消息保存成功后置位，三位全为 1 时结束。
+
+浏览器从实时推送和历史查询得到正式消息时都会清除对应草稿。流式片段携带尝试编号和累计文本，重试及重连后能替换旧草稿。`scripts/test.sh` 包含 Python 单元测试与生成中重启 AI 服务的故障测试。

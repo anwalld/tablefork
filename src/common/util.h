@@ -18,6 +18,9 @@ namespace chat
 // Number of UTF-8 code points, or nullopt when the text is not valid UTF-8.
 std::optional<size_t> utf8Length(std::string_view text);
 
+// The first `count` code points of valid UTF-8 text.
+std::string utf8Prefix(std::string_view text, size_t count);
+
 // True for valid UTF-8 without control characters. Names must satisfy this: a
 // NUL would truncate them on the way through Redis, letting one user pass as
 // another.

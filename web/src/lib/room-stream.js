@@ -2,9 +2,10 @@
 // fetches what is missing, whichever way a message arrived.
 export class RoomStream {
   // fetchAfter(seq) resolves to the next page of messages after seq.
-  constructor({ fetchAfter, onChange = () => {}, gapTimeoutMs = 800 }) {
+  constructor({ fetchAfter, onChange = () => {}, onMessages = () => {}, gapTimeoutMs = 800 }) {
     this.fetchAfter = fetchAfter
     this.onChange = onChange
+    this.onMessages = onMessages
     this.gapTimeoutMs = gapTimeoutMs
     this.bySeq = new Map()
     // Everything from the loaded window's start up to here has arrived.
@@ -20,6 +21,7 @@ export class RoomStream {
   // Adds a page of history, which may start anywhere.
   addPage(messages) {
     if (messages.length === 0) return
+    this.onMessages(messages)
     for (const message of messages) this.bySeq.set(message.seq, message)
     const newest = messages[messages.length - 1].seq
     if (this.contiguous < messages[0].seq - 1) {
@@ -31,6 +33,7 @@ export class RoomStream {
   }
 
   receive(message) {
+    this.onMessages([message])
     if (this.bySeq.has(message.seq)) return
     this.bySeq.set(message.seq, message)
     this.advance()
@@ -73,6 +76,7 @@ export class RoomStream {
     while (true) {
       const page = await this.fetchAfter(this.contiguous)
       if (page.length === 0) return
+      this.onMessages(page)
       for (const message of page) this.bySeq.set(message.seq, message)
       this.advance()
       this.onChange()

@@ -34,6 +34,21 @@ services:
       mysql:
         condition: service_healthy
 
+  # Creates the AI service's restricted MySQL account. The only service besides
+  # MySQL that gets the root password.
+  db-users:
+    image: mysql:8.4.6
+    entrypoint: ["bash", "/db-users.sh"]
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set it in .env, see .env.example}
+      AI_MYSQL_PASSWORD: ${AI_MYSQL_PASSWORD:?set it in .env, see .env.example}
+    volumes:
+      - ./scripts/db-users.sh:/db-users.sh:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   redis-master:
     image: redis:7.4.5
     command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDISCLI_AUTH\""]
@@ -84,6 +99,9 @@ services:
       DEVICE_TTL_DAYS: ${DEVICE_TTL_DAYS:-180}
       MESSAGE_RATE_LIMIT: ${MESSAGE_RATE_LIMIT:-30}
       MESSAGE_RATE_WINDOW_SECONDS: ${MESSAGE_RATE_WINDOW_SECONDS:-10}
+      # The app runs without the AI service and connects when it appears.
+      AI_GATEWAY: ai:50051
+      AI_GRPC_TOKEN: ${AI_GRPC_TOKEN:?set it in .env, see .env.example}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -94,6 +112,37 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+
+  # The AI service. Holds the key encryption key; reachable only on the
+  # internal network.
+  ai:
+    build:
+      context: .
+      dockerfile: ai/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    environment:
+      AI_GRPC_TOKEN: ${AI_GRPC_TOKEN:?set it in .env, see .env.example}
+      AI_KEY_ENCRYPTION_KEY: ${AI_KEY_ENCRYPTION_KEY:?set it in .env, see .env.example}
+      AI_MYSQL_PASSWORD: ${AI_MYSQL_PASSWORD:?set it in .env, see .env.example}
+      MYSQL_HOST: mysql
+      REDIS_HOST: ${REDIS_HOST:-redis-master}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+      AI_FAKE_PROVIDERS: ${AI_FAKE_PROVIDERS:-}
+      AI_CHAIN_P: ${AI_CHAIN_P:-0.5}
+      AI_PROACTIVE_P1: ${AI_PROACTIVE_P1:-0.5}
+      AI_IDLE_SECONDS: ${AI_IDLE_SECONDS:-1800}
+      AI_TIMER_POLL_SECONDS: ${AI_TIMER_POLL_SECONDS:-5}
+      AI_CONTEXT_MESSAGES: ${AI_CONTEXT_MESSAGES:-30}
+      AI_GENERATION_TIMEOUT: ${AI_GENERATION_TIMEOUT:-60}
+      AI_GENERATION_MAX_ATTEMPTS: ${AI_GENERATION_MAX_ATTEMPTS:-3}
+      AI_RETRY_BASE_SECONDS: ${AI_RETRY_BASE_SECONDS:-1}
+      AI_WORK_LEASE_SECONDS: ${AI_WORK_LEASE_SECONDS:-10}
+    depends_on:
+      db-users:
+        condition: service_completed_successfully
+      redis-master:
+        condition: service_healthy
 
   nginx:
     build:
@@ -124,6 +173,7 @@ services:
       ORIGIN: http://localhost:8080
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+      AI_MYSQL_PASSWORD: ${AI_MYSQL_PASSWORD:?set it in .env, see .env.example}
       SMALL_QUEUE: ${SMALL_QUEUE:-}
       STRICT_AUTH_RATE: ${STRICT_AUTH_RATE:-}
     depends_on:

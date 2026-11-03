@@ -39,6 +39,10 @@ struct Config
     int loginFailTtlSeconds;
     int deviceTtlDays;
 
+    // The AI service, as host:port; empty to run without AIs.
+    std::string aiGateway;
+    std::string aiToken;
+
     // Messages a user may send per window, across all connections and rooms.
     int messageRateLimit;
     int messageRateWindowSeconds;

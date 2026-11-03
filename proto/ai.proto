@@ -1,0 +1,142 @@
+// Between the C++ chat server (client) and the Python AI service (server).
+syntax = "proto3";
+
+package chat.ai;
+
+service AiGateway {
+  // One long-lived stream per chat server instance. The chat server reports
+  // what happens in rooms; the AI service answers with what the AIs say.
+  rpc Connect(stream GatewayEvent) returns (stream AiAction);
+
+  // Validates a user's model API key with its provider, then stores it
+  // encrypted. Only the AI service ever sees the key in the clear.
+  rpc StoreKey(StoreKeyRequest) returns (StoreKeyReply);
+}
+
+message Human {
+  int64 member_id = 1;
+  int64 user_id = 2;
+}
+
+message AiMember {
+  int64 member_id = 1;
+  string slug = 2;
+  string provider = 3;
+  string name = 4;
+}
+
+// Who is in a room at the time of the event.
+message RoomSnapshot {
+  int64 room_id = 1;
+  repeated Human humans = 2;
+  repeated AiMember ais = 3;
+}
+
+message Sender {
+  int64 member_id = 1;
+  bool is_ai = 2;
+  int64 user_id = 3;  // humans only
+  string slug = 4;    // AIs only
+  string name = 5;
+}
+
+message MessageSaved {
+  RoomSnapshot room = 1;
+  int64 seq = 2;
+  Sender sender = 3;
+  string content = 4;
+  string generation_id = 5;  // AI messages only
+  int64 created_at_ms = 6;
+}
+
+message MembersChanged {
+  RoomSnapshot room = 1;
+}
+
+message RoomDeleted {
+  int64 room_id = 1;
+}
+
+message GatewayEvent {
+  // Unique together: instance_id is random per chat server process, event_id
+  // counts up within it. Resent events keep both, so they can be ignored.
+  string instance_id = 1;
+  int64 event_id = 2;
+  oneof body {
+    MessageSaved message_saved = 3;
+    MembersChanged members_changed = 4;
+    RoomDeleted room_deleted = 5;
+    GenerationRejected generation_rejected = 6;
+  }
+}
+
+message GenerationRejected {
+  int64 room_id = 1;
+  string generation_id = 2;
+}
+
+message Ack {
+  int64 event_id = 1;
+}
+
+// Part of a reply being generated. Not stored.
+message Chunk {
+  int64 room_id = 1;
+  string generation_id = 2;
+  int64 ai_member_id = 3;
+  string text = 4;
+  uint32 attempt = 5;
+  uint32 sequence = 6;
+  bool cumulative = 7;
+  string snapshot = 8;
+}
+
+// A finished reply, to be stored and delivered as an ordinary message.
+message Final {
+  int64 room_id = 1;
+  string generation_id = 2;
+  int64 ai_member_id = 3;
+  string content = 4;
+}
+
+// A generation that will not finish. The room drops its partial text; only
+// notify_member_id is told why.
+message Failed {
+  int64 room_id = 1;
+  string generation_id = 2;
+  int64 ai_member_id = 3;
+  int64 notify_member_id = 4;
+  string code = 5;
+  string message = 6;
+}
+
+// A message for one user only, such as a missing API key.
+message Notice {
+  int64 room_id = 1;
+  int64 notify_member_id = 2;
+  string code = 3;
+  string provider = 4;
+  string message = 5;
+}
+
+message AiAction {
+  oneof body {
+    Ack ack = 1;
+    Chunk chunk = 2;
+    Final final = 3;
+    Failed failed = 4;
+    Notice notice = 5;
+  }
+}
+
+message StoreKeyRequest {
+  int64 user_id = 1;
+  string provider = 2;
+  string api_key = 3;
+}
+
+message StoreKeyReply {
+  bool ok = 1;
+  string last4 = 2;
+  string error_code = 3;  // api_key_invalid, invalid_argument, unavailable
+}

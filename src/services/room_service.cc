@@ -1,6 +1,8 @@
 #include "services/room_service.h"
 
+#include <algorithm>
 #include <drogon/drogon.h>
+#include <optional>
 
 #include "common/util.h"
 
@@ -32,6 +34,58 @@ drogon::Task<bool> isMember(const TransactionPtr &tx,
         memberId);
     co_return !rows.empty();
 }
+
+// The member's role in the room, or nothing for a non-member.
+drogon::Task<std::optional<std::string>> roleOf(const TransactionPtr &tx,
+                                                int64_t roomId,
+                                                int64_t memberId)
+{
+    const auto rows = co_await tx->execSqlCoro(
+        "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+        roomId,
+        memberId);
+    if (rows.empty())
+    {
+        co_return std::nullopt;
+    }
+    co_return rows[0]["role"].as<std::string>();
+}
+
+// Locks the room and checks that the caller owns it.
+drogon::Task<> requireOwner(const TransactionPtr &tx,
+                            int64_t roomId,
+                            int64_t memberId)
+{
+    co_await lockRoom(tx, roomId);
+    const auto role = co_await roleOf(tx, roomId, memberId);
+    if (!role)
+    {
+        throw ApiError::roomNotFound();
+    }
+    if (*role != "owner")
+    {
+        throw ApiError::forbidden();
+    }
+}
+
+// A human member of the room, by user name.
+drogon::Task<int64_t> humanMember(const TransactionPtr &tx,
+                                  int64_t roomId,
+                                  const std::string &username)
+{
+    const auto rows = co_await tx->execSqlCoro(
+        "SELECT m.id FROM users u "
+        "JOIN members m ON m.user_id = u.id "
+        "JOIN room_members rm ON rm.member_id = m.id AND rm.room_id = ? "
+        "WHERE u.username = ?",
+        roomId,
+        username);
+    if (rows.empty())
+    {
+        throw ApiError::invalidArgument("not a human member of this room");
+    }
+    co_return rows[0]["id"].as<int64_t>();
+}
 }  // namespace
 
 drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
@@ -47,7 +101,8 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
         co_await tx->execSqlCoro("INSERT INTO rooms (name) VALUES (?)", name);
     const auto roomId = static_cast<int64_t>(room.insertId());
     co_await tx->execSqlCoro(
-        "INSERT INTO room_members (room_id, member_id) VALUES (?, ?)",
+        "INSERT INTO room_members (room_id, member_id, role) "
+        "VALUES (?, ?, 'owner')",
         roomId,
         session.memberId);
     co_await commit(std::move(tx));
@@ -153,7 +208,8 @@ drogon::Task<bool> RoomService::leave(Session session,
 {
     auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
     co_await lockRoom(tx, roomId);
-    if (!co_await isMember(tx, roomId, session.memberId))
+    const auto role = co_await roleOf(tx, roomId, session.memberId);
+    if (!role)
     {
         throw ApiError::roomNotFound();
     }
@@ -164,6 +220,12 @@ drogon::Task<bool> RoomService::leave(Session session,
         roomId,
         session.memberId);
     const auto deleted = otherHumans[0]["n"].as<int64_t>() == 0;
+    if (!deleted && *role == "owner")
+    {
+        throw ApiError(drogon::k409Conflict,
+                       "owner_must_transfer",
+                       "transfer ownership before leaving");
+    }
     if (deleted && !confirmDelete)
     {
         throw ApiError(drogon::k409Conflict,
@@ -189,8 +251,10 @@ drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
 {
     co_await requireMember(session.memberId, roomId);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT m.id, m.type, m.display_name FROM room_members rm "
+        "SELECT m.id, m.type, m.display_name, rm.role, p.slug, p.provider "
+        "FROM room_members rm "
         "JOIN members m ON m.id = rm.member_id "
+        "LEFT JOIN ai_profiles p ON p.member_id = m.id "
         "WHERE rm.room_id = ? ORDER BY rm.joined_at, m.id",
         roomId);
     Json::Value members(Json::arrayValue);
@@ -200,11 +264,84 @@ drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
         member["id"] = Json::Int64(row["id"].as<int64_t>());
         member["type"] = row["type"].as<std::string>();
         member["name"] = row["display_name"].as<std::string>();
+        member["role"] = row["role"].as<std::string>();
+        if (!row["slug"].isNull())
+        {
+            member["slug"] = row["slug"].as<std::string>();
+            member["provider"] = row["provider"].as<std::string>();
+        }
         members.append(std::move(member));
     }
     Json::Value body;
     body["members"] = std::move(members);
     co_return body;
+}
+
+drogon::Task<int64_t> RoomService::transferOwner(Session session,
+                                                 int64_t roomId,
+                                                 std::string username)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await requireOwner(tx, roomId, session.memberId);
+    const auto target = co_await humanMember(tx, roomId, username);
+    if (target != session.memberId)
+    {
+        co_await tx->execSqlCoro(
+            "UPDATE room_members SET role = 'member', role_changed_at = NOW(3) "
+            "WHERE room_id = ? AND member_id = ?",
+            roomId,
+            session.memberId);
+        co_await tx->execSqlCoro(
+            "UPDATE room_members SET role = 'owner', role_changed_at = NOW(3) "
+            "WHERE room_id = ? AND member_id = ?",
+            roomId,
+            target);
+    }
+    co_await commit(std::move(tx));
+    co_return target;
+}
+
+drogon::Task<int64_t> RoomService::setAdmin(Session session,
+                                            int64_t roomId,
+                                            std::string username,
+                                            bool admin)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await requireOwner(tx, roomId, session.memberId);
+    const auto target = co_await humanMember(tx, roomId, username);
+    if (target == session.memberId)
+    {
+        throw ApiError::invalidArgument("the owner cannot be an admin");
+    }
+    co_await tx->execSqlCoro(
+        "UPDATE room_members SET role = ?, role_changed_at = NOW(3) "
+        "WHERE room_id = ? AND member_id = ?",
+        std::string(admin ? "admin" : "member"),
+        roomId,
+        target);
+    co_await commit(std::move(tx));
+    co_return target;
+}
+
+drogon::Task<std::string> RoomService::requireRole(
+    int64_t memberId,
+    int64_t roomId,
+    std::vector<std::string> allowed)
+{
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+        roomId,
+        memberId);
+    if (rows.empty())
+    {
+        throw ApiError::roomNotFound();
+    }
+    auto role = rows[0]["role"].as<std::string>();
+    if (std::find(allowed.begin(), allowed.end(), role) == allowed.end())
+    {
+        throw ApiError::forbidden();
+    }
+    co_return role;
 }
 
 drogon::Task<int64_t> RoomService::requireMember(int64_t memberId, int64_t roomId)

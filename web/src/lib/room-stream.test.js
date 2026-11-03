@@ -1,3 +1,4 @@
+import { AiDrafts } from './ai-drafts.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RoomStream } from './room-stream.js'
 
@@ -75,4 +76,23 @@ describe('RoomStream', () => {
     await Promise.all([stream.sync(), stream.sync()])
     expect(fetchAfter).toHaveBeenCalledTimes(2)
   })
+})
+
+
+it('closes AI drafts for initial history, gap backfill and realtime messages', async () => {
+  const drafts = new AiDrafts()
+  const final = (seq) => ({ seq, generation_id: `g${seq}`, content: 'complete' })
+  for (const seq of [1, 2, 3]) {
+    drafts.chunk({ room_id: 1, generation_id: `g${seq}`, member_id: 9, text: 'partial' })
+  }
+  const stream = new RoomStream({
+    fetchAfter: async after => after < 2 ? [final(2)] : [],
+    onMessages: page => page.forEach(message => drafts.close(message.generation_id)),
+  })
+  stream.addPage([final(1)])
+  await stream.sync()
+  stream.receive(final(3))
+  expect(drafts.forRoom(1)).toEqual([])
+  expect(stream.messages).toEqual([final(1), final(2), final(3)])
+  stream.dispose()
 })
