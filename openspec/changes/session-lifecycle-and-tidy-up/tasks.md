@@ -3,7 +3,7 @@
 ## 1. 小的遗留
 
 - [x] 1.1 `ai/chat_ai/keys.py` 改为 `INSERT ... AS new ON DUPLICATE KEY UPDATE` 写法；Python 单元测试通过，集成测试中保存和替换 key 正常，AI 服务日志不再出现 `VALUES function` 弃用警告
-- [ ] 1.2 CI 的 `actions/checkout` 升到 `@v5`；推送后 CI 运行中不再出现 Node.js 20 弃用提示
+- [x] 1.2 CI 的 `actions/checkout` 升到 `@v5`；推送后 CI 运行中不再出现 Node.js 20 弃用提示
 
 ## 2. 会话结束时断开连接（C++）
 
@@ -31,8 +31,16 @@
 
 ## 6. 整体验证
 
-- [ ] 6.1 `scripts/test.sh` 全部通过；推送后 CI 通过
+- [x] 6.1 `scripts/test.sh` 全部通过；推送后 CI 通过
 
 ## Workflow follow-up
 
 - 实施完成后运行 `/opsx:verify`，再提交并 `/opsx:archive`。
+
+## 实施记录
+
+- 实施中把“登出范围”从“使用该会话的连接”扩展为受信任设备规则（一台手机、一台电脑，发送数 1.5 倍替换），规格、设计和任务已同步。
+- 清理已在开发库执行：删除 4157 个测试账号、1901 个房间；保留你的账号、`realtest_` 账号和 5 个控制字符名。
+- verify 发现旧测试 `test_send_after_logout_is_unauthenticated` 与新登出行为冲突，已拆成“登出即断开”和“过期后、检查前发消息未认证”两个测试。
+- 完整测试通过：第一轮 180、AI 故障 5 阶段、第二轮 9；浏览器手动验证受信任与非受信任设备的登出。
+- CI：PR #6 运行 41628455250 通过，约 16 分钟，没有任何注释（Node 20 弃用提示已消失）。
