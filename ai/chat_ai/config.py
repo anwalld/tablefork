@@ -53,7 +53,7 @@ class Settings:
         return cls(
             grpc_port=_int("AI_GRPC_PORT", 50051),
             grpc_token=token,
-            redis_host=os.environ.get("REDIS_HOST", "redis-master"),
+            redis_host=os.environ.get("REDIS_HOST", "redis-proxy"),
             redis_port=_int("REDIS_PORT", 6379),
             redis_password=os.environ.get("REDIS_PASSWORD", ""),
             mysql_host=os.environ.get("MYSQL_HOST", "mysql"),

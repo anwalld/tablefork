@@ -6,6 +6,7 @@ add_executable(chat-unit-tests
     login_limiter_test.cc
     message_rate_limiter_test.cc
     password_policy_test.cc
+    room_management_test.cc
     room_worker_pool_test.cc
     session_watcher_test.cc
     util_test.cc)

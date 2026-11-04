@@ -15,6 +15,11 @@ const emit = defineEmits(['changed', 'notice', 'open-settings', 'close'])
 const agents = ref([])
 const requests = ref([])
 const chosen = ref('')
+const showBans = ref(false)
+const bannedUsers = ref([])
+const banName = ref('')
+const bansLoading = ref(false)
+const moderationBusy = ref(false)
 
 const myRole = computed(() => props.members.find((m) => m.id === props.me.member_id)?.role ?? 'member')
 const isOwner = computed(() => myRole.value === 'owner')
@@ -23,6 +28,82 @@ const inRoom = computed(() => new Set(props.members.filter((m) => m.type === 'ai
 const addable = computed(() => agents.value.filter((a) => !inRoom.value.has(a.slug)))
 
 const ROLE_NAMES = { owner: '群主', admin: '管理员' }
+
+function canModerate(member) {
+  if (member.type !== 'human' || member.id === props.me.member_id) return false
+  return (isOwner.value && ['admin', 'member'].includes(member.role)) ||
+    (myRole.value === 'admin' && member.role === 'member')
+}
+
+function managementError(error) {
+  if (error.code === 'forbidden') return '你没有权限管理该成员'
+  if (error.code === 'user_not_found') return '找不到这个用户'
+  if (error.code === 'invalid_argument') return '不能对自己或非人类成员执行此操作'
+  return '操作失败，请稍后重试'
+}
+
+async function loadBans() {
+  if (!canManage.value) return
+  const roomId = props.roomId
+  bansLoading.value = true
+  try {
+    const result = await api.listBans(roomId)
+    if (roomId === props.roomId && canManage.value) bannedUsers.value = result.bans
+  } catch (error) {
+    if (roomId === props.roomId) emit('notice', managementError(error))
+  } finally {
+    if (roomId === props.roomId) bansLoading.value = false
+  }
+}
+
+async function toggleBans() {
+  showBans.value = !showBans.value
+  if (showBans.value) await loadBans()
+}
+
+async function moderate(action, username, verb) {
+  if (moderationBusy.value || !username || !window.confirm(`确定${verb} ${username}？`)) return
+  moderationBusy.value = true
+  try {
+    await action(props.roomId, username)
+    banName.value = ''
+    emit('notice', `已${verb} ${username}`)
+    emit('changed')
+    if (showBans.value) await loadBans()
+  } catch (error) {
+    emit('notice', managementError(error))
+  } finally {
+    moderationBusy.value = false
+  }
+}
+
+async function unban(username) {
+  if (moderationBusy.value) return
+  moderationBusy.value = true
+  try {
+    await api.unbanUser(props.roomId, username)
+    await loadBans()
+    emit('notice', `已解除对 ${username} 的封禁`)
+    emit('changed')
+  } catch (error) {
+    emit('notice', managementError(error))
+  } finally {
+    moderationBusy.value = false
+  }
+}
+
+watch(() => props.roomId, () => {
+  showBans.value = false
+  bannedUsers.value = []
+  bansLoading.value = false
+  banName.value = ''
+})
+watch(canManage, (allowed) => {
+  if (!allowed) {
+    showBans.value = false
+    bannedUsers.value = []
+  }
+})
 
 async function loadAgents() {
   agents.value = (await api.aiAgents()).agents
@@ -100,6 +181,12 @@ defineExpose({ loadAgents })
             <button v-if="member.role === 'admin'" class="link" @click="act(api.dismissAdmin, member)">取消管理员</button>
             <button v-else class="link" @click="act(api.appointAdmin, member)">设为管理员</button>
           </template>
+          <template v-if="canModerate(member)">
+            <button class="link danger" :disabled="moderationBusy" :aria-label="`踢出 ${member.name}`"
+              @click="moderate(api.kickMember, member.name, '踢出')">踢出</button>
+            <button class="link danger" :disabled="moderationBusy" :aria-label="`封禁 ${member.name}`"
+              @click="moderate(api.banUser, member.name, '封禁')">封禁</button>
+          </template>
           <button
             v-if="canManage && member.type === 'ai'"
             class="link danger"
@@ -110,6 +197,28 @@ defineExpose({ loadAgents })
         </span>
       </li>
     </ul>
+
+    <button v-if="canManage" class="link" @click="toggleBans">封禁列表</button>
+    <section v-if="canManage && showBans" aria-label="封禁列表">
+      <h3>封禁列表</h3>
+      <p v-if="bansLoading" class="hint">加载中…</p>
+      <ul v-else class="member-list">
+        <li v-for="entry in bannedUsers" :key="entry.username">
+          <div>
+            <strong>{{ entry.username }}</strong>
+            <div class="hint">执行者：{{ entry.banned_by ?? '账号已删除' }}</div>
+            <time class="hint">{{ new Date(entry.created_at).toLocaleString('zh-CN') }}</time>
+          </div>
+          <button class="link" :disabled="moderationBusy" :aria-label="`解封 ${entry.username}`"
+            @click="unban(entry.username)">解封</button>
+        </li>
+      </ul>
+      <p v-if="!bansLoading && !bannedUsers.length" class="hint">暂无封禁记录</p>
+      <form class="inline-form" @submit.prevent="moderate(api.banUser, banName.trim(), '封禁')">
+        <input v-model="banName" aria-label="封禁用户名" placeholder="封禁用户名" :disabled="moderationBusy" />
+        <button :disabled="moderationBusy || !banName.trim()">封禁用户</button>
+      </form>
+    </section>
 
     <form v-if="addable.length" class="inline-form" @submit.prevent="addAi">
       <select v-model="chosen" aria-label="选择 AI">

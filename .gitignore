@@ -19,3 +19,6 @@ __pycache__/
 # Claude Code worktrees
 .claude/worktrees/
 .claude/settings.local.json
+
+# 本地 CA 和 TLS 私钥
+data/certs/

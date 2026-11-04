@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,9 @@ namespace chat
 // Groups distinct keys into batches of at most `size`, for one MGET each.
 std::vector<std::vector<std::string>> keyBatches(const std::vector<std::string> &keys,
                                                  size_t size);
+
+// Uniform startup offset for a positive session check period.
+double firstCheckDelay(double period, std::mt19937 &rng);
 
 // Closes WebSocket connections whose session has ended. Logouts are announced
 // on a Redis channel and handled at once; sessions that simply expire are

@@ -19,6 +19,9 @@ const emit = defineEmits(['logout', 'session-ended'])
 
 const rooms = ref([])
 const activeId = ref(null)
+const removedRooms = reactive(new Map())
+const autoSelectRoom = ref(true)
+let roomRequest = 0
 const connected = ref(false)
 const notice = ref('')
 const newRoomName = ref('')
@@ -47,6 +50,11 @@ const revision = ref(0)
 
 const activeRoom = computed(() => rooms.value.find((r) => r.id === activeId.value) ?? null)
 
+const activeRemoval = computed(() => removedRooms.get(activeId.value))
+function removalNotice(room) {
+  return removedRooms.get(room.id) === 'banned' ? `你已被禁止进入房间 ${room.name}` : `你已被踢出房间 ${room.name}`
+}
+
 const timeline = computed(() => {
   void revision.value
   const stream = streams.get(activeId.value)
@@ -73,7 +81,7 @@ function streamFor(roomId) {
     streams.set(
       roomId,
       new RoomStream({
-        fetchAfter: async (after) => (await api.history(roomId, { after })).messages,
+        fetchAfter: async (after) => removedRooms.has(roomId) ? [] : (await api.history(roomId, { after })).messages,
         onChange: () => revision.value++,
         onMessages: (messages) => {
           for (const message of messages) {
@@ -84,6 +92,7 @@ function streamFor(roomId) {
       }),
     )
   }
+  if (!removedRooms.has(roomId)) streams.get(roomId).resume()
   return streams.get(roomId)
 }
 
@@ -98,19 +107,39 @@ const socket = new ChatSocket({
     }
   },
   onMessage: (message) => {
-    streamFor(message.room_id).receive(message)
+    if (!removedRooms.has(message.room_id)) streamFor(message.room_id).receive(message)
   },
   onEvent: (frame) => onRoomEvent(frame),
   // Subscribing first and reading history second means nothing can fall
   // between the two.
   onSubscribed: (roomId) => loadRoom(roomId),
-  onRoomLeft: (roomId) => forgetRoom(roomId),
+  onRoomLeft: (roomId, reason) => {
+    if (reason === 'kicked' || reason === 'banned') {
+      roomRequest++ // Discard list responses started before revocation.
+      removedRooms.set(roomId, reason)
+      stopTracking(roomId)
+      if (activeId.value === roomId) {
+        showMembers.value = false
+        members.value = []
+      }
+    } else {
+      forgetRoom(roomId)
+    }
+  },
   onSendResult: (roomId, clientMsgId, result) => {
     const box = outbox.get(roomId) ?? []
     const entry = box.find((m) => m.clientMsgId === clientMsgId)
     if (result.ok) {
-      streamFor(roomId).sync()
-      if (entry) outbox.set(roomId, box.filter((m) => m !== entry))
+      const stream = streamFor(roomId)
+      if (entry) {
+        stream.receive({ type: 'message', room_id: roomId, seq: result.seq,
+          created_at: result.created_at, client_msg_id: clientMsgId, content: entry.content,
+          member: { id: props.user.member_id, name: props.user.username, type: 'human' }, local: true })
+        outbox.set(roomId, box.filter((m) => m !== entry))
+      }
+      stream.sync().catch(() => {
+        if (!removedRooms.has(roomId)) notice.value = '加载消息失败'
+      })
     } else if (entry) {
       entry.failed = true
     }
@@ -123,6 +152,7 @@ const socket = new ChatSocket({
 })
 
 function onRoomEvent(frame) {
+  if (removedRooms.has(frame.room_id)) return
   const here = frame.room_id === activeId.value
   if (frame.type === 'ai_chunk') {
     drafts.chunk(frame)
@@ -144,14 +174,15 @@ function onRoomEvent(frame) {
 
 async function loadMembers() {
   const room = activeRoom.value
-  if (!room || room.status !== 'joined') {
+  if (!room || room.status !== 'joined' || removedRooms.has(room.id)) {
     members.value = []
     return
   }
   try {
-    members.value = (await api.members(room.id)).members
+    const result = await api.members(room.id)
+    if (activeId.value === room.id && !removedRooms.has(room.id)) members.value = result.members
   } catch {
-    members.value = []
+    if (activeId.value === room.id) members.value = []
   }
 }
 
@@ -169,21 +200,24 @@ async function chooseMention(member) {
 }
 
 async function loadRoom(roomId) {
+  if (removedRooms.has(roomId)) return
   const stream = streamFor(roomId)
   try {
     if (stream.bySeq.size > 0) {
       await stream.sync()
     } else {
       const { messages } = await api.history(roomId)
+      if (removedRooms.has(roomId)) return
       stream.addPage(messages)
       await stream.sync()
     }
   } catch {
-    notice.value = '加载消息失败'
+    if (!removedRooms.has(roomId)) notice.value = '加载消息失败'
   }
 }
 
 async function loadOlder() {
+  if (activeRemoval.value) return
   const stream = streamFor(activeId.value)
   const oldest = stream.messages[0]
   if (!oldest || oldest.seq <= 1) return
@@ -191,12 +225,17 @@ async function loadOlder() {
   stream.addPage(messages)
 }
 
-const canLoadOlder = computed(() => timeline.value.length > 0 && timeline.value[0].seq > 1)
+const canLoadOlder = computed(() => !activeRemoval.value && timeline.value.length > 0 && timeline.value[0].seq > 1)
 
 async function refreshRooms() {
+  const request = ++roomRequest
   try {
     const list = await fetchAllRooms(api.rooms)
-    rooms.value = list
+    if (request !== roomRequest) return
+    const returned = new Set(list.map(room => room.id))
+    for (const id of returned) removedRooms.delete(id)
+    const retained = rooms.value.filter(room => removedRooms.has(room.id) && !returned.has(room.id))
+    rooms.value = [...list, ...retained]
     const joined = new Set(list.filter((r) => r.status === 'joined').map((r) => r.id))
     for (const id of joined) {
       if (!socket.rooms.has(id)) socket.subscribe(id)
@@ -204,13 +243,20 @@ async function refreshRooms() {
     for (const id of socket.rooms) {
       if (!joined.has(id)) forgetRoom(id)
     }
-    if (activeId.value !== null && !list.some((r) => r.id === activeId.value)) {
+    if (activeId.value !== null && !rooms.value.some((r) => r.id === activeId.value)) {
       activeId.value = null
     }
-    if (activeId.value === null && list.length > 0) activeId.value = list[0].id
+    if (activeId.value === null && autoSelectRoom.value && list.length > 0) activeId.value = list[0].id
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) location.reload()
   }
+}
+
+function stopTracking(roomId) {
+  drafts.clear(roomId)
+  draftRevision.value++
+  socket.unsubscribe(roomId)
+  streams.get(roomId)?.dispose()
 }
 
 function forgetRoom(roomId) {
@@ -231,6 +277,7 @@ async function createRoom() {
     const room = await api.createRoom(name)
     newRoomName.value = ''
     await refreshRooms()
+    autoSelectRoom.value = true
     activeId.value = room.id
   } catch {
     notice.value = '创建房间失败，名称最多 64 个字符'
@@ -255,13 +302,14 @@ async function invite() {
     notice.value = `已邀请 ${username}`
     inviteName.value = ''
   } catch (e) {
-    notice.value = e.code === 'user_not_found' ? '找不到这个用户' : '邀请失败'
+    notice.value = e.code === 'user_banned' ? '该用户已被此房间封禁，需要先解封' :
+      e.code === 'user_not_found' ? '找不到这个用户' : '邀请失败'
   }
 }
 
 function send() {
   const content = draft.value
-  if (!content.trim() || !activeRoom.value) return
+  if (!content.trim() || !activeRoom.value || activeRemoval.value) return
   if ([...content].length > 4000) {
     notice.value = '消息最多 4000 个字符'
     return
@@ -274,6 +322,7 @@ function send() {
 }
 
 function retry(entry) {
+  if (activeRemoval.value) return
   entry.failed = false
   entry.throttled = false
   socket.send(activeId.value, entry.clientMsgId, entry.content)
@@ -347,7 +396,7 @@ watch([timeline, pending], async () => {
   }
 })
 
-watch(() => [activeId.value, activeRoom.value?.status], loadMembers)
+watch(() => [activeId.value, activeRoom.value?.status, activeRemoval.value], loadMembers)
 
 watch(notice, (text) => {
   if (text) setTimeout(() => notice.value === text && (notice.value = ''), 4000)
@@ -382,10 +431,11 @@ onBeforeUnmount(() => {
           :key="room.id"
           class="room"
           :class="{ active: room.id === activeId }"
-          @click="activeId = room.id"
+          @click="autoSelectRoom = true; activeId = room.id"
         >
           <span class="room-name">{{ room.name }}</span>
-          <span v-if="room.status === 'invited'" class="tag">待加入</span>
+          <span v-if="removedRooms.has(room.id)" class="tag">{{ removedRooms.get(room.id) === 'banned' ? '已被封禁' : '已被踢出' }}</span>
+          <span v-else-if="room.status === 'invited'" class="tag">待加入</span>
           <span v-else class="room-count">{{ room.member_count }} 人</span>
         </button>
         <p v-if="rooms.length === 0" class="empty">还没有房间。创建一个，或等待别人邀请你。</p>
@@ -396,7 +446,7 @@ onBeforeUnmount(() => {
       <template v-if="activeRoom">
         <header class="chat-head">
           <h1>{{ activeRoom.name }}</h1>
-          <template v-if="activeRoom.status === 'joined'">
+          <template v-if="activeRoom.status === 'joined' && !activeRemoval">
             <form class="inline-form" @submit.prevent="invite">
               <input v-model="inviteName" placeholder="邀请用户名" aria-label="邀请用户名" />
               <button>邀请</button>
@@ -415,6 +465,7 @@ onBeforeUnmount(() => {
         </div>
 
         <template v-else>
+          <p v-if="activeRemoval" class="banner" role="status">{{ removalNotice(activeRoom) }}</p>
           <div ref="messagesEl" class="messages" aria-live="polite">
             <button v-if="canLoadOlder" class="link older" @click="loadOlder">加载更早的消息</button>
             <p v-if="timeline.length === 0 && pending.length === 0" class="empty">还没有消息，说点什么吧。</p>
@@ -442,7 +493,7 @@ onBeforeUnmount(() => {
                 <span v-if="entry.failed" class="error">发送失败</span>
                 <span v-else-if="entry.throttled">发送过快，稍后自动重试</span>
                 <span v-else>发送中</span>
-                <button v-if="entry.failed" class="link" @click="retry(entry)">重试</button>
+                <button v-if="entry.failed && !activeRemoval" class="link" @click="retry(entry)">重试</button>
               </div>
               <p class="bubble">{{ entry.content }}</p>
             </article>
@@ -457,6 +508,7 @@ onBeforeUnmount(() => {
             <textarea
               ref="composerEl"
               v-model="draft"
+              :disabled="!!activeRemoval"
               rows="2"
               placeholder="输入消息，Enter 发送，Shift + Enter 换行，@ 提及 AI"
               aria-label="消息内容"
@@ -465,7 +517,7 @@ onBeforeUnmount(() => {
               @click="trackCaret"
               @input="trackCaret"
             />
-            <button class="primary">发送</button>
+            <button class="primary" :disabled="!!activeRemoval">发送</button>
           </form>
         </template>
       </template>
@@ -476,7 +528,7 @@ onBeforeUnmount(() => {
     </main>
 
     <MembersPanel
-      v-if="showMembers && activeRoom?.status === 'joined'"
+      v-if="showMembers && activeRoom?.status === 'joined' && !activeRemoval"
       ref="membersPanel"
       :room-id="activeRoom.id"
       :me="user"

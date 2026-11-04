@@ -47,9 +47,9 @@ export class ChatSocket {
       this.handlers.onSubscribed(frame.room_id)
     } else if (frame.type === 'room_left') {
       this.rooms.delete(frame.room_id)
-      this.handlers.onRoomLeft(frame.room_id)
+      this.handlers.onRoomLeft(frame.room_id, frame.reason ?? 'left')
     } else if (frame.type === 'ack') {
-      this.settle(frame.client_msg_id, { ok: true, seq: frame.seq })
+      this.settle(frame.client_msg_id, { ok: true, seq: frame.seq, created_at: frame.created_at })
     } else if (frame.type === 'error') {
       this.handleError(frame)
     } else {

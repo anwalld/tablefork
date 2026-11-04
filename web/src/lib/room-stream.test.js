@@ -83,7 +83,7 @@ it('closes AI drafts for initial history, gap backfill and realtime messages', a
   const drafts = new AiDrafts()
   const final = (seq) => ({ seq, generation_id: `g${seq}`, content: 'complete' })
   for (const seq of [1, 2, 3]) {
-    drafts.chunk({ room_id: 1, generation_id: `g${seq}`, member_id: 9, text: 'partial' })
+    drafts.chunk({ room_id: 1, generation_id: `g${seq}`, member_id: 9, text: 'partial', snapshot: 'partial', cumulative: true, attempt: 1, sequence: 1 })
   }
   const stream = new RoomStream({
     fetchAfter: async after => after < 2 ? [final(2)] : [],
@@ -94,5 +94,28 @@ it('closes AI drafts for initial history, gap backfill and realtime messages', a
   stream.receive(final(3))
   expect(drafts.forRoom(1)).toEqual([])
   expect(stream.messages).toEqual([final(1), final(2), final(3)])
+  stream.dispose()
+})
+
+
+it.each(['receive', 'addPage', 'fetchMissing'])('replaces only local copies through %s', async (path) => {
+  const original = { ...message(1), local: true }
+  const authoritative = { ...message(1), content: 'server version' }
+  const onChange = vi.fn()
+  let page = [authoritative]
+  const stream = new RoomStream({ fetchAfter: async () => { const result = page; page = []; return result }, onChange })
+  stream.receive(original)
+  onChange.mockClear()
+  if (path === 'receive') stream.receive(authoritative)
+  if (path === 'addPage') stream.addPage([authoritative])
+  if (path === 'fetchMissing') await stream.fetchMissing()
+  expect(stream.messages).toEqual([authoritative])
+  expect(onChange).toHaveBeenCalled()
+  const late = { ...authoritative, content: 'late duplicate' }
+  page = [late]
+  if (path === 'receive') stream.receive(late)
+  if (path === 'addPage') stream.addPage([late])
+  if (path === 'fetchMissing') await stream.fetchMissing()
+  expect(stream.messages).toEqual([authoritative])
   stream.dispose()
 })

@@ -36,12 +36,15 @@ def test_client_msg_id_is_unique_per_member_and_room(room_and_member, db):
             insert_message(cursor, room_id, 2, member_id, "a")
 
 
-def test_deleting_a_room_cascades(room_and_member, db):
+def test_deleting_a_room_cascades(room_and_member, db, make_user):
     room_id, member_id = room_and_member
+    target = make_user()
     with db.cursor() as cursor:
         insert_message(cursor, room_id, 1, member_id, "a")
+        cursor.execute("INSERT INTO room_bans (room_id, user_id, banned_by) "
+            "SELECT %s, id, %s FROM users WHERE username=%s", (room_id, member_id, target.username))
         cursor.execute("DELETE FROM rooms WHERE id=%s", (room_id,))
-        for table in ("messages", "room_members", "room_invites"):
+        for table in ("messages", "room_members", "room_invites", "room_bans"):
             cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE room_id=%s", (room_id,))
             assert cursor.fetchone()[0] == 0
 
@@ -54,7 +57,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == ["1", "2", "3"]
+    assert [version for version, _ in rows] == ["1", "2", "3", "4"]
     assert all(success for _, success in rows)
 
 

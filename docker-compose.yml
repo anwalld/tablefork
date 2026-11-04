@@ -1,4 +1,50 @@
+x-app: &app
+  image: cppaiserver-app
+  build:
+    context: .
+    target: runtime
+  restart: unless-stopped
+  environment:
+    MYSQL_HOST: mysql
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
+    REDIS_HOST: ${REDIS_HOST:-redis-proxy}
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://localhost:8443}
+    COOKIE_SECURE: ${COOKIE_SECURE:-1}
+    WORKER_COUNT: ${WORKER_COUNT:-16}
+    WORKER_QUEUE_LIMIT: ${WORKER_QUEUE_LIMIT:-1024}
+    LOGIN_FREE_ATTEMPTS: ${LOGIN_FREE_ATTEMPTS:-5}
+    LOGIN_BACKOFF_BASE_SECONDS: ${LOGIN_BACKOFF_BASE_SECONDS:-1}
+    LOGIN_BACKOFF_MAX_SECONDS: ${LOGIN_BACKOFF_MAX_SECONDS:-60}
+    LOGIN_FAIL_TTL_SECONDS: ${LOGIN_FAIL_TTL_SECONDS:-900}
+    DEVICE_TTL_DAYS: ${DEVICE_TTL_DAYS:-180}
+    MESSAGE_RATE_LIMIT: ${MESSAGE_RATE_LIMIT:-30}
+    MESSAGE_RATE_WINDOW_SECONDS: ${MESSAGE_RATE_WINDOW_SECONDS:-10}
+    SESSION_CHECK_SECONDS: ${SESSION_CHECK_SECONDS:-30}
+    # The app runs without the AI service and connects when it appears.
+    AI_GATEWAY: ai:50051
+    AI_GRPC_TOKEN: ${AI_GRPC_TOKEN:?set it in .env, see .env.example}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis-proxy:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+
+
 services:
+  certs:
+    build:
+      context: .
+      dockerfile: docker/certs.Dockerfile
+    restart: "no"
+    volumes:
+      - ./data/certs:/certs
+
   mysql:
     image: mysql:8.4.6
     environment:
@@ -49,28 +95,28 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  redis-master:
+  redis-1:
     image: redis:7.4.5
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDISCLI_AUTH\""]
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDISCLI_AUTH" --masterauth "$$REDISCLI_AUTH" --replica-announce-ip redis-1']
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?set it in .env, see .env.example}
     volumes:
-      - redis-master-data:/data
+      - redis-1-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       timeout: 3s
       retries: 20
 
-  redis-replica:
+  redis-2:
     image: redis:7.4.5
-    command: ["sh", "-c", "exec redis-server --appendonly yes --replicaof redis-master 6379 --requirepass \"$$REDISCLI_AUTH\" --masterauth \"$$REDISCLI_AUTH\""]
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --replicaof redis-1 6379 --requirepass "$$REDISCLI_AUTH" --masterauth "$$REDISCLI_AUTH" --replica-announce-ip redis-2']
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?set it in .env, see .env.example}
     volumes:
-      - redis-replica-data:/data
+      - redis-2-data:/data
     depends_on:
-      redis-master:
+      redis-1:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -78,41 +124,65 @@ services:
       timeout: 3s
       retries: 20
 
-  app:
-    build:
-      context: .
-      target: runtime
-    restart: unless-stopped
+  sentinel-1: &sentinel
+    image: redis:7.4.5
+    command: ["sh", "/sentinel.sh"]
     environment:
-      MYSQL_HOST: mysql
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
-      REDIS_HOST: ${REDIS_HOST:-redis-master}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
-      COOKIE_SECURE: ${COOKIE_SECURE:-0}
-      WORKER_COUNT: ${WORKER_COUNT:-16}
-      WORKER_QUEUE_LIMIT: ${WORKER_QUEUE_LIMIT:-1024}
-      LOGIN_FREE_ATTEMPTS: ${LOGIN_FREE_ATTEMPTS:-5}
-      LOGIN_BACKOFF_BASE_SECONDS: ${LOGIN_BACKOFF_BASE_SECONDS:-1}
-      LOGIN_BACKOFF_MAX_SECONDS: ${LOGIN_BACKOFF_MAX_SECONDS:-60}
-      LOGIN_FAIL_TTL_SECONDS: ${LOGIN_FAIL_TTL_SECONDS:-900}
-      DEVICE_TTL_DAYS: ${DEVICE_TTL_DAYS:-180}
-      MESSAGE_RATE_LIMIT: ${MESSAGE_RATE_LIMIT:-30}
-      MESSAGE_RATE_WINDOW_SECONDS: ${MESSAGE_RATE_WINDOW_SECONDS:-10}
-      SESSION_CHECK_SECONDS: ${SESSION_CHECK_SECONDS:-30}
-      # The app runs without the AI service and connects when it appears.
-      AI_GATEWAY: ai:50051
-      AI_GRPC_TOKEN: ${AI_GRPC_TOKEN:?set it in .env, see .env.example}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+      SENTINEL_DOWN_AFTER_MS: ${SENTINEL_DOWN_AFTER_MS:-3000}
+    volumes:
+      - ./scripts/sentinel.sh:/sentinel.sh:ro
+      - sentinel-1-data:/data
     depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis-master:
+      redis-1:
+        condition: service_healthy
+      redis-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
       interval: 3s
       timeout: 3s
       retries: 20
+
+  sentinel-2:
+    <<: *sentinel
+    volumes:
+      - ./scripts/sentinel.sh:/sentinel.sh:ro
+      - sentinel-2-data:/data
+
+  sentinel-3:
+    <<: *sentinel
+    volumes:
+      - ./scripts/sentinel.sh:/sentinel.sh:ro
+      - sentinel-3-data:/data
+
+  redis-proxy:
+    image: haproxy:3.0.5-alpine
+    restart: unless-stopped
+    entrypoint: ["sh", "/redis-proxy.sh"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
+    volumes:
+      - ./docker/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./scripts/redis-proxy.sh:/redis-proxy.sh:ro
+      - ./scripts/redis-master-watch.sh:/usr/local/bin/redis-master-watch.sh:ro
+    depends_on:
+      redis-1:
+        condition: service_healthy
+      redis-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "/redis-proxy.sh", "health"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  app-1:
+    <<: *app
+
+  app-2:
+    <<: *app
 
   # The AI service. Holds the key encryption key; reachable only on the
   # internal network.
@@ -127,7 +197,7 @@ services:
       AI_KEY_ENCRYPTION_KEY: ${AI_KEY_ENCRYPTION_KEY:?set it in .env, see .env.example}
       AI_MYSQL_PASSWORD: ${AI_MYSQL_PASSWORD:?set it in .env, see .env.example}
       MYSQL_HOST: mysql
-      REDIS_HOST: ${REDIS_HOST:-redis-master}
+      REDIS_HOST: ${REDIS_HOST:-redis-proxy}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
       AI_FAKE_PROVIDERS: ${AI_FAKE_PROVIDERS:-}
       AI_CHAIN_P: ${AI_CHAIN_P:-0.5}
@@ -142,10 +212,11 @@ services:
     depends_on:
       db-users:
         condition: service_completed_successfully
-      redis-master:
+      redis-proxy:
         condition: service_healthy
 
-  nginx:
+  web-1: &web
+    image: cppaiserver-web
     build:
       context: .
       dockerfile: docker/web.Dockerfile
@@ -153,13 +224,43 @@ services:
       AUTH_RATE: ${AUTH_RATE:-10r/m}
       AUTH_BURST: ${AUTH_BURST:-10}
       AUTH_RETRY_AFTER: ${AUTH_RETRY_AFTER:-6}
-    ports:
-      - "8080:80"
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+      DOCKER_SUBNET: ${DOCKER_SUBNET:-172.28.0.0/16}
+    volumes:
+      - ./data/certs/server.crt:/etc/nginx/certs/server.crt:ro
+      - ./data/certs/server.key:/etc/nginx/certs/server.key:ro
     depends_on:
-      app:
+      certs:
+        condition: service_completed_successfully
+      app-1:
+        condition: service_healthy
+      app-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web-2:
+    <<: *web
+
+  gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway.Dockerfile
+    environment:
+      GATEWAY_CONN_PER_IP: ${GATEWAY_CONN_PER_IP:-100}
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    depends_on:
+      web-1:
+        condition: service_healthy
+      web-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 443"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -169,19 +270,32 @@ services:
     build:
       context: tests/integration
     environment:
-      BASE_URL: http://nginx
-      WS_URL: ws://nginx/ws
-      ORIGIN: http://localhost:8080
+      REDIS_HOST: ${REDIS_HOST:-redis-proxy}
+      BASE_URL: https://gateway
+      WS_URL: wss://gateway/ws
+      ORIGIN: https://localhost:${HTTPS_PORT:-8443}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
       AI_MYSQL_PASSWORD: ${AI_MYSQL_PASSWORD:?set it in .env, see .env.example}
+      CA_BUNDLE: /certs/ca.crt
       SMALL_QUEUE: ${SMALL_QUEUE:-}
       STRICT_AUTH_RATE: ${STRICT_AUTH_RATE:-}
+    volumes:
+      - ./data/certs/ca.crt:/certs/ca.crt:ro
     depends_on:
-      nginx:
+      gateway:
         condition: service_healthy
 
 volumes:
   mysql-data:
-  redis-master-data:
-  redis-replica-data:
+  redis-1-data:
+  redis-2-data:
+  sentinel-1-data:
+  sentinel-2-data:
+  sentinel-3-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-172.28.0.0/16}

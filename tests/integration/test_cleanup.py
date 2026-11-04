@@ -66,3 +66,21 @@ def test_excluded_names_are_never_matched():
     assert not cleanup_test_data.matches("用户u012345", [], ["realtest_"])
     assert not cleanup_test_data.matches("u0123456789ab", [], [], test_users=False)
     assert cleanup_test_data.matches("owner_x", ["owner_"], [])
+
+
+def test_cleanup_counts_bans_and_keeps_other_bans_with_null_actor(db, make_user, make_room):
+    prefix = f"zz{uuid.uuid4().hex[:6]}_"
+    owner, outside = make_user(), make_user()
+    actor, target = account(prefix + "actor"), account(prefix + "target")
+    room = make_room(owner, actor)
+    assert owner.request("PUT", f"/api/rooms/{room}/admins/{actor.username}").status_code == 200
+    for user in (outside, target):
+        assert actor.request("PUT", f"/api/rooms/{room}/bans/{user.username}").status_code == 200
+    report, _, _ = cleanup_test_data.cleanup(db, [prefix], [], False, test_users=False)
+    assert report["bans_deleted"] == 1
+    assert count(db, "SELECT COUNT(*) FROM room_bans WHERE room_id=%s", (room,)) == 2
+    report, _, _ = cleanup_test_data.cleanup(db, [prefix], [], True, test_users=False)
+    assert report["bans_deleted"] == 1
+    remaining = owner.get(f"/api/rooms/{room}/bans").json()["bans"]
+    assert len(remaining) == 1 and remaining[0]["username"] == outside.username
+    assert remaining[0]["banned_by"] is None

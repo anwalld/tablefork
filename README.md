@@ -2,13 +2,34 @@
 
 多人加多个 AI 的聊天室。房间里可以有多名用户和 DeepSeek、GPT、Claude、Gemini 四个预置 AI，AI 的调用费用由用户自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
 
-```text
-浏览器 --HTTP/WS--> Nginx --> C++ 聊天服务（Drogon） --> MySQL（权威数据）
-                                   |      ^             --> Redis（会话、热缓存、广播、AI 状态）
-                         房间事件 |      | 回复片段、最终回复、提示
-                     （gRPC 双向流） v      |
-                               Python AI 服务（ai/）--> 各家模型 API
+```mermaid
+flowchart TD
+    browser[浏览器] -->|HTTPS / WSS| gateway[gateway · L4]
+    gateway --> web1[web-1 · TLS / Vue]
+    gateway --> web2[web-2 · TLS / Vue]
+    web1 --> app1[app-1 · Drogon]
+    web1 --> app2[app-2 · Drogon]
+    web2 --> app1
+    web2 --> app2
+    app1 --> mysql[mysql]
+    app2 --> mysql
+    app1 <-->|gRPC| ai[ai]
+    app2 <-->|gRPC| ai
+    ai --> providers[模型 API]
+    app1 --> proxy[redis-proxy · HAProxy]
+    app2 --> proxy
+    ai --> proxy
+    proxy --> redis1[redis-1]
+    proxy --> redis2[redis-2]
+    sentinels[sentinel-1 / sentinel-2 / sentinel-3] -.监控与选举.-> redis1
+    sentinels -.监控与选举.-> redis2
 ```
+
+- `gateway` 是唯一发布 HTTP/HTTPS 端口的服务；它按源 IP 一致性哈希到 L7，并保留真实地址。本机单节点部署下 L4 仍是单点。
+- `web-1`、`web-2` 结束 TLS、提供静态文件并代理到两个应用。普通 HTTP 保留上游连接池；WebSocket 使用同样的两个应用、独立的新上游连接，以适配 Drogon 1.9.13 的首次请求升级限制。
+- `app-1`、`app-2` 共用镜像及 MySQL/Redis 状态，任一实例都能处理会话和房间请求。日志仅记方法、路径、状态，不记录 Cookie 或请求体。
+- `ai` 通过 gRPC 与两个应用交互；`redis-proxy` 只路由到当前 Redis 主节点，3 个 Sentinel 自动选举。服务详见下面 Redis 章节。
+- `certs`、`migrate`、`db-users` 是一次性准备服务，分别生成本地证书、执行迁移、配置 AI 数据库账号；`tests` 只在 test profile 下运行。
 
 - C++ 聊天服务负责账号、房间、消息和推送；AI 的最终回复也由它保存，`seq` 只在这里分配。
 - Python AI 服务决定 AI 什么时候说话、由哪个 AI 说，调用模型并流式输出，同时负责 API key 的加解密。它的状态都在 Redis，进程本身无状态。
@@ -26,11 +47,17 @@ cp .env.example .env
 docker compose up -d --build --wait
 ```
 
-启动后访问 <http://localhost:8080>，用下面的命令确认 MySQL 和 Redis 正常：
+启动后访问 <https://localhost:8443>，用下面的命令确认 MySQL 和 Redis 正常：
 
 ```bash
-curl http://localhost:8080/health
+curl --cacert data/certs/ca.crt https://localhost:8443/health
 ```
+
+首次启动由 `certs` 容器生成本地 CA 和服务器证书，保存在不进 Git 和 Docker 构建上下文的 `data/certs/`。再次启动沿用已有证书；服务器证书不足 30 天有效期或 SAN 变化时，只重新签发服务器证书。私钥请勿分享。
+
+macOS 上打开“钥匙串访问”，将 `data/certs/ca.crt` 导入“登录”钥匙串，双击 **CppAiServer Local CA**，展开“信任”，将“使用此证书时”设为“始终信任”。完成系统确认后重新打开浏览器，访问 `https://localhost:8443` 应没有证书警告。其他系统需将同一个 CA 导入其受信任根证书库。命令行用上面的 `--cacert` 即可，无需关闭证书校验。
+
+HTTP 入口 `http://localhost:8080` 仅做 301 跳转，不处理登录或 WebSocket。`HTTP_PORT`、`HTTPS_PORT` 可配置；修改 HTTPS 端口时须同步 `ALLOWED_ORIGINS`。Cookie 默认带 `Secure`、`HttpOnly`，仅在直接通过 HTTP 调试内部应用时才使用 `COOKIE_SECURE=0`。`GATEWAY_CONN_PER_IP` 默认 100，按真实客户端地址限制包括 WebSocket 在内的 TCP 并发连接。
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
@@ -62,6 +89,29 @@ docker compose down -v
 - 每个用户最多有一台受信任的手机和一台受信任的电脑（按浏览器的 User-Agent 判断，平板算手机）。某类的第一台设备登录后直接受信任；之后另一台同类设备最近 30 天发的消息超过原设备的 1.5 倍时，它在登录或续期时替换原设备。
 - 从受信任设备登出会结束这个用户在所有设备上的会话；从其他设备登出只结束当前会话。
 - 受信任设备的前端每 6 小时调用一次 `POST /api/auth/refresh`，会话不会过期；其他设备的会话照常 7 天过期。
+
+## 房间踢人与封禁
+
+| 操作者 | 管理员 | 普通成员 | 房间外的用户 |
+|---|---|---|---|
+| 群主 | 可踢出、封禁 | 可踢出、封禁 | 可封禁 |
+| 管理员 | 不可操作 | 可踢出、封禁 | 可封禁 |
+| 普通成员 | 不可操作 | 不可操作 | 不可操作 |
+
+不能对自己执行踢出或封禁，群主也不能被其他人移出；离开使用“退出房间”，群主需先转让所有权。AI 使用已有的“移出 AI”，不能走人类成员踢出接口。
+
+被踢出者可再次被邀请，重新加入时是普通成员；旧消息保留。封禁会同时移出成员、取消未接受的邀请，并阻止再次邀请和加入，直到群主或管理员解封。解封不自动恢复成员关系或邀请。所有实例上的连接都会收到带 `kicked` 或 `banned` 原因的 `room_left`，其余在线成员刷新成员列表。
+
+成员面板按权限显示“踢出”“封禁”，两者都需要确认用户名。群主和管理员还能打开封禁列表、按用户名封禁房间外的人或解封。列表保留执行者退出房间前的姓名；只有执行者账号被删除时显示为空。
+
+| 方法 | 路径 | 响应 |
+|---|---|---|
+| DELETE | `/api/rooms/{id}/members/{username}` | `200 {}` |
+| PUT | `/api/rooms/{id}/bans/{username}` | `200 {}`，重复封禁保留原记录 |
+| DELETE | `/api/rooms/{id}/bans/{username}` | `200 {}`，解封幂等 |
+| GET | `/api/rooms/{id}/bans` | `200 {"bans":[{"username","banned_by","created_at"}]}` |
+
+用户名须进行 URL 编码。封禁列表按时间升序，`created_at` 是 Unix 毫秒时间戳，`banned_by` 是用户名或 null。非成员访问返回 `room_not_found`，权限不足为 `forbidden`，邀请被封禁者返回 `409 user_banned`。
 
 ## AI
 
@@ -165,37 +215,36 @@ docker compose --profile test run --rm tests python cleanup_test_data.py --apply
 
 2. 打开 Settings > Build, Execution, Deployment > Toolchains，新建 Docker 工具链，Image 选择 `cppaiserver-dev:latest`。
 3. 在 Settings > Build, Execution, Deployment > CMake 中把工具链切换为刚建的 Docker 工具链。
-4. 用 `docker compose up -d mysql redis-master redis-replica` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
+4. 用 `docker compose up -d mysql redis-1 redis-2 sentinel-1 sentinel-2 sentinel-3 redis-proxy` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
 
-## Redis 手动切换
+## Redis 自动故障切换
 
-当前是一主一从、手动切换，自动切换留到多实例阶段。主节点故障时，已保存的消息不受影响，但登录校验依赖 Redis，切换完成前无法发送消息，也无法访问需要登录的接口。
+应用和 AI 统一连接 `redis-proxy:6379`（HAProxy），它只转发到回答 `role:master` 的节点。`redis-1`/`redis-2` 是两个数据节点，初次启动由 redis-1 任主；3 个 Sentinel 以 quorum 2 监控，默认 3 秒判定下线，再自动提升从节点。Sentinel 的配置分别保存在具名卷中，重启沿用选举后的状态。
 
-1. 确认主节点已经停止，不要让两个节点同时接受写入：
+手动演示（以下假定当前主节点为 redis-1，先查询确认）：
 
-   ```bash
-   docker compose stop redis-master
-   ```
+```bash
+docker compose exec redis-2 redis-cli -h sentinel-1 -p 26379 SENTINEL get-master-addr-by-name chat
+docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
+docker compose stop redis-1
+```
 
-2. 把从节点提升为主节点：
+等待数秒，再运行查询。代理应连接 redis-2，应用和 AI 不需重启：
 
-   ```bash
-   docker compose exec redis-replica redis-cli REPLICAOF NO ONE
-   ```
+```bash
+docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
+curl --cacert data/certs/ca.crt https://localhost:8443/health
+docker compose start redis-1
+docker compose exec redis-1 redis-cli INFO replication
+```
 
-3. 让应用连到新的主节点：
+原主节点会由 Sentinel 降为从节点，最终显示 `role:slave` 和 `master_link_status:up`。若查询显示 redis-2 已是主节点，演示时对调两个节点，不能再次停止已经是从节点的 redis-1 来证明主故障恢复。
 
-   ```bash
-   REDIS_HOST=redis-replica docker compose up -d --no-deps --wait app
-   ```
+切换期间请求可能收到可重试的错误；Redis 异步复制可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
 
-4. 确认状态：
+从旧版本升级时先 `docker compose down`（不加 `-v`），然后 `docker compose up -d --build --wait`。Redis 改为新的 `redis-1-data`、`redis-2-data` 卷，旧会话会失效，需要重新登录；MySQL 卷保留。确认新环境正常后，可用 `docker volume ls` 找到项目旧的 `redis-master-data`、`redis-replica-data` 卷，再按准确名称执行 `docker volume rm`，不要删除 MySQL 卷。
 
-   ```bash
-   curl http://localhost:8080/health
-   ```
-
-切换会让所有 WebSocket 断开，客户端自动重连并按 `seq` 补齐。切换前最后几秒内的会话变更可能丢失：受影响的用户需要重新登录，刚登出的会话可能恢复。
+`SENTINEL_DOWN_AFTER_MS` 控制判定下线的时长。测试脚本会在 AI 故障阶段之后执行 Redis 主节点停止、恢复验证、旧主节点重新加入，并用测试专用复制屏障保存跨阶段夹具；产品不承诺 Redis 写入强一致。
 
 ## 压测
 
@@ -261,3 +310,5 @@ docker compose up -d --wait
 冷场任务开始前会检查用户是否已重新发言。已开始的冷场回复可以完成，后来的用户消息随后正常回复。主动发言用三个成功位记录，只在消息保存成功后置位，三位全为 1 时结束。
 
 浏览器从实时推送和历史查询得到正式消息时都会清除对应草稿。流式片段携带尝试编号和累计文本，重试及重连后能替换旧草稿。`scripts/test.sh` 包含 Python 单元测试与生成中重启 AI 服务的故障测试。
+
+本机运行完整故障测试时应保持 Docker Desktop 的时钟连续。脚本在 macOS 测试进程存活期间用 `caffeinate` 防止空闲休眠；测试准备会等 Sentinel 退出 TILT，实际主节点故障后的恢复仍按 30 秒验收。暂停虚拟机或强制系统休眠仍会影响计时。

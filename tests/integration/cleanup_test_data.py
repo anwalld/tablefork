@@ -37,7 +37,7 @@ def in_list(values):
 
 def cleanup(db, prefixes, excludes, apply, test_users=True):
     """Returns (report, room ids whose cache must go, deleted user ids)."""
-    report = {}
+    report = {"bans_deleted": 0}
     # An explicit transaction, so that a dry run rolls back even on a
     # connection that autocommits.
     db.begin()
@@ -60,6 +60,13 @@ def cleanup(db, prefixes, excludes, apply, test_users=True):
         )
         rooms = [row[0] for row in cursor.fetchall()]
         report["rooms_deleted"] = len(rooms)
+        # 先显式删除并统计会由房间/用户级联移除的封禁；执行者被删只置空，不删其他人的封禁。
+        condition = f"user_id IN ({in_list(users)})"
+        values = list(users)
+        if rooms:
+            condition += f" OR room_id IN ({in_list(rooms)})"
+            values += rooms
+        report["bans_deleted"] = cursor.execute("DELETE FROM room_bans WHERE " + condition, values)
         if rooms:
             cursor.execute(f"DELETE FROM rooms WHERE id IN ({in_list(rooms)})", rooms)
 
@@ -139,7 +146,7 @@ def main(argv=None):
     for key, value in report.items():
         print(f"{key}: {value}")
     if args.apply:
-        clear_redis(redis_client.Redis(host=os.environ.get("REDIS_HOST", "redis-master"),
+        clear_redis(redis_client.Redis(host=os.environ.get("REDIS_HOST", "redis-proxy"),
                                        password=os.environ["REDIS_PASSWORD"]), rooms, users)
         print("applied")
     else:
