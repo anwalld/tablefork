@@ -53,7 +53,7 @@
 ## 6. 整体验证
 
 - [x] 6.1 在一份全新的 checkout 上（删除 `data/certs/` 和所有卷），执行 `scripts/test.sh`，全部阶段通过。验证：退出码为 0，并且日志检查没有发现 API key 的标记。
-- [ ] 6.2 推送分支后 CI 通过。验证：GitHub Actions 的这次运行为绿色，没有新的弃用警告。
+- [x] 6.2 推送分支后 CI 通过。验证：GitHub Actions 的这次运行为绿色，没有新的弃用警告。
 
 ## Workflow follow-up
 
