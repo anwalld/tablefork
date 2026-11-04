@@ -6,7 +6,7 @@
 
 | Dimension | Status |
 |---|---|
-| Completeness | 实现与本地验证任务完成；11/12，远程交付任务5.4待完成 |
+| Completeness | 实现与本地验证任务完成；12/12，远程提交/PR及实现CI已完成 |
 | Correctness | Sentinel 原版对照、补丁隔离回归、双向受控切主、完整脚本通过 |
 | Coherence | D1–D5 均有实现或源码证据；两个生产缺陷采用最小修补，原严格断言保留 |
 
@@ -14,7 +14,7 @@ Spec Coverage、Requirement Implementation Mapping、Scenario Coverage：**Not a
 
 ## CRITICAL
 
-任务5.4尚待提交、创建PR和远程CI完成；不将尚未执行的CI算作通过。本地实现与验证无新增critical。
+无。12项任务都有对应实现、源码复核、真实通过日志或远程交付证据。
 
 ## WARNING
 
@@ -22,6 +22,10 @@ Spec Coverage、Requirement Implementation Mapping、Scenario Coverage：**Not a
 - 全仓既有 realtime-messaging Purpose 少于 50 字的格式警告保留。全仓普通校验 9/9 通过，本 change strict 通过；不声称全仓 strict 无旧警告。
 
 Sentinel 自引用成因不明的旧 warning 已有源码、现场日志和隔离对照闭环，见 sentinel-root-cause.md。未跟踪 .DS_Store 已加入 basename 忽略规则，文件保留。
+
+## SUGGESTION
+
+无新增。
 
 ## 实现与实测
 
@@ -55,7 +59,7 @@ Sentinel 自引用成因不明的旧 warning 已有源码、现场日志和隔�
 
 - 日志：/private/tmp/cppai-sentinel-guard-fixed-full.log/.exit，**exit 0**。
 - 首轮 254 passed / 26 skipped；AI 故障、受控双向切主、Redis 停主/旧主重加入、app/L7 故障全部通过；长周期 kick/ban 各 1 passed，原严格轮次 9 passed。阶段性 skips 在对应 phase 实际执行，不声称所有可选模式都运行。
-- 11 个受测实现/配置文件与开跑前哈希一致：cppai-sentinel-guard-fixed-full-source-hashes.json。
+- 受测快照为 cppai-sentinel-guard-fixed-full-source-hashes.json。除补丁上下文格式外的10个文件哈希一致；补丁改成零上下文后，实际生成的 sentinel.c 逐字节一致（SHA-256 aebbc51e23f54cf6e650d4d3ec4e5073b2f3d497a2b4369727f1698d430276d2）。证明保存在 cppai-sentinel-guard-patch-format-proof.json；没有将格式变化冒充未改字节。
 - 恢复后 13 个常驻服务均 healthy；严格 CA 验证的 HTTPS /health 返回 mysql/redis ok；三台 Sentinel 身份与修复前一致，同伴集合恰为其余两台，CKQUORUM 均为三台可用。证据：cppai-sentinel-guard-fixed-services.json、cppai-sentinel-guard-fixed-health.log/.exit（0）。
 - 使用测试 fake providers；未新增真实模型费用测试、可选压力模式或生产服务器验收。
 - strict change validate、全仓普通 validate、Python/shell 语法与 diff check 通过；data/.DS_Store 被忽略。
@@ -68,8 +72,14 @@ Sentinel 自引用成因不明的旧 warning 已有源码、现场日志和隔�
 
 ## 远程交付
 
-提交、推送、创建PR并跟踪CI是用户已授权的下一步；当前尚未执行。
+PR #10：https://github.com/anwalld/CppAiWebServer/pull/10。
+实现提交 `36239e3d35830178c92ea836ee0cff07cb02436c` 的完整 CI **success**：
+https://github.com/anwalld/CppAiWebServer/actions/runs/41848533867 。
+
+CI 在 ubuntu-24.04 全新环境验证 C++ ctest、AI 单测76项、前端13文件/76项、Sentinel隔离回归、集成首轮254通过/26跳过、全部故障/撤权阶段及原严格9项。窗口登录5次（3成功/2可重试，最长2.323秒），消息5次（4ack/1可重试，最长2.023秒），8.899秒恢复，4条确认消息各一次；旧主重加入52次采样零代理连接。日志与状态保存在本机 /private/tmp/cppai-sentinel-guard-ci-implementation.log/.json。
+
+后续提交仅记录本交接、verify结果和任务完成状态，不修改功能源码；最新文档提交的检查以PR Checks为准，不把实现提交的结果冒充另一个提交的结果。未合并或归档。
 
 ## Final Assessment
 
-本地实现与适用检查通过；远程交付任务5.4待完成，最终完整性结论将在CI后更新。旧握手和Purpose警告保留，规格相关检查为Not applicable，无其他跳过检查。
+12/12任务完成。0 critical、2项既有warnings（用户排除的握手问题和主规格Purpose格式）、0新增suggestions。适用检查均已执行，规格相关检查为Not applicable，无Not verified项；可交Claude double check。

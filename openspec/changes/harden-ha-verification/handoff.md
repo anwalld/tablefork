@@ -7,7 +7,7 @@
 分支 codex/harden-ha-verification，基于 main 809a34a7aefe0317d9f23fc216c9926a203bdf80。上一 change 的 PR #8/#9 已合并，本次是新的 PR。
 用户要求：修 Sentinel 自引用与 .DS_Store，连同此前 TLS1.3、切换窗口、对账复核一起 verify、CI、PR。握手拒绝后多发 close frame 仍按用户决定保留。
 
-当前11/12：本地完整脚本exit0与verify完成，远程PR/CI任务待执行。生产C++源码未改；Sentinel镜像与watcher已修改，勿沿用此前“生产配置未改”的结论。
+当前12/12：本地完整脚本exit0、verify完成，PR已创建、实现提交的完整CI已通过。生产C++源码未改；Sentinel镜像与watcher已修改，勿沿用此前“生产配置未改”的结论。
 
 ## 改了什么
 
@@ -30,7 +30,7 @@
 - 首轮 254 passed / 26 skipped；AI 故障、受控双向切主、Redis 停主/旧主重加入、app/L7 故障全部通过；长周期 kick/ban 各 1 passed，原严格轮次 9 passed。阶段性 skips 在对应 phase 实际执行，不声称所有可选模式都运行。 日志：/private/tmp/cppai-sentinel-guard-fixed-full.log/.exit（0）。
 - 登录 7 次：5 成功、2 可重试，最长 2.008 秒；消息 7 次：6 ack、1 可重试，最长 2.014 秒。7.092 秒恢复，6 条确认消息各保存一次，迟发 post-ack 错误 0。旧主重加入 54 次采样，代理连接始终为 0。
 - 恢复后 13 个常驻服务均 healthy；严格 CA 验证的 HTTPS /health 返回 mysql/redis ok；三台 Sentinel 身份与修复前一致，同伴集合恰为其余两台，CKQUORUM 均为三台可用。证据：cppai-sentinel-guard-fixed-services.json、cppai-sentinel-guard-fixed-health.log/.exit（0）。
-- OpenSpec strict change validate、全仓普通validate（9/9，旧Purpose warning保留）、语法和diff检查通过。11个受测文件哈希匹配。
+- OpenSpec strict change validate、全仓普通validate（9/9，旧Purpose warning保留）、语法和diff检查通过。除补丁格式外的10个受测文件哈希匹配；补丁上下文规范化前后生成的sentinel.c逐字节相同，证据为cppai-sentinel-guard-patch-format-proof.json。
 - 以测试fake providers运行；未新增真实模型调用验收、压力模式或生产服务器验收。
 
 ## 失败与保留证据
@@ -52,6 +52,12 @@
 
 ## PR / CI 与下一步
 
-用户已授权提交、推送、PR和CI；本地完成后立即执行，尚未把远程CI算作通过。
+PR #10：https://github.com/anwalld/CppAiWebServer/pull/10。
+实现提交 `36239e3d35830178c92ea836ee0cff07cb02436c` 的完整 CI **success**：
+https://github.com/anwalld/CppAiWebServer/actions/runs/41848533867 。
+
+CI 在 ubuntu-24.04 全新环境验证 C++ ctest、AI 单测76项、前端13文件/76项、Sentinel隔离回归、集成首轮254通过/26跳过、全部故障/撤权阶段及原严格9项。窗口登录5次（3成功/2可重试，最长2.323秒），消息5次（4ack/1可重试，最长2.023秒），8.899秒恢复，4条确认消息各一次；旧主重加入52次采样零代理连接。日志与状态保存在本机 /private/tmp/cppai-sentinel-guard-ci-implementation.log/.json。
+
+后续提交仅记录本交接、verify结果和任务完成状态，不修改功能源码；最新文档提交的检查以PR Checks为准，不把实现提交的结果冒充另一个提交的结果。未合并或归档。
 
 本change不自动合并或归档。若继续做用户明确保留的握手问题，需要另开范围。
