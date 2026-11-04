@@ -22,3 +22,6 @@ __pycache__/
 
 # 本地 CA 和 TLS 私钥
 data/certs/
+
+# macOS metadata
+.DS_Store

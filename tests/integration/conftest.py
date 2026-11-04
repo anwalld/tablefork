@@ -9,6 +9,8 @@ import redis as redis_client
 import requests
 from websockets.sync.client import connect
 
+from sync_tls import sync_tls_context
+
 BASE_URL = os.environ.get("BASE_URL", "https://gateway")
 WS_URL = os.environ.get("WS_URL", "wss://gateway/ws")
 ORIGIN = os.environ.get("ORIGIN", "https://localhost:8443")
@@ -69,10 +71,7 @@ class Socket:
 
     def __init__(self, client, origin=ORIGIN, instance=None):
         headers = {"Cookie": client.cookie_header()}
-        context = tls_context()
-        # 死锁修复后，同步客户端 TLS 1.3 重复握手仍会间歇挂起；
-        # 两实例 Redis 健康检查正常，异步 TLS 1.3 收发另有覆盖。
-        context.maximum_version = ssl.TLSVersion.TLSv1_2
+        context = sync_tls_context(CA_BUNDLE)
         url = WS_URL if instance is None else f"ws://app-{instance}:8000/ws"
         if instance not in (None, 1, 2):
             raise ValueError("instance must be 1 or 2")
