@@ -6,7 +6,7 @@
 
 | Dimension | Status |
 |---|---|
-| Completeness | 32/33 tasks；16/16 ADDED/MODIFIED requirements 找到实现路径，64 个正式场景已对照。2.4、2.8 已在全新 checkout 上按 README 验收通过（见“全新环境浏览器验收”）；只剩 6.2 远程 CI 未验证 |
+| Completeness | 33/33 tasks；16/16 ADDED/MODIFIED requirements 找到实现路径，64 个正式场景已对照。2.4、2.8 已在全新 checkout 上按 README 验收通过（见“全新环境浏览器验收”）；6.2 已由本次远程 CI 验证通过，详见收尾记录 |
 | Correctness | C++、前端 76 项与构建通过；最新完整回归 exit 0，含 247 项首轮、受控切换断连接、旧主重加入采样、独立来源长周期撤权、严格限流。W2 的切换窗口业务断言部分 Not verified；Chrome 证书信任、双账号收发和踢人/封禁/解封/再邀请通过 |
 | Coherence | D7 单一 Sentinel 路由、D9a 定期对账、D12 保留本地消息/ack 替换与代码一致；已同步风险、三个新增场景及 3.8/4.6。现有目录、命名和测试模式核查通过 |
 
@@ -14,11 +14,9 @@
 
 ## CRITICAL
 
-2.4 和 2.8 已于 2026-11-04 17:20 前后在全新 checkout 上验收通过，证据见下文“全新环境浏览器验收”，已勾选。剩下一项：
+无未完成的正式任务。2.4、2.8 已由 Claude 的全新环境浏览器验收补齐；用户随后明确授权提交、推送、PR、CI，通过后合并 main 再归档。6.2 已由 [PR #8](https://github.com/anwalld/CppAiWebServer/pull/8) 的本次 [CI](https://github.com/anwalld/CppAiWebServer/actions/runs/41808271464) 验证，33/33。
 
-1. **6.2**：没有本轮提交、推送和对应的远程 CI。用户未授权推送，不能引用旧 CI。待用户授权后验证。
-
-任何新的实现修改都需要对应回归和新一轮 verify。
+原有 W2/W3 与 S1/S2 继续保留，不将归档当成这些问题已经解决。
 
 ## WARNING
 
@@ -74,7 +72,7 @@ W2、W3 已按用户要求写进 `design.md` 的 Risks 和 `tasks.md` 的 Workfl
 | edge-gateway / HTTPS | L7 TLS 1.2/1.3，test_gateway 协议与 HTTPS/WSS 全套；当前 checkout 的 Chrome 登录/双向聊天通过；同步客户端范围见 W3 |
 | edge-gateway / HTTP 301 | 80 仅跳转；路径/查询保持、HTTP 登录不改变失败计数、明文 WS 拒绝 |
 | edge-gateway / Secure cookie | config/Compose 默认值；cookie Secure/HttpOnly、HTTPS 会话套件 |
-| edge-gateway / 本地证书 | gen-certs/一次性 certs/忽略规则；CA/SAN、既有首次/续签证据，本轮沿用证书；Chrome 明确显示连接安全，首次 checkout 验收仍未完整完成 |
+| edge-gateway / 本地证书 | gen-certs/一次性 certs/忽略规则；CA/SAN、既有首次/续签证据，本轮沿用证书；Chrome 明确显示连接安全，全新 checkout 验收已由 Claude 补齐，详见后文 |
 | edge-gateway / 真实 IP | PROXY protocol、real_ip、覆盖头；严格认证伪造头/新连接配额 |
 | edge-gateway / 连接限制 | gateway limit_conn；满额拒绝、保留现有连接、释放配额、第二来源隔离 |
 | high-availability / 多实例 | 双 app、共享会话与推送；固定双向实例、退出/登出/踢人、丢失通知恢复 |
@@ -306,8 +304,21 @@ redis-1 rejoined as replica; proxy still targets redis-2
 - 这次验收用的是单个账号的两个标签页，验证的是“登录 + 实时收发”。多账号的踢人、封禁、解封、重新邀请沿用本报告前文的浏览器验收（5.6）。
 - 浏览器的网络面板没有列出 WebSocket 请求，`wss` 的结论来自 L7 日志，不是浏览器面板。
 
+## CI、PR 与归档收尾（2026-11-04，Codex）
+
+- 功能提交：`dbecc810dd47758ad957e3f5f2c7436f7706900f`；[CI run 41808271464](https://github.com/anwalld/CppAiWebServer/actions/runs/41808271464) 为 success，测试使用临时密码和正常 CA 校验。
+- 与最近成功的 main CI（run 41630969602）比较，没有新增弃用警告，也没有弃用类 check annotation；原有依赖警告不冒称已消除。
+- [PR #8](https://github.com/anwalld/CppAiWebServer/pull/8) 已按用户明确授权合并到 main，合并提交 `077e21417e829f64799815bfe1bd674b12ea6ec7`。
+- 6.2 按 CLI 返回的任务原文和行号回填，刷新后为 **33/33**。
+- 后续按 `openspec-archive-change` 内联执行规格同步：新增 edge-gateway、high-availability，更新 chat-rooms 与 user-auth；保留原有 Purpose 和无关需求/场景。归档目录为 `openspec/changes/archive/2026-11-04-add-https-ha-and-room-bans/`。归档文档通过独立 PR 交付。
+- 本轮没有修改实现、TLS 配置或测试断言，没有关闭校验、跳过测试或重新调用真实模型。CI 日志和摘要存于 `/private/tmp/cppai-ci-41808271464.log`、`.json`。
+
+收尾校验：四份主规格均与 delta 一致；原有标题/Purpose 与无关需求场景保留；本 change 和四份主规格的 strict validate 通过，全规格普通校验 8/8 通过，git diff --check 通过，活动 change 列表为空，归档文件（含 .openspec.yaml）移动前后的 SHA-256 逐项相同。
+
+基线格式警告：额外执行全规格 strict 时，已有 realtime-messaging 的 Purpose 为 45 字，触发少于 50 字警告（7/8 strict 通过）；已核对与合并后的 main 完全相同。本次没有改它或隐藏该结果；标准全规格校验与本次四份规格严格校验均通过。后续可另行润色 Purpose。
+
 ## Final Assessment
 
-**1 critical issue（6.2 远程 CI）；2 warnings（W2、W3）；2 suggestions（S1、S2）。32/33，在 6.2 完成之前不能归档。**
+**0 critical issues；2 warnings（W2、W3）；2 suggestions（S1、S2）。33/33 正式任务完成，按用户指令保留遗留问题并归档。**
 
-适用检查中未验证的：远程 CI（6.2）；W2 的切换窗口内直接业务响应；W3 的同步客户端 TLS 1.3 覆盖范围。2.4 和 2.8 已在全新 checkout 上按 README 验收通过。验证阶段没有修改实现，也没有提交、推送、创建 PR、合并或归档。
+适用检查中未验证的范围仍为 W2 的切换窗口内直接业务响应、W3 的同步客户端 TLS 1.3 覆盖；这些限制和 S1/S2 已写入 Workflow follow-up，不声称全部场景已经直接实测。2.4、2.8 的全新环境验收及 6.2 本次远程 CI 均已有证据。前文未提交/未推送的表述描述的是此前 verify 阶段，当前收尾状态以本节为准。

@@ -1,5 +1,7 @@
 # 给 Codex 的交接：add-https-ha-and-room-bans
 
+**最新收尾：先看第 8 节。CC 已补齐 2.4/2.8；本次 CI 通过、PR #8 已合并，正式任务 33/33。前面各轮未完成数字均是历史状态。**
+
 最新验收补充：**请先看第 7 节（2026-11-04，Codex）**。用户已导入当前 CA 并要求 verify，故第 4 节“浏览器暂不做”已被用户后续指令更新；代码方案仍按第 0–5 节及用户已确认决定执行。
 
 更新时间：2026-11-04，Claude 写。**本节是当前唯一有效的工作指令**。后面“给 Claude 的交接”是 Codex 上一轮的记录，只作背景参考；两者冲突时以本节为准。
@@ -548,6 +550,40 @@ verify 最终为 **3 critical（未完成验收/CI），2 warnings，0 新 sugge
 - 本节浏览器已通过的范围、2.4/2.8 严格环境条件仍缺的证据，以及 tasks/report 30/33 是否一致。
 
 专用测试账号及房间保留，结束时两人均已加入、封禁列表为空，方便复核；未全局清理或永久删账号。当前未提交改动与 `data/.DS_Store` 均原样保留。后续验证新环境或推送前先明确范围，不能顺手清空现有数据卷。
+
+
+## 8. CI、PR 和归档交接（2026-11-04，Codex）
+
+**让他double check。此节为最新收尾状态。**
+
+### 完成的工作和证据
+
+1. 读取 CC 最新 verify：全新环境浏览器的 2.4、2.8 已完成，接续时为 32/33；四项遗留问题保留。
+2. 用户明确授权提交、推送、CI、PR，并确认“CI 通过后合并 main，再归档”。提交 65 个相关文件；未包含 `.env`、证书、私钥或 `data/.DS_Store`，23 个已测源码哈希保持一致。
+3. 功能提交 `dbecc810dd47758ad957e3f5f2c7436f7706900f` 已推送；[PR #8](https://github.com/anwalld/CppAiWebServer/pull/8) 的 [CI run 41808271464](https://github.com/anwalld/CppAiWebServer/actions/runs/41808271464) 成功，完整执行 C++、前端与集成/故障脚本。日志 `/private/tmp/cppai-ci-41808271464.log`，机读结果 `.json`。
+4. 与 main 最近成功 CI run 41630969602 比较，没有新增弃用警告，也没有弃用类 check annotation；不声称原有第三方依赖警告已消除。
+5. 在 CI 绿色且 PR head 与已测提交一致后合并，main 的功能合并提交为 `077e21417e829f64799815bfe1bd674b12ea6ec7`。
+6. 6.2 按新的 apply JSON 核对原文/行号后回填，CLI 确认 **33/33**。快照 `/private/tmp/cppai-archive-apply-complete.json`。
+7. 按归档流程同步四份规格并移动整个 change（包含 `.openspec.yaml`、历史交接、verify 和遗留事项），目标 `openspec/changes/archive/2026-11-04-add-https-ha-and-room-bans/`。新增 edge-gateway/high-availability，更新 chat-rooms/user-auth；旧 Purpose、未提及的需求和场景保持不变。归档改动由独立文档 PR 交付。
+
+收尾校验：四份主规格均与 delta 一致；原有标题/Purpose 与无关需求场景保留；本 change 和四份主规格的 strict validate 通过，全规格普通校验 8/8 通过，git diff --check 通过，活动 change 列表为空，归档文件（含 .openspec.yaml）移动前后的 SHA-256 逐项相同。
+
+基线格式警告：额外执行全规格 strict 时，已有 realtime-messaging 的 Purpose 为 45 字，触发少于 50 字警告（7/8 strict 通过）；已核对与合并后的 main 完全相同。本次没有改它或隐藏该结果；标准全规格校验与本次四份规格严格校验均通过。后续可另行润色 Purpose。
+
+工具异常：GitHub 合并接口返回过 502，随后只读查询确认 PR 已实际合并，未重复合并；SSH 拉取被拒，HTTPS 首次因小写代理变量为无效占位值失败，临时去掉代理环境并使用已有 gh 登录后拉取成功。没有修改全局 Git/代理设置，也没有读取或输出私钥。
+
+### 仍未处理的事项
+
+- W2：直接断言 Redis 切换窗口内登录/消息的成功或有界 retryable 错误。
+- W3：同步 Python websockets 客户端 TLS 1.3 间歇超时及限定 TLS 1.2 的测试范围。
+- S1：reconcile 清除 reconciling 与再次检查 reconcileAgain 之间的窄竞态。
+- S2：失效会话 WebSocket 401 握手响应的 Content-Length 警告及其回归。
+
+这些是 CC/user 已确定归档后另开 change 的问题，继续记录在 design Risks、tasks Workflow follow-up 和 verification-report。没有为使 CI 通过而改方案、加重试、拉长超时、放宽断言或跳过用例，也没有新增真实模型/费用或生产部署验证。
+
+### 让他double check
+
+请 Claude 对照 PR #8 的 CI 原始日志、归档文档 PR 和合并结果独立检查：当前源码/已测提交一致；6.2 为本次 CI 而非旧记录；四份主规格与 delta 一致且旧内容保留；四项遗留问题和用户接受的风险仍在。`data/.DS_Store` 原样保留，未清理现有账号/房间、证书或数据卷。
 
 ---
 
