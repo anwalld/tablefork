@@ -25,6 +25,11 @@ std::vector<std::vector<std::string>> keyBatches(const std::vector<std::string> 
     return batches;
 }
 
+double firstCheckDelay(double period, std::mt19937 &rng)
+{
+    return std::uniform_real_distribution<double>(0.0, period)(rng);
+}
+
 SessionWatcher &SessionWatcher::instance()
 {
     static SessionWatcher watcher;
@@ -34,11 +39,25 @@ SessionWatcher &SessionWatcher::instance()
 void SessionWatcher::start()
 {
     subscriber_ = drogon::app().getRedisClient()->newSubscriber();
-    subscriber_->subscribe(SessionStore::kEndedChannel,
-                           [this](const std::string &, const std::string &key) { end(key); });
+    subscriber_->subscribe(
+        SessionStore::kEndedChannel,
+        [this](const std::string &, const std::string &key) {
+            // Ending sessions can unsubscribe room channels. Keep all cleanup
+            // outside Drogon's locked Redis subscription callback.
+            drogon::app().getLoop()->queueInLoop([this, key] { end(key); });
+        });
     // Our own timer: Drogon's WebSocket ping only keeps connections alive.
-    drogon::app().getLoop()->runEvery(Config::get().sessionCheckSeconds, [this] {
-        drogon::async_run([this]() -> drogon::Task<> { co_await check(); });
+    const auto period = Config::get().sessionCheckSeconds;
+    std::mt19937 rng(std::random_device{}());
+    drogon::app().getLoop()->runAfter(firstCheckDelay(period, rng), [this, period] {
+        const auto tick = [this] {
+            drogon::async_run([this]() -> drogon::Task<> {
+                co_await check();
+                co_await RoomHub::instance().reconcile();
+            });
+        };
+        tick();
+        drogon::app().getLoop()->runEvery(period, tick);
     });
 }
 
@@ -116,6 +135,7 @@ drogon::Task<> SessionWatcher::check()
         catch (const drogon::nosql::RedisException &e)
         {
             // A Redis hiccup must not log everyone out; try again next time.
+            RoomHub::instance().markRedisTrouble();
             LOG_WARN << "session check skipped: " << e.what();
             co_return;
         }

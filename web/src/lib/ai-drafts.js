@@ -13,18 +13,11 @@ export class AiDrafts {
     const { room_id: roomId, generation_id: id, member_id: memberId, text } = frame
     if (this.closed.has(id)) return
     const current = this.byId.get(id)
-    if (frame.cumulative) {
-      const attempt = frame.attempt ?? 0
-      const sequence = frame.sequence ?? 0
-      if (current && (attempt < current.attempt ||
-          (attempt === current.attempt && sequence <= current.sequence))) return
-      this.byId.set(id, { id, roomId, memberId, text: frame.snapshot ?? text, attempt, sequence })
-      return
-    }
-    if (current?.attempt > 0) return
-    const draft = current ?? { id, roomId, memberId, text: '' }
-    draft.text += text
-    this.byId.set(id, draft)
+    const attempt = frame.attempt ?? 0
+    const sequence = frame.sequence ?? 0
+    if (current && (attempt < current.attempt ||
+        (attempt === current.attempt && sequence <= current.sequence))) return
+    this.byId.set(id, { id, roomId, memberId, text: frame.snapshot ?? text, attempt, sequence })
   }
 
   clear(roomId) {

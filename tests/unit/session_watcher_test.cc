@@ -28,3 +28,19 @@ DROGON_TEST(KeyBatchesOfNothing)
 {
     CHECK(keyBatches({}, 500).empty());
 }
+
+DROGON_TEST(FirstCheckDelayIsUniformlyOffsetWithinPeriod)
+{
+    std::mt19937 rng(7319);
+    const double period = 30.0;
+    const auto first = chat::firstCheckDelay(period, rng);
+    bool different = false;
+    for (int i = 0; i < 1000; ++i)
+    {
+        const auto delay = chat::firstCheckDelay(period, rng);
+        CHECK(delay >= 0.0);
+        CHECK(delay < period);
+        different = different || delay != first;
+    }
+    CHECK(different);
+}

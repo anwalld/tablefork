@@ -12,6 +12,7 @@ export class RoomStream {
     this.contiguous = 0
     this.gapTimer = null
     this.syncing = null
+    this.tracking = true
   }
 
   get messages() {
@@ -22,7 +23,7 @@ export class RoomStream {
   addPage(messages) {
     if (messages.length === 0) return
     this.onMessages(messages)
-    for (const message of messages) this.bySeq.set(message.seq, message)
+    for (const message of messages) this.store(message)
     const newest = messages[messages.length - 1].seq
     if (this.contiguous < messages[0].seq - 1) {
       // First page, or a page past a hole too old to matter.
@@ -34,11 +35,22 @@ export class RoomStream {
 
   receive(message) {
     this.onMessages([message])
-    if (this.bySeq.has(message.seq)) return
-    this.bySeq.set(message.seq, message)
+    if (!this.store(message)) return
     this.advance()
     this.onChange()
     this.watchForGap()
+  }
+
+  // A server message can replace an optimistic local copy, never vice versa.
+  store(message) {
+    const current = this.bySeq.get(message.seq)
+    if (current && (!current.local || message.local)) return false
+    this.bySeq.set(message.seq, message)
+    return true
+  }
+
+  resume() {
+    this.tracking = true
   }
 
   advance() {
@@ -52,6 +64,7 @@ export class RoomStream {
   // A gap often closes by itself because pushes can arrive out of order, so
   // wait briefly before asking the server.
   watchForGap() {
+    if (!this.tracking) return
     if (!this.hasGap()) {
       clearTimeout(this.gapTimer)
       this.gapTimer = null
@@ -77,13 +90,15 @@ export class RoomStream {
       const page = await this.fetchAfter(this.contiguous)
       if (page.length === 0) return
       this.onMessages(page)
-      for (const message of page) this.bySeq.set(message.seq, message)
+      for (const message of page) this.store(message)
       this.advance()
       this.onChange()
     }
   }
 
   dispose() {
+    this.tracking = false
     clearTimeout(this.gapTimer)
+    this.gapTimer = null
   }
 }

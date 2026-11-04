@@ -1,58 +1,75 @@
+log_format upstream '$remote_addr "$request" $status upstream=$upstream_addr upstream_status=$upstream_status';
+access_log /dev/stdout upstream;
 map $http_upgrade $connection_upgrade {
     default upgrade;
-    ''      close;
+    '' close;
 }
-
-# Login and registration attempts per client address. A single keep-alive
-# connection can carry many requests, so this has to be counted per request at
-# L7 rather than per connection at L4.
+resolver 127.0.0.11 valid=5s;
+upstream app_servers {
+    zone app_servers 64k;
+    server app-1:8000 resolve max_fails=1 fail_timeout=5s;
+    server app-2:8000 resolve max_fails=1 fail_timeout=5s;
+    keepalive 32;
+}
+# 协议升级使用新连接：实测复用普通 HTTP 上游连接会返回 404。
+upstream app_websockets {
+    zone app_websockets 64k;
+    server app-1:8000 resolve max_fails=1 fail_timeout=5s;
+    server app-2:8000 resolve max_fails=1 fail_timeout=5s;
+}
+set_real_ip_from ${DOCKER_SUBNET};
+real_ip_header proxy_protocol;
 limit_req_zone $binary_remote_addr zone=auth:10m rate=${AUTH_RATE};
 limit_req_status 429;
 
 server {
-    listen 80;
-
-    # Resolve at request time, so a recreated app container with a new address
-    # is picked up without restarting Nginx.
-    resolver 127.0.0.11 valid=5s;
-    set $app http://app:8000;
+    listen 80 proxy_protocol;
+    return 301 https://$host:${HTTPS_PORT}$request_uri;
+}
+server {
+    listen 8081;
+    location = /health { proxy_pass http://app_servers/health; }
+    location / { return 404; }
+}
+server {
+    listen 443 ssl proxy_protocol;
+    ssl_certificate /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header Connection "";
+    proxy_connect_timeout 2s;
+    proxy_next_upstream error timeout http_502 http_503;
 
     location ~ ^/api/auth/(login|register)$ {
         limit_req zone=auth burst=${AUTH_BURST} nodelay;
         error_page 429 = @rate_limited;
-        proxy_pass $app;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass http://app_servers;
     }
-
-    location /api/ {
-        proxy_pass $app;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    # AUTH_RETRY_AFTER is the time one new attempt takes to accrue at
-    # AUTH_RATE, so clients know how long to wait.
+    location /api/ { proxy_pass http://app_servers; }
     location @rate_limited {
         default_type application/json;
         charset utf-8;
         add_header Retry-After ${AUTH_RETRY_AFTER} always;
         return 429 '{"error":{"code":"rate_limited","message":"尝试次数过多，请稍后再试","retryable":true,"retry_after":${AUTH_RETRY_AFTER}}}';
     }
-
-    location = /health {
-        proxy_pass $app;
-    }
-
+    location = /health { proxy_pass http://app_servers; }
     location = /ws {
-        proxy_pass $app;
-        proxy_http_version 1.1;
+        proxy_pass http://app_websockets;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_read_timeout 3600s;
     }
-
     location / {
         root /usr/share/nginx/html;
         try_files $uri $uri/ /index.html;

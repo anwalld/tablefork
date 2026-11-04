@@ -53,6 +53,14 @@ export const api = {
   dismissAdmin: (roomId, username) =>
     request('DELETE', `/api/rooms/${roomId}/admins/${encodeURIComponent(username)}`),
 
+  kickMember: (roomId, username) =>
+    request('DELETE', `/api/rooms/${roomId}/members/${encodeURIComponent(username)}`),
+  banUser: (roomId, username) =>
+    request('PUT', `/api/rooms/${roomId}/bans/${encodeURIComponent(username)}`),
+  unbanUser: (roomId, username) =>
+    request('DELETE', `/api/rooms/${roomId}/bans/${encodeURIComponent(username)}`),
+  listBans: (roomId) => request('GET', `/api/rooms/${roomId}/bans`),
+
   aiAgents: () => request('GET', '/api/ai-agents'),
   requestAi: (roomId, slug) => request('POST', `/api/rooms/${roomId}/ai-members`, { slug }),
   removeAi: (roomId, slug) => request('DELETE', `/api/rooms/${roomId}/ai-members/${slug}`),

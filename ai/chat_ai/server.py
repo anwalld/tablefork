@@ -125,7 +125,8 @@ async def serve() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = Settings.from_env()
     cache = redis.Redis(host=settings.redis_host, port=settings.redis_port,
-                        password=settings.redis_password or None, decode_responses=True)
+                        password=settings.redis_password or None, decode_responses=True,
+                        socket_connect_timeout=2, socket_timeout=2)
     pool = await aiomysql.create_pool(
         host=settings.mysql_host, user=settings.mysql_user, password=settings.mysql_password,
         db=settings.mysql_database, autocommit=True, minsize=1, maxsize=8, charset="utf8mb4",

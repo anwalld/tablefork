@@ -10,6 +10,7 @@
 #include "common/util.h"
 #include "services/password_policy.h"
 #include "ws/session_watcher.h"
+#include "ws/room_hub.h"
 
 namespace
 {
@@ -68,8 +69,17 @@ int main()
                            config.redisConnections,
                            false,
                            2.0)
+        // Log routing evidence per instance without cookies or request bodies.
+        .registerPostHandlingAdvice([](const drogon::HttpRequestPtr &req,
+                                       const drogon::HttpResponsePtr &resp) {
+            LOG_INFO << req->methodString() << " " << req->getPath() << " "
+                     << static_cast<int>(resp->statusCode());
+        })
         // Redis clients exist only once the app runs.
-        .registerBeginningAdvice([] { chat::SessionWatcher::instance().start(); })
+        .registerBeginningAdvice([] {
+            chat::RoomHub::instance().start();
+            chat::SessionWatcher::instance().start();
+        })
         .setExceptionHandler([](const std::exception &e,
                                 const drogon::HttpRequestPtr &req,
                                 std::function<void(const drogon::HttpResponsePtr &)>

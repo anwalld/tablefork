@@ -142,6 +142,42 @@ RoomController::Response RoomController::dismissAdmin(drogon::HttpRequestPtr req
     co_return jsonResponse(Json::objectValue);
 }
 
+RoomController::Response RoomController::kick(drogon::HttpRequestPtr req, std::string roomId, std::string username)
+{
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto member = co_await RoomService::kick(session, id, std::move(username));
+    co_await reportMembersChanged(id);
+    co_await RoomHub::instance().removeMember(id, member, "kicked");
+    co_return jsonResponse(Json::objectValue);
+}
+
+RoomController::Response RoomController::ban(drogon::HttpRequestPtr req, std::string roomId, std::string username)
+{
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto member = co_await RoomService::ban(session, id, std::move(username));
+    if (member != 0)
+    {
+        co_await reportMembersChanged(id);
+        co_await RoomHub::instance().removeMember(id, member, "banned");
+    }
+    co_return jsonResponse(Json::objectValue);
+}
+
+RoomController::Response RoomController::unban(drogon::HttpRequestPtr req, std::string roomId, std::string username)
+{
+    const auto session = co_await SessionStore::require(req);
+    co_await RoomService::unban(session, parseRoomId(roomId), std::move(username));
+    co_return jsonResponse(Json::objectValue);
+}
+
+RoomController::Response RoomController::bans(drogon::HttpRequestPtr req, std::string roomId)
+{
+    const auto session = co_await SessionStore::require(req);
+    co_return jsonResponse(co_await RoomService::bans(session, parseRoomId(roomId)));
+}
+
 RoomController::Response RoomController::messages(drogon::HttpRequestPtr req,
                                                   std::string roomId)
 {

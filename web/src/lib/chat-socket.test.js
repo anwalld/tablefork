@@ -108,7 +108,7 @@ describe('ChatSocket', () => {
     latest().open()
     socket.subscribe(7)
     latest().reply({ type: 'room_left', room_id: 7 })
-    expect(handlers.onRoomLeft).toHaveBeenCalledWith(7)
+    expect(handlers.onRoomLeft).toHaveBeenCalledWith(7, 'left')
     latest().drop()
     await vi.advanceTimersByTimeAsync(500)
     latest().open()
@@ -139,14 +139,14 @@ describe('ChatSocket', () => {
     }
     expect(handlers.onSendResult).not.toHaveBeenCalled()
     ws.reply({ type: 'ack', client_msg_id: 'c1', seq: 9 })
-    expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'c1', { ok: true, seq: 9 })
+    expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'c1', { ok: true, seq: 9, created_at: undefined })
     socket.close()
   })
 
   it('hands AI and room events to the view', () => {
     const { socket, handlers } = makeSocket()
     latest().open()
-    const chunk = { type: 'ai_chunk', room_id: 7, generation_id: 'g', member_id: 3, text: 'hi' }
+    const chunk = { type: 'ai_chunk', room_id: 7, generation_id: 'g', member_id: 3, text: 'hi', cumulative: true, snapshot: 'hi', attempt: 1, sequence: 1 }
     latest().reply(chunk)
     latest().reply({ type: 'role_changed', room_id: 7, member_id: 2, role: 'admin' })
     expect(handlers.onEvent.mock.calls.map(([frame]) => frame.type)).toEqual(['ai_chunk', 'role_changed'])
@@ -181,4 +181,24 @@ describe('ChatSocket', () => {
     await vi.advanceTimersByTimeAsync(20000)
     expect(FakeWebSocket.all).toHaveLength(1)
   })
+
+  it.each(['kicked', 'banned'])('passes the %s reason and removes the subscription', (reason) => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    socket.subscribe(7)
+    latest().reply({ type: 'room_left', room_id: 7, reason })
+    expect(handlers.onRoomLeft).toHaveBeenCalledWith(7, reason)
+    expect(socket.rooms.has(7)).toBe(false)
+    socket.close()
+  })
+
+it('forwards the acknowledgement creation time', () => {
+  const { socket, handlers } = makeSocket()
+  latest().open()
+  socket.send(7, 'dated', 'hello')
+  latest().reply({ type: 'ack', client_msg_id: 'dated', seq: 4, created_at: 1700000000000 })
+  expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'dated', { ok: true, seq: 4, created_at: 1700000000000 })
+  socket.close()
+})
+
 })

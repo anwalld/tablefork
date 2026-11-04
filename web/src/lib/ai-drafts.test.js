@@ -1,16 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { AiDrafts } from './ai-drafts.js'
 
-const chunk = (id, text, room = 1) => ({ room_id: room, generation_id: id, member_id: 9, text })
+const chunk = (id, text, room = 1) => ({ room_id: room, generation_id: id, member_id: 9, text, snapshot: text, cumulative: true, attempt: 1, sequence: 1 })
 
 describe('AiDrafts', () => {
-  it('appends chunks of one generation', () => {
-    const drafts = new AiDrafts()
-    drafts.chunk(chunk('g1', '你'))
-    drafts.chunk(chunk('g1', '好'))
-    expect(drafts.forRoom(1)).toEqual([{ id: 'g1', roomId: 1, memberId: 9, text: '你好' }])
-  })
-
   it('drops the draft when its message arrives', () => {
     const drafts = new AiDrafts()
     drafts.chunk(chunk('g1', '你'))

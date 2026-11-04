@@ -11,7 +11,7 @@ import uuid
 
 from websockets.asyncio.client import connect
 
-from conftest import ORIGIN, PASSWORD, WS_URL, Client, unique_name
+from conftest import ORIGIN, PASSWORD, WS_URL, Client, unique_name, tls_context
 
 
 def make_user():
@@ -30,7 +30,7 @@ def make_user():
 
 async def sender(client, room_id, count, latencies, errors):
     headers = {"Cookie": client.cookie_header()}
-    async with connect(WS_URL, origin=ORIGIN, additional_headers=headers) as ws:
+    async with connect(WS_URL, origin=ORIGIN, additional_headers=headers, ssl=tls_context()) as ws:
         for index in range(count):
             started = time.perf_counter()
             await ws.send(

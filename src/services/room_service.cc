@@ -86,6 +86,81 @@ drogon::Task<int64_t> humanMember(const TransactionPtr &tx,
     }
     co_return rows[0]["id"].as<int64_t>();
 }
+struct ManagedHuman
+{
+    int64_t userId;
+    int64_t memberId;
+    bool inRoom;
+};
+
+drogon::Task<> requireManager(const TransactionPtr &tx,
+                               int64_t roomId,
+                               int64_t memberId)
+{
+    const auto actor = co_await roleOf(tx, roomId, memberId);
+    if (!actor)
+    {
+        throw ApiError::roomNotFound();
+    }
+    if (!RoomService::canManage(*actor, "none"))
+    {
+        throw ApiError::forbidden();
+    }
+}
+
+drogon::Task<ManagedHuman> managedHuman(const TransactionPtr &tx,
+                                        const Session &session,
+                                        int64_t roomId,
+                                        const std::string &username,
+                                        bool kicking)
+{
+    const auto actor = co_await roleOf(tx, roomId, session.memberId);
+    if (!actor)
+    {
+        throw ApiError::roomNotFound();
+    }
+    const auto users = co_await tx->execSqlCoro(
+        "SELECT u.id, m.id AS member_id, rm.role FROM users u "
+        "JOIN members m ON m.user_id = u.id AND m.type = 'human' "
+        "LEFT JOIN room_members rm ON rm.member_id = m.id AND rm.room_id = ? "
+        "WHERE u.username = ?", roomId, username);
+    if (users.empty())
+    {
+        if (kicking)
+        {
+            const auto ai = co_await tx->execSqlCoro(
+                "SELECT rm.role FROM members m JOIN ai_profiles p ON p.member_id = m.id "
+                "LEFT JOIN room_members rm ON rm.member_id = m.id AND rm.room_id = ? "
+                "WHERE m.display_name = ? OR p.slug = ? LIMIT 1", roomId, username, username);
+            if (!ai.empty())
+            {
+                const auto role = ai[0]["role"].isNull() ? "none" : ai[0]["role"].as<std::string>();
+                if (!RoomService::canManage(*actor, role))
+                {
+                    throw ApiError::forbidden();
+                }
+                throw ApiError::invalidArgument("use AI removal for AI members");
+            }
+        }
+        throw ApiError(drogon::k404NotFound, "user_not_found", "user not found");
+    }
+    const auto memberId = users[0]["member_id"].as<int64_t>();
+    if (memberId == session.memberId)
+    {
+        throw ApiError::invalidArgument("use leave to leave the room yourself");
+    }
+    const auto role = users[0]["role"].isNull() ? "none" : users[0]["role"].as<std::string>();
+    if (!RoomService::canManage(*actor, role))
+    {
+        throw ApiError::forbidden();
+    }
+    if (kicking && role == "none")
+    {
+        throw ApiError::invalidArgument("not a human member of this room");
+    }
+    co_return ManagedHuman{users[0]["id"].as<int64_t>(), memberId, role != "none"};
+}
+
 }  // namespace
 
 drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
@@ -170,6 +245,12 @@ drogon::Task<> RoomService::invite(Session session,
     const auto userId = users[0]["id"].as<int64_t>();
     if (!co_await isMember(tx, roomId, users[0]["member_id"].as<int64_t>()))
     {
+        const auto banned = co_await tx->execSqlCoro(
+            "SELECT 1 FROM room_bans WHERE room_id = ? AND user_id = ?", roomId, userId);
+        if (!banned.empty())
+        {
+            throw ApiError(drogon::k409Conflict, "user_banned", "user is banned from this room");
+        }
         co_await tx->execSqlCoro(
             "INSERT IGNORE INTO room_invites (room_id, user_id, invited_by) "
             "VALUES (?, ?, ?)",
@@ -186,6 +267,12 @@ drogon::Task<> RoomService::join(Session session, int64_t roomId)
     co_await lockRoom(tx, roomId);
     if (!co_await isMember(tx, roomId, session.memberId))
     {
+        const auto banned = co_await tx->execSqlCoro(
+            "SELECT 1 FROM room_bans WHERE room_id = ? AND user_id = ?", roomId, session.userId);
+        if (!banned.empty())
+        {
+            throw ApiError::roomNotFound();
+        }
         const auto invite = co_await tx->execSqlCoro(
             "DELETE FROM room_invites WHERE room_id = ? AND user_id = ?",
             roomId,
@@ -321,6 +408,76 @@ drogon::Task<int64_t> RoomService::setAdmin(Session session,
         target);
     co_await commit(std::move(tx));
     co_return target;
+}
+
+bool RoomService::canManage(std::string_view actorRole, std::string_view targetRole)
+{
+    return (actorRole == "owner" && (targetRole == "admin" || targetRole == "member" || targetRole == "none")) ||
+           (actorRole == "admin" && (targetRole == "member" || targetRole == "none"));
+}
+
+drogon::Task<int64_t> RoomService::kick(Session session, int64_t roomId, std::string username)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await lockRoom(tx, roomId);
+    const auto target = co_await managedHuman(tx, session, roomId, username, true);
+    co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
+    co_await commit(std::move(tx));
+    co_return target.memberId;
+}
+
+drogon::Task<int64_t> RoomService::ban(Session session, int64_t roomId, std::string username)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await lockRoom(tx, roomId);
+    const auto target = co_await managedHuman(tx, session, roomId, username, false);
+    co_await tx->execSqlCoro(
+        "INSERT IGNORE INTO room_bans (room_id, user_id, banned_by) VALUES (?, ?, ?)",
+        roomId, target.userId, session.memberId);
+    co_await tx->execSqlCoro("DELETE FROM room_invites WHERE room_id = ? AND user_id = ?", roomId, target.userId);
+    if (target.inRoom)
+    {
+        co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
+    }
+    co_await commit(std::move(tx));
+    co_return target.inRoom ? target.memberId : 0;
+}
+
+drogon::Task<> RoomService::unban(Session session, int64_t roomId, std::string username)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await lockRoom(tx, roomId);
+    co_await requireManager(tx, roomId, session.memberId);
+    const auto users = co_await tx->execSqlCoro("SELECT id FROM users WHERE username = ?", username);
+    if (users.empty())
+    {
+        throw ApiError(drogon::k404NotFound, "user_not_found", "user not found");
+    }
+    co_await tx->execSqlCoro("DELETE FROM room_bans WHERE room_id = ? AND user_id = ?", roomId, users[0]["id"].as<int64_t>());
+    co_await commit(std::move(tx));
+}
+
+drogon::Task<Json::Value> RoomService::bans(Session session, int64_t roomId)
+{
+    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    co_await requireManager(tx, roomId, session.memberId);
+    const auto rows = co_await tx->execSqlCoro(
+        "SELECT u.username, bu.username AS banned_by, UNIX_TIMESTAMP(b.created_at) * 1000 AS created_at_ms "
+        "FROM room_bans b JOIN users u ON u.id = b.user_id "
+        "LEFT JOIN members bm ON bm.id = b.banned_by LEFT JOIN users bu ON bu.id = bm.user_id "
+        "WHERE b.room_id = ? ORDER BY b.created_at, b.user_id", roomId);
+    Json::Value body;
+    body["bans"] = Json::arrayValue;
+    for (const auto &row : rows)
+    {
+        Json::Value ban;
+        ban["username"] = row["username"].as<std::string>();
+        ban["banned_by"] = row["banned_by"].isNull() ? Json::Value() : Json::Value(row["banned_by"].as<std::string>());
+        ban["created_at"] = Json::Int64(row["created_at_ms"].as<double>());
+        body["bans"].append(std::move(ban));
+    }
+    co_await commit(std::move(tx));
+    co_return body;
 }
 
 drogon::Task<std::string> RoomService::requireRole(

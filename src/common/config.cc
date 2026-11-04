@@ -35,16 +35,16 @@ Config load()
     c.mysqlPassword = envOr("MYSQL_PASSWORD", "");
     c.mysqlConnections = envOr("MYSQL_CONNECTIONS", 24L);
 
-    c.redisHost = envOr("REDIS_HOST", "redis-master");
+    c.redisHost = envOr("REDIS_HOST", "redis-proxy");
     c.redisPort = static_cast<unsigned short>(envOr("REDIS_PORT", 6379L));
     c.redisPassword = envOr("REDIS_PASSWORD", "");
     c.redisConnections = envOr("REDIS_CONNECTIONS", 4L);
 
     c.sessionTtlSeconds = static_cast<int>(envOr("SESSION_TTL_SECONDS", 604800L));
     c.sessionCheckSeconds = static_cast<double>(positiveOr(std::getenv("SESSION_CHECK_SECONDS"), 30));
-    c.cookieSecure = envOr("COOKIE_SECURE", 0L) != 0;
+    c.cookieSecure = envOr("COOKIE_SECURE", 1L) != 0;
     c.allowedOrigins = drogon::utils::splitString(
-        envOr("ALLOWED_ORIGINS", "http://localhost:8080"), ",");
+        envOr("ALLOWED_ORIGINS", "https://localhost:8443"), ",");
 
     c.workerCount = envOr("WORKER_COUNT", 16L);
     c.workerQueueLimit = envOr("WORKER_QUEUE_LIMIT", 1024L);

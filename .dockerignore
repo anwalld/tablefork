@@ -1,0 +1,14 @@
+# 本地凭据和证书不能进入构建上下文或 COPY data 的测试镜像。
+.env
+data/certs/
+.git/
+
+# Reproducible container builds exclude local generated artifacts.
+web/node_modules/
+web/dist/
+build/
+cmake-build-*/
+**/__pycache__/
+**/.pytest_cache/
+.idea/
+.claude/worktrees/

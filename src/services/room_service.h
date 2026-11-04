@@ -4,6 +4,7 @@
 #include <drogon/utils/coroutine.h>
 #include <json/json.h>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "services/session_store.h"
@@ -40,6 +41,14 @@ class RoomService
                                           int64_t roomId,
                                           std::string username,
                                           bool admin);
+    // targetRole == "none" means a human who is outside the room.
+    static bool canManage(std::string_view actorRole, std::string_view targetRole);
+    static drogon::Task<int64_t> kick(Session session, int64_t roomId, std::string username);
+    // Returns the removed member id, or zero if the user was not a member.
+    static drogon::Task<int64_t> ban(Session session, int64_t roomId, std::string username);
+    static drogon::Task<> unban(Session session, int64_t roomId, std::string username);
+    static drogon::Task<Json::Value> bans(Session session, int64_t roomId);
+
     // The caller's role, or ApiError::roomNotFound() for a non-member and
     // ApiError::forbidden() when the role is not one of those allowed.
     static drogon::Task<std::string> requireRole(

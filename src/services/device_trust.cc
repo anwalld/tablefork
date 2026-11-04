@@ -21,6 +21,8 @@ std::string trustedKey(int64_t userId)
 // KEYS[1] the user's trusted devices. ARGV: kind, device, then the window's
 // days. Adds up both devices' daily counts and swaps when the newcomer sent
 // more than 1.5 times as many. Returns 1 when the device is trusted.
+// Only valid with Sentinel or a single primary. Redis Cluster needs a new
+// key design (shared hash tags); this script constructs device_sends keys.
 constexpr const char *kEvaluate = R"lua(
 local kind, device = ARGV[1], ARGV[2]
 local current = redis.call('HGET', KEYS[1], kind)

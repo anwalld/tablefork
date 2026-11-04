@@ -162,7 +162,8 @@ upstream app_servers {
 - 原来的“变量加 resolver”写法只能指向一个主机名。换成 upstream 后，用 `resolve`（同样需要 1.27.3+ 和 `resolver`）保留“容器重建后自动重新解析”的能力。
 - `proxy_next_upstream error timeout http_502 http_503;`：一个实例停止时，请求自动重试到另一个。
   - 非幂等的请求（POST）默认不会被重试，除非还没发出去（`error` 指连接阶段的错误）。这正好避免了重复发消息，HTTP 发消息本来也只有登录这一类。
-- WebSocket（`/ws`）也走同一个 upstream，默认轮询分发，不需要会话保持：所有状态都在 Redis 和 MySQL 里，任一实例都能接管。
+- WebSocket（`/ws`）使用指向同一组应用实例、但不设 `keepalive` 的独立 `app_websockets` upstream，默认轮询分发，不需要会话保持：所有状态都在 Redis 和 MySQL 里，任一实例都能接管。
+  - 实现中验证发现：复用普通 HTTP 的上游连接会使 Drogon 的 WebSocket 握手返回 404；已核对 v1.9.13 的 `lib/src/HttpServer.cc`，协议升级仅在 `requestParser->firstReq()` 时检查。因此普通 HTTP 仍保留连接池，WebSocket 升级另建连接。两个 upstream 都使用 `zone`、`resolve` 和相同的故障转移参数。
   - 实例停止后连接断开，前端已有的重连逻辑会连到另一个实例，然后按 seq 补齐。
 - 前端静态文件仍由 L7 自己提供。
 
@@ -183,18 +184,31 @@ upstream app_servers {
   - 默认 3 秒判定下线，加上选举和提升，通常在 10 秒内完成切换，满足 spec 的 30 秒。
   - 两个 Redis 节点都配置 `--masterauth` 和 `--requirepass`，这样任一个被降级后都能连上新的主节点。`redis-2` 启动时带 `--replicaof redis-1 6379`；`redis-1` 不带，之后由 Sentinel 改写它的角色。
   - 从节点向主节点报告的是自己的 IP，Sentinel 再从主节点那里得知从节点地址。所以 `redis-1` 和 `redis-2` 都带 `--replica-announce-ip <自己的服务名>`，让 Sentinel 记录的是主机名，容器重建后仍然有效。
-- **HAProxy**（`redis-proxy`，`haproxy:3.0.5-alpine`，配置在 `docker/haproxy.cfg`）：
+- **HAProxy**（`redis-proxy`，`haproxy:3.0.5-alpine`）：后端只保留一个 `master` 条目，Redis 仍为两个节点和三个 Sentinel。2026-11-04 测试观察到旧方案有约 11 秒两个节点都自称 master、代理同时转发的窗口；不再用两个条目分别检查，因为独立检查也不能同时切换 UP/DOWN 状态。
 
-```
+```text
+global
+    log stdout format raw local0
+    maxconn 4096
+    stats socket ipv4@127.0.0.1:9998 level admin
+    stats socket ipv4@0.0.0.0:9999 level user
+
 defaults
+    log global
     mode tcp
+    option tcplog
     timeout connect 2s
-    timeout client  0      # Pub/Sub connections stay idle for long
-    timeout server  0
-    default-server init-addr last,libc,none resolvers docker check inter 1s fall 2 rise 2 on-marked-down shutdown-sessions
+    timeout client 0
+    timeout server 0
+    timeout check 2s
+    default-server init-addr last,libc,none resolvers docker check inter 1s fall 1 rise 1 on-marked-down shutdown-sessions
 
 resolvers docker
     nameserver dns 127.0.0.11:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 5s
 
 frontend redis
     bind :6379
@@ -202,23 +216,26 @@ frontend redis
 
 backend redis_master
     option tcp-check
-    tcp-check send "AUTH ${REDIS_PASSWORD}"\r\n
+    tcp-check send-binary "${REDIS_AUTH_HEX}"
     tcp-check expect string +OK
-    tcp-check send PING\r\n
+    tcp-check send "PING\r\n"
     tcp-check expect string +PONG
-    tcp-check send "INFO replication"\r\n
+    tcp-check send "INFO replication\r\n"
     tcp-check expect string role:master
-    tcp-check send QUIT\r\n
+    tcp-check send "QUIT\r\n"
     tcp-check expect string +OK
-    server redis-1 redis-1:6379
-    server redis-2 redis-2:6379
+    server master "${REDIS_MASTER_HOST}:6379"
 ```
 
-  - 只有回答 `role:master` 的节点被视为健康，所以连接永远只会到主节点。
-  - `on-marked-down shutdown-sessions`：原主节点被判定为不健康时，主动断开所有经过它的连接，客户端重连后就落到新的主节点。
-  - `timeout client/server 0`：Pub/Sub 和 `SessionWatcher` 的订阅连接可能长时间没有流量，不能被 HAProxy 超时关掉。
-  - HAProxy 在配置里支持 `"${VAR}"` 形式的环境变量，`REDIS_PASSWORD` 通过 environment 传入，不写进版本库。实现时要确认 `tcp-check send` 里的环境变量能展开；如果不能，就由启动脚本用 `envsubst` 生成配置。
-  - 在 HAProxy 和 Sentinel 之间，“谁是主节点”是两个独立的判断。切换的那一瞬间，HAProxy 可能看到两个都不是主节点（连接被拒绝），或者看到两个都是主节点（网络分区时）。前者只是短暂失败，后者见 Risks。
+  - 启动脚本先通过 RESP AUTH 和 `SENTINEL get-master-addr-by-name chat` 查询三个 Sentinel，至少两个回答同一主机名才导出 `REDIS_MASTER_HOST` 并启动。启动时没有多数就每秒等待，健康检查不通过，下游不会启动。
+  - `scripts/redis-master-watch.sh` 作为后台子进程，继承 `REDIS_PASSWORD`，顺序用 `nc -w 1` 查询三个 Sentinel，每轮后等待 0.5 秒。至少两个回答同一主机名、且不同于当前路由时，先执行 `set server redis_master/master fqdn <新主>`，确认 HAProxy 接受 FQDN 后再 `shutdown sessions server redis_master/master`，记录一次无密码的切换日志。只用轮询，不订阅 `+switch-master`。
+  - 查询不到多数时保持当前路由，不主动切走。当前路由节点失效或不再是主节点时，AUTH→PING→INFO role:master→QUIT 的健康检查使该条目 DOWN；检查只判断目标是否可用，不决定选哪个节点。
+  - 原节点被 Sentinel 选为从节点时不会因为自己暂时仍报告 master 而获得路由；单一条目保证新连接在任一时刻只有一个去处。旧主重启到被降级的过程中，代理继续指向 Sentinel 多数派认定的当前主节点。
+  - 改地址与关闭已有连接是两条命令，中间短暂窗口内旧连接仍可能写入旧节点；受控切换时这些写入可能在后续同步中丢失。接受与异步复制相同类型的短暂数据丢失风险，不使用 `min-replicas-to-write`：仅一个从节点时，从节点故障不应导致主节点拒绝所有写入。
+  - `127.0.0.1:9998` 为容器回环 admin 接口，供 watcher 改路由；`0.0.0.0:9999` 为 Docker 内网只读接口，供测试读取 `show servers state`。两个端口均不发布到宿主机。
+  - watcher PID 写入 `/tmp/redis-master-watch.pid`；容器健康检查同时要求 PID 存活和代理 PING 成功。用户追加确认：watcher 异常退出时终止 HAProxy 主进程，由 `restart: unless-stopped` 重启容器；不能依赖 unhealthy 状态本身触发重启。
+  - 密码仍仅经环境变量传入；AUTH 用 RESP 字节后转 `REDIS_AUTH_HEX` 给 tcp-check，不写入配置、临时密码文件或命令行参数。健康与 watcher 子进程均不输出密码。
+  - `redis-proxy` 是单容器单点；不增加第二个代理，避免两个代理路由切换时刻不同，重新形成分别指向旧主和新主的窗口。故障时靠容器自动重启恢复。
 - **C++ 和 AI 服务都只连 `redis-proxy`**（用户的决定）：
   - `.env.example` 和 compose 里 `REDIS_HOST` 的默认值改为 `redis-proxy`。
   - `resolveIpv4("redis-proxy")` 得到的是 HAProxy 容器的地址，它在整个运行期间不变，所以 `main.cc` 不用改。
@@ -250,6 +267,15 @@ Sentinel 下只有一个主节点，`DeviceTrust` 的 `kEvaluate` 在脚本里�
   - 再登出，另一实例上的连接要在 2 秒内收到 4401。
 
   这能说明普通连接和订阅连接都重连成功、订阅也恢复了。如果 `v1.9.13` 的行为与读到的源码不符，就在 `RoomHub` 和 `SessionWatcher` 里补一个小的重新订阅逻辑（用 Redis 失败作为信号，重建 `newSubscriber()` 并重新订阅已有的房间频道），作为这个 change 的一部分。
+
+### D9a. 移除通知丢失时的兜底：定期对账
+
+- 问题：Redis 故障导致 `member_left` 丢失时，其他实例上被移出者的订阅会残留，Redis 恢复后会继续收到房间的新消息。
+- 正常情况下仍由 `member_left` 即时撤权。另外，每个实例定期用 MySQL 核对本实例的所有“房间—成员”订阅：快照去重，每 500 对一批，依次参数化查询 `room_members`；失去成员关系的再查 `room_bans` 判断原因（`banned`，否则 `kicked`；对账分不出被踢和自己退出，统一按被踢处理），然后只在应用循环本地移除并发送 `room_left`，不再发布移除事件。
+- 周期沿用 `SESSION_CHECK_SECONDS`，与会话检查在同一个定时器里顺序执行。每个实例启动时在 `[0, 周期)` 内均匀随机延迟首次执行，尽量错开各实例的对账时刻。有重入保护，上一轮未结束时只记一次“再跑一轮”，以循环完成。
+- 故障触发：实例在发布或会话检查遇到 Redis 错误时记“脏”标记，此后每秒尝试 `PUBLISH rooms:reconcile 1`；成功即清除标记，所有实例收到广播后立即对账。订阅回调先 `queueInLoop` 再执行对账，避免 Drogon 的频道锁重入。用 PUBLISH 是否成功判断恢复，因为 PING 成功不代表能发布。
+- 曾经的方案是在每次推送前查询成员名单。它会让并发发布的 AI 片段乱序，开销也随消息量增长，因此弃用。AI 片段为带 sequence 的累积快照，乱序会丢掉中间快照、让显示跳动，不会造成文字拼接错乱。现在 `publish` 直接发布，不再按消息查询成员或注入收件人名单；原有私人通知目标机制保留。
+- 代价：故障触发没能覆盖到的情况（例如只有某个实例的订阅连接被单独断开，而普通命令正常），撤权最多延迟约一个周期（默认 30 秒）。取快照后被移出又立即重新加入的用户，可能被误移除一次，刷新即可恢复。对账数据库异常时记录警告并放弃本轮，等待下一次。
 
 ### D10. 封禁的数据模型
 
@@ -334,7 +360,11 @@ canManage(actorRole, targetRole):
   - 群主和管理员可以看到“封禁列表”入口：
     - 列表显示用户名、执行者、时间，每行一个“解封”按钮；
     - 另有一个输入框，可以按用户名封禁不在房间里的人。
-- 收到带原因的 `room_left`（`kicked` 或 `banned`）时：从房间列表中移除这个房间；如果当前正打开它，就退出到房间列表，并提示“你已被移出房间 X”或“你已被禁止进入房间 X”。没有 `reason` 或 `reason` 为 `left` 时，保持现在的行为。
+- 收到带原因的 `room_left`（`kicked` 或 `banned`）时：房间保留在列表并标记“已被踢出”或“已被封禁”，停止订阅与消息流跟踪，保留已经加载的消息。正在打开时继续显示原消息，并持久显示“你已被踢出房间 X”或“你已被禁止进入房间 X”，禁用输入框和发送按钮，关闭成员面板；之后不再请求该房间的成员、历史或封禁列表。未打开的房间以后点开时同样只显示本地已有消息和提示。
+- 刷新列表时保留本地标记的房间；服务端重新返回同一个房间 id（例如重新邀请）时清除本地标记，以服务端状态为准。移出状态只存内存，刷新页面后消失。没有 `reason` 或 `reason` 为 `left` 时保持原行为。
+- `ai-drafts.js` 只处理带 attempt/sequence 的累积片段，使用完整快照并忽略旧序号，不再保留非累积分支。
+- 收到成功 ack 后，前端使用 ack 的 seq/created_at、待发送项的 client_msg_id/content 和当前用户信息，先拼出 `local: true` 的消息显示，再移除待发送项并补齐；ack 格式和服务端不变。`RoomStream` 的 receive、addPage、fetchMissing 均允许同 seq 的服务端版本替换本地版本，正式版本不被后到的重复数据覆盖。
+- 被踢或被封的房间不再补齐历史；fetchAfter 直接返回空数组，已知 seq 缺口不会触发接口请求。
 - 邀请时收到 `user_banned`，提示“该用户已被此房间封禁，需要先解封”。
 - 前端单元测试覆盖：按角色显示按钮的规则，以及 `room_left` 按原因分支。
 
@@ -399,7 +429,8 @@ canManage(actorRole, targetRole):
 ## Risks / Trade-offs
 
 - [Redis 异步复制，切换时最后几毫秒的写入可能丢失] → 丢失的可能是刚创建的会话（用户需要重新登录）、限流计数、受信任设备的发送计数，或 AI 服务的任务状态。聊天消息以 MySQL 为准，不受影响。AI 任务丢失时，这条回复不会生成，用户可以重新提及。接受这个风险，不使用 `WAIT` 或 `min-replicas-to-write`：只有一个从节点时，它们会让从节点故障也变成写入故障。
-- [网络分区时可能出现两个主节点，HAProxy 会把连接分给两边] → 单机 Docker 网络里不会出现这种分区。HAProxy 的 `tcp-check` 只认 `role:master`，原主节点恢复后会被 Sentinel 降级，最多短暂出现两个健康后端。接受这个风险，并在 design 里记录。
+- [改地址与断开旧连接之间的短暂窗口] → 单一后端的新连接只有一个去处，但两条管理命令之间，旧连接仍可能向旧主写入；受控切换时这些写入可能丢失，接受该风险，见 D7。Sentinel 没有多数时保持路由，目标实际不可用则返回可重试错误。
+- [`redis-proxy` 是单点] → watcher 异常退出时结束主进程，由 Docker 重启策略恢复；不部署第二个代理，避免不同代理切换时刻不一致。
 - [Pub/Sub 断开期间的实时推送丢失] → 消息已经在 MySQL 里，客户端靠下一条消息的 seq 缺口，或者重连时补齐。房间之后一直没有新消息时，缺失的那条要等到用户刷新或重连才出现。接受这个风险，见 D9。
 - [Drogon 订阅的重连行为与阅读的源码不一致] → D9 的故障测试会发现，届时补上重新订阅逻辑。
 - [L4 是单点] → 单机部署下无法消除，这次不处理。
@@ -407,6 +438,16 @@ canManage(actorRole, targetRole):
 - [TLS 握手增加 CPU 开销] → 对聊天室的流量来说可以忽略。WebSocket 是长连接，握手只发生一次。
 - [`COOKIE_SECURE` 改为默认开启后，直接用 HTTP 访问应用的调试方式会失效] → 在 README 和 `.env.example` 里说明，需要时设为 0。
 - [测试和启动时间变长] → 接受。所有服务都有健康检查，`--wait` 能可靠地等到就绪。
+
+- [撤权兜底延迟与快照竞态] → D9a 的故障触发未覆盖时，用户接受最多约一个检查周期继续收到数据；查询失败等待下轮。快照后退出又立即重新加入并订阅，可能被误移除一次，刷新恢复。
+- [ack 丢失与被移出同时发生] → 重连重发时服务端先查成员再去重，可能返回 room_not_found，前端显示发送失败，而原消息已保存且其他成员可见。用户接受此极少见边界，本轮不修改服务端 ack 或去重顺序。
+- [被移出前刚触发的 AI 回复] → 已保存的 @AI 消息照常触发生成，费用仍由触发者承担；不新增被踢后取消生成或改用其他 key 的检查。
+
+以下三项是 2026-11-04 verify 留下的遗留问题，本次 change 不处理，后续另行补上：
+
+- [切换窗口内的业务响应没有被直接测试] → high-availability 规格“切换期间的请求”场景要求：切换未完成时，登录和发消息要么正常完成，要么在超时内返回可重试的错误。现在的 `tests/integration/test_failover.py` 在切换期间只轮询 `/health`，登录、发消息、AI 回复和登出都是在恢复之后才断言的，所以这个场景只算部分验证。后续要补的测试：停主节点之前先准备好已登录的连接，在切换窗口内实际发起登录和发消息，断言每次都在有限时间内成功，或者返回 `retryable` 的错误，不能挂起。
+- [同步测试客户端限定 TLS 1.2] → 生产入口同时支持 TLS 1.2 和 1.3，`test_gateway.py` 的异步用例也分别强制两个版本做了 WSS 收发。但 `tests/integration/conftest.py` 的同步 `Socket` 夹具限定为 TLS 1.2，因为 websockets 13.1 的同步客户端在 TLS 1.3 下会间歇握手超时。修好 Redis 回调死锁后这个现象仍然存在，根因还没查明。所以用同步夹具跑的那部分测试，不能算作 TLS 1.3 的覆盖。后续：用最小复现单独调查这个客户端问题，不能用关闭证书校验来绕过。
+- [对账的“再跑一轮”标记有一个窄竞态] → `src/ws/room_hub.cc` 的 `RoomHub::reconcile` 在本轮读到 `reconcileAgain_` 为 false 之后、把 `reconciling_` 清为 false 之前，如果有新的对账请求到达，它会看到 `reconciling_` 仍为 true，只设置 `reconcileAgain_` 就返回了，而这个标记已经没人再检查。最坏情况是那次对账推迟到下一个检查周期，属于已接受的撤权延迟范围。后续：在清除 `reconciling_` 之后再检查一次 `reconcileAgain_`，有就重新进入循环。
 
 ## Migration Plan
 
@@ -419,5 +460,5 @@ canManage(actorRole, targetRole):
 
 ## Open Questions
 
-- HAProxy 的 `tcp-check send` 能否直接展开 `${REDIS_PASSWORD}`？不能的话就改用启动脚本生成配置，两种做法对外行为相同。
-- 测试“其他地址的连接不受影响”时，能不能在 CI 里稳定地拿到第二个源地址（第二个测试容器）？不能的话，这一项改为人工验证。
+- ~~HAProxy 的 `tcp-check send` 能否直接展开 `${REDIS_PASSWORD}`？~~ 已解决：`scripts/redis-proxy.sh` 把 AUTH 命令编成 RESP 十六进制，放进环境变量 `REDIS_AUTH_HEX`，配置里用 `tcp-check send-binary` 发送。这样密码中的空格或引号不会破坏参数边界，密码也不会写进配置文件。
+- ~~测试“其他地址的连接不受影响”时，能不能在 CI 里稳定地拿到第二个源地址？~~ 已解决：`scripts/test.sh` 另起一个测试容器作为第二个来源，两者通过 Redis 里的测试 key 同步，自动验证，不需要人工。

@@ -225,3 +225,30 @@ def test_ai_replies_do_not_use_up_the_users_limit(make_user, make_room, make_soc
     for index in range(limit - 1):
         reply = socket.post(room_id, f"再来 {index}")
         assert reply["type"] == "ack", reply
+
+
+
+def test_twenty_replies_publish_increasing_chunk_sequences(make_user, make_room, make_socket):
+    (alice, bob), room_id = room_with(make_user, make_room, ["claude"], humans=2)
+    reader = make_socket(bob)
+    reader.subscribe(room_id)
+    writer = make_socket(alice)
+    generations = set()
+    for index in range(20):
+        assert writer.post(room_id, f"@Claude ordered reply {index}")["type"] == "ack"
+        chunks = []
+        while True:
+            event = reader.expect("ai_chunk", "message", timeout=10)
+            if event["type"] == "ai_chunk":
+                chunks.append(event)
+            elif event["member"]["type"] == "ai":
+                final = event
+                break
+        generation = final["generation_id"]
+        assert generation not in generations
+        generations.add(generation)
+        assert chunks
+        assert {chunk["generation_id"] for chunk in chunks} == {generation}
+        sequences = [chunk["sequence"] for chunk in chunks]
+        assert all(left < right for left, right in zip(sequences, sequences[1:]))
+        assert chunks[-1]["snapshot"] == final["content"]

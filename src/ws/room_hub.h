@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <drogon/WebSocketConnection.h>
 #include <drogon/nosql/RedisClient.h>
@@ -21,6 +22,13 @@ class RoomHub
 {
   public:
     static RoomHub &instance();
+    static constexpr const char *kReconcileChannel = "rooms:reconcile";
+
+    // Reconciliation backs up lost member_left notifications; normal Redis
+    // delivery still revokes subscriptions immediately.
+    void start();
+    drogon::Task<> reconcile();
+    void markRedisTrouble();
 
     // Resolves once the Redis subscription is live, so a history read made
     // after it cannot miss a message.
@@ -32,7 +40,7 @@ class RoomHub
     void removeConnection(const drogon::WebSocketConnectionPtr &connection);
 
     // Stops delivery to a member who left, here and on other instances.
-    drogon::Task<> removeMember(int64_t roomId, int64_t memberId);
+    drogon::Task<> removeMember(int64_t roomId, int64_t memberId, std::string reason = "left");
 
     // Returns false when Redis refused or could not be reached.
     drogon::Task<bool> publish(int64_t roomId, const std::string &payload);
@@ -50,10 +58,13 @@ class RoomHub
     void sendToRoom(int64_t roomId,
                     const std::string &payload,
                     const std::set<int64_t> *targets);
-    void removeMemberLocally(int64_t roomId, int64_t memberId);
+    void removeMemberLocally(int64_t roomId, int64_t memberId, const std::string &reason);
     void eraseIfEmpty(int64_t roomId);
     std::shared_ptr<drogon::nosql::RedisSubscriber> subscriber();
 
+    std::atomic<bool> reconciling_{false};
+    std::atomic<bool> reconcileAgain_{false};
+    std::atomic<bool> redisTrouble_{false};
     std::mutex mutex_;
     std::unordered_map<int64_t, Room> rooms_;
     std::shared_ptr<drogon::nosql::RedisSubscriber> subscriber_;
