@@ -1,70 +1,48 @@
-# 给 Claude 的交接（2026-11-05）
+# 给 Claude 的交接（2026-11-06，PR #12）
 
-**让他double check。**
+**让他double check。** 本文替换归档时的旧状态；change已归档，不再归档一次。
 
-## 已完成与代码位置
+## 当前交付
 
-本轮共享业务暂存已实现，本地verify通过。实现提交：`3f34eaa684cbdca8cb439efb0ad488c7721acbd5`。工作区`/private/tmp/cppai-shared-request-buffering`，分支`codex/shared-request-buffering`，基于adcd294。后续规格/验证材料单独提交；受测227个非秘密输入记录在同目录`verified-source.sha256`，提交前后逐文件核对一致。
+- 工作区 `/private/tmp/cppai-shared-request-buffering`，分支 `codex/shared-request-buffering`；[PR #12](https://github.com/anwalld/CppAiWebServer/pull/12)。原功能提交3f34eaa、归档ef55548，最新main 193a53d已通过d12013b整合；运行修正f6c3c1d、共享桶测试同步2979626；234个最终输入见`verified-integration-source.sha256`。旧`verified-source.sha256`只证明3f34eaa历史输入，不能用于最终源码。
+- 已实现全部28个HTTP业务路由和WS发送的共享异步暂存：正常直通、暂停入桶、恢复新旧同桶、排空直通；单独Redis纯内存，默认1024条/16MiB等待体、45秒未开始过期、每台50/s与8并发、结果5分钟。加密载荷/结果、领取认证、真实最终Cookie；queued不是持久化ACK。
+- MySQL同事务请求编号/唯一约束，聊天复用原消息ID；执行前重查认证、权限、限流；external副作用先记意向，不能证明时unknown，不盲重放。原脚本主动缺ACK取消，自动故障等待旧运行许可失效后健康实例先恢复。
+- 已同步request-buffering主规格并归档至本目录，12/12任务完成。保留完整探索副本`docs/request-buffering-plan.md`及协议/运维`docs/request-buffering.md`。
 
-原CLion窗口仍指向原工作区，所以不会显示这里的改动。没有部署原项目、修改其数据卷、自动合并PR或发送消息给别人。前置fix-offline-message-retries在adcd294已归档，本轮不重复归档；PR #10旧CI不证明本功能。
+## 本次 double check 修了什么
 
-change为buffer-business-requests，verify逐条覆盖七项需求、十四个场景和设计，12/12任务完成；主规格已同步并完成归档，结果见文末。
+1. 退出请求unknown/timeout时旧App仍清用户并显示登录，已改为仅确认成功才切登录页；等待时禁用重复退出。房间、成员、审批、key界面统一明确区分超时与未知结果；key删除未知不伪报成功。
+2. CI实际发现删房后缓存偶发残留：ACK后的异步分发可晚于删房，跨实例也不受本机room worker保护。分发持SQL房间共享锁到缓存写结束，删除独占锁与其串行；后来的分发看不到房间。删房等待DEL成功再响应，失败明确result_unknown；同请求编号恢复先清缓存再通知。没有改原0.3秒断言。
+3. 恢复探针最多一个登录在途，避免自己堆积同账号登录触发合法429；独立真实排队突发验证默认限制仍为5次401、7次429，没放宽产品限流。
 
-## 做了什么
+4. 最终回归又定位了测试并发竞争：窗口观察者仅等自己的任务完成，而并行after阶段仍向同一个公共桶提交业务，随后立即要求直通会合法收到202。现先同步另一生产者完成、确认公共桶空且双许可有效，再执行原HTTP200/WS ACK断言；仍在同一个原30秒总期限内。专项8.836秒恢复、86条确认各一次，未放宽成“202也算恢复”。
 
-- HTTP全部28个业务路由及WS发送统一受理：正常直通、暂停入桶、恢复新旧同桶、排空直通。独立单Redis纯内存，1024条/16MiB等待体，满桶拒新保旧，45秒未开始过期；每实例50/s、8并发且不积累放行额度。
-- 请求/结果AES-GCM加密、HMAC凭证绑定、任意实例查询；最终Cookie通过真正Set-Cookie交付；queued不是业务成功或持久化ACK。前端约1秒轮询，查询失败只重查结果。
-- MySQL V5请求编号/结果同事务与唯一约束，涵盖房间、成员、封禁、注册、AI成员、删除key。聊天保留原唯一编号、同ID变内容拒绝；重新认证/检查权限。
-- 登录/刷新/登出/存储key先记external意向；无法证明时unknown且不盲重放；SQL不保存密码/key/Cookie。GuardedTransaction异常回滚、每次SQL/commit和请求Redis副作用检查原许可stamp。
-- 现有watcher扩展主动屏障与自动许可：boot/epoch/revision/一次性challenge/原始单调期限，失联实例过期停发，健康实例先恢复；不增加Docker控制权限。
-- 固定代理/桶IP并隔离动态地址池，解决Drogon只解析一次DNS后IP被副本复用。原部署迁移须维护窗口重建网络并保留卷，不使用down -v。
-- 运维、恢复矩阵、完整探索副本在docs/；CI生成新增三个独立临时密钥；Nginx保留应用503。提交后等待钩子仅测试构建，runtime不编译。
+## 真实验证
 
-## 测了什么
+路径统一前缀`/private/tmp/cppai-buffering-`，对应`.log/.exit`保留原始退出码，具体映射和失败记录见verification-report.md。
 
-下列前缀均在`/private/tmp/`，对应`.log/.exit`退出0；详细映射见同目录verification-report.md。
+- **最终完整回归：退出0；258 passed/27 skipped，五AI阶段、受控与自动切换、app/web故障、网关/限流/30秒对账及最后9项严格检查全部通过；窗口8.841秒恢复，79条确认各一次，旧主54次采样零代理连接。** `shared-ready-final-full`；第一次`cache-final-full`的258常规通过，但故障窗口如上失败，退出1，保留不计完整通过。
+- 当前源码C++组件/ctest/MySQL/Redis：`cache-final-components`退出0；包含8并发SQL去重、参数冲突、许可过期回滚、故意让分发晚于删房的确定性回归。旧代码同回归实际失败，`cache-race-baseline`退出1。
+- `cache-fixed-http`退出0，3项真实HTTP故障测试：原删房缓存测试、DEL被拒后SQL已提交/unknown及原编号恢复、缓存写故障。
+- 前端15文件100项与生产构建通过：`resumed-web`和`resumed-web-build`退出0。旧App的退出回归先复现2失败，日志保留。
+- 真实可信TLS浏览器：排队登录、最终Cookie与刷新；代理暂停30秒后的消息确认；真实停主且固定12秒解除人为代理暂停，18.266秒恢复；刷新后6条消息在SQL各一次。`browser-final-sql.json/.exit`为0。
+- **退出unknown负向浏览器已完成**：实际logout 202后重启隔离RAM桶，页面保留聊天且提示“执行结果尚无法确认，请勿重复提交”；刷新仍登录；恢复后显式正常退出及再刷新都回登录页。`browser-logout-real`和`browser-logout-verdict.json/.exit`为0，截图`browser-logout-unknown-confirmed.png`与`browser-logout-completed.png`。保存的unknown-confirmed.txt仅AX差量，不是完整页面文本，未拿它作断言。
+- 仍有效的专项：17真实Redis脚本、10协调测试；默认45秒/1024条、未满桶OOM拒新保旧、桶停启、SQL提交/结果写拒绝后SIGKILL A由B恢复同一结果；控制分区、主动取消、冻结/旧许可及同容器同IP控制者重启。详细日志与对应代码阶段见报告。
 
-| 日志前缀 | 真实结果 |
-| --- | --- |
-| cppai-buffering-full-protocol-final | 原完整脚本全通过：常规256 passed/27 skipped、五AI阶段、受控切换、自动故障、旧主重加入、app/web停机、网关连接/限流、踢人/封禁对账及最终9项严格用例 |
-| cppai-buffering-control-real-final | 44.90秒；B控制断链A先恢复7.470秒、主动缺ACK取消且Sentinel不切主、真实WS queued/ACK、冻结拒旧grant、同容器同IP协调器重启新epoch6.939秒 |
-| cppai-buffering-http-result-rejection | 61.968秒；实际默认45秒/1024条，非满桶OOM拒新且旧记录可读保留，专用Redis真实停/启，SQL已提交/任务running后ACL拒绝结果写回并SIGKILL A，B在30秒内取回同房间结果且计数1 |
-| cppai-buffering-components-final | MySQL/C++8并发同编号只写一次、409冲突、提交恢复、许可过期回滚；真实C++Redis adapter |
-| cppai-buffering-http-tests-cookies | 双真实C++排队注册/登录、最终双Cookie、跨实例领取、正常SQL重试/冲突、会话撤销 |
-| cppai-buffering-coordinator-tests-final | 10项，含禁用GC时真实TCP控制连接及时关闭 |
-| cppai-buffering-redis-tests-final | 17项真实Redis脚本：预算/并发领取/FIFO/过期/恢复/旧claim/所有权 |
-| cppai-buffering-web-tests-final | 14文件92项前端测试 |
-| cppai-buffering-web-build | 前端production构建 |
-| cppai-buffering-schema-tests | 19项：V5、去重记录保留、踢人后重加入不被历史请求重复移除 |
-| cppai-buffering-external-intents | 重复登录意向不建第二会话、变参数409、SQL不存响应凭据 |
-| cppai-buffering-ci-env-shell | CI新增秘密的格式/长度/相互独立性实际执行，无秘密输出 |
+## CI：必须认准提交
 
-完整回归中连续业务9.229秒恢复，82条已确认消息各保存一次；旧主重加入采样55次始终零代理连接。最终健康检查`cppai-buffering-final-health.json/.exit`为0：14个长期服务全部running/healthy，隔离测试现场已恢复。
+- d12013b的[42017515952](https://github.com/anwalld/CppAiWebServer/actions/runs/42017515952)失败于探针触发合法429；4036965的42019259388被新提交取代并取消，不计通过。
+- 1a12fc6的[42021442408](https://github.com/anwalld/CppAiWebServer/actions/runs/42021442408)失败：256 passed、1 failed、27 skipped，真实缓存竞争如上已修。失败日志`ci-1a12-failed.log`保留，未盲重跑旧提交。
+- f6c3c1d的42111009051因共享桶测试同步修正取代而取消，不计通过。
+- **最终源码CI：通过。** 提交`297962660a433f3543f7160695f9eb22e60baca2`的原生[CI 42111975435](https://github.com/anwalld/CppAiWebServer/actions/runs/42111975435)已completed/success。该运行实际包含C++单元、76项AI单元、100项前端、常规258 passed/27 skipped、全部故障阶段和最后9项严格检查；原30秒内13.734秒恢复、36条确认各一次、52次旧主采样零代理连接。准确快照`/private/tmp/cppai-buffering-ci-2979626-final.json/.exit`及`ci-2979626-passed.log`保留。后续本次提交仅更新交接/报告/设计，234个运行/构建/测试输入与2979626保持一致。最终文档提交的CI仍单独核对最新PR head；准确最终结果交付在[PR Checks](https://github.com/anwalld/CppAiWebServer/pull/12/checks)、PR说明及本机`CppAiServer-进度.md`，不把源码CI冒称文档提交CI。 本文提交自身的最终CI以PR Checks及交付进度为准，旧PR #10或旧head都不能代替。远端材料只引用Git提交内文件；`/private/tmp`原始日志仅在当前机器，不是GitHub上传附件。
 
-`cppai-buffering-probe-binary-proof.log/.exit`和源码清单记录测试二进制与镜像输入的字节一致性。只用fake模型，未增加真实模型费用。
+最终隔离现场健康证据：`pr12-final-health.json/.exit`为0，14个生产服务全部running/healthy，另有测试专用buffer-control-2运行中但没有healthcheck。
 
-## 已修正且保留原始现场的问题
+## 没做及仍需复核
 
-- Python递归RESP读取闭包延迟关闭控制socket，旧主零连接原断言抓到；明确关闭makefile并加入禁用GC回归，不放宽断言。
-- 连续探针不停追加任务，同时要求首响应200才判断恢复；现场30秒内已确认1023条仍在draining。改为路由就绪后等待全部已受理结果，再验证新的直通登录/ACK；仍用原30秒、5秒首次响应和消息唯一保存断言。
-- 真实内存压力允许旧waiting查询成功；不能假定查询也503，也不能把满桶503当OOM。专项用未满桶状态验证OOM拒新。
-- maxmemory=1不保证Lua缩小数据的完成写被拒绝；改用Redis ACL真实拒绝EVAL后再强杀，不伪称结果写回OOM。原始失败/诊断/网络超时日志均保留，详见验证报告。
-- JsonCpp读取error字段创建null、Drogon Cookie header丢失、MySQL临时socket误判ready、GCC协程临时初始化列表崩溃等已纠正，真实测试已覆盖相关链路。
-
-## 没做与后续
-
-1. **让他double check**：许可代次/原期限和撤销证明；挂起后副作用；SQL同事务与external边界；任务所有权/最终Cookie；Lua内存异常和旧claim；历史结果对账。
-2. 分支基于adcd294，整合最新main与原项目其他人提交尚未执行。Nginx e0cad51等价改动已带入，合并时仍应检查，不能覆盖别人工作。
-3. 新功能远端CI/PR尚未执行；旧PR #10结果无关。CI临时密钥步骤已补并本地执行验证，但这不等于GitHub CI通过。
-4. 真实浏览器故障E2E未执行；本次是前端单元/构建＋真实TLS API/WS/进程故障。原服务器未部署验收。
-5. 独立Redis单实例纯内存，重启可丢任务；unknown不代表未执行。正常直通也依赖其原子状态，故桶不可用会503。SQL编号记录首版不自动过期，HMAC密钥须稳定；共享参数仅初始化保存，调整须先排空后重启专用桶。
-6. 50/s和8并发是验证初值/限额，不是吞吐承诺。没有承诺跨Redis/MySQL/gRPC的全局exactly-once。不要新增第二套队列HA或Docker隔离权限来改变已确认方案。
-7. 全仓主规格strict有一条既有WARNING：realtime-messaging的Purpose不足50字符；与adcd294字节相同，未改写。本change及新主规格strict通过，全仓主规格普通验证通过。不能宣称全仓strict全绿。
-
-## 归档与一次性任务
-
-已归档至`openspec/changes/archive/2026-11-05-buffer-business-requests/`，12/12任务完成，`.openspec.yaml`保留，活动列表无重复。主规格`openspec/specs/request-buffering/spec.md`已按七项需求/十四个场景同步，Purpose原文完整保留，无delta操作标题。先行内联同步并逐字检查后，CLI以`--skip-specs --yes --json`归档，所以CLI返回specsUpdated=false；这不表示未同步主规格。
-
-归档后`openspec validate --archived --strict`退出0，7个归档change全部通过；源码清单再校验0，diff check通过。原始结果：`/private/tmp/cppai-buffering-archive-result.json/.exit`、`cppai-buffering-archive-validation-final.json/.exit`和`cppai-buffering-source-postarchive.log/.exit`。
-
-一次性automation apply-verify-archive已通过应用工具删除（deleteStatus=deleted），未重新排期；不向Claude发送消息，只交付本文。
+- **让他double check**：许可原始期限与代次撤销；SQL同事务/external边界；查询权限与最终Cookie；SQL共享锁/删除锁顺序、DEL失败和同编号恢复；任务内存/旧claim和权限变化。当前double check由本次执行者完成，未向Claude发送消息，也未伪称有独立第二位审查人。
+- 不自动合并PR，不部署原服务器，不改原CLion工作区/数据卷，不新增真实模型费用。原服务器验收仍未做。
+- 专用Redis单实例纯内存，重启会丢任务，unknown不等于未执行；直通也依赖它。external无跨MySQL/Redis/gRPC全局exactly-once保证；SQL编号记录首版不自动过期，密钥须稳定。
+- 50/s、8并发是限额/验证初值，不是吞吐承诺。固定IP迁移需单独维护窗口保留卷，不能down -v生产数据。
+- 新request-buffering规格strict通过、8个归档change的任务strict通过、全规格普通通过；全规格strict仍只有既有realtime-messaging Purpose不足50字符警告，与adcd294字节相同，未修无关warning。
+- 本次一次性任务4-pr12完成或真实阻塞后删除，不重排期；最新结果同时写入用户可见`CppAiServer-进度.md`。
