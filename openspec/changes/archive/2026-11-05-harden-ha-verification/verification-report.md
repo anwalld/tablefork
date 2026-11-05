@@ -1,5 +1,7 @@
 # Verification Report: harden-ha-verification
 
+> 最新交付状态：用户随后明确要求合并并归档，PR #10已合并。归档后的状态见同目录 archive-completion.md；下文的“未合并或归档”是此前交接时的历史状态。
+
 日期：2026-11-05，Asia/Shanghai。按 openspec-verify-change 核对 status、apply context、proposal、design、tasks、实际源码与原始日志。
 
 ## Summary
