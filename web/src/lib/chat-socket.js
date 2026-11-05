@@ -1,5 +1,5 @@
 const ACK_TIMEOUT_MS = 5000
-const MAX_ATTEMPTS = 4
+const SEND_DEADLINE_MS = 60000
 const MAX_BACKOFF_MS = 10000
 // The server closes with this code when the session has ended (logged out or
 // expired). Reconnecting would only be refused, so the client stops.
@@ -18,9 +18,11 @@ export class ChatSocket {
   }
 
   connect() {
+    if (this.closed) return
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
     this.ws = new WebSocket(`${scheme}://${location.host}/ws`)
     this.ws.onopen = () => {
+      if (this.closed) return
       this.backoff = 500
       this.handlers.onStatus(true)
       for (const roomId of this.rooms) this.write({ type: 'subscribe', room_id: roomId })
@@ -31,16 +33,17 @@ export class ChatSocket {
       this.handlers.onStatus(false)
       if (this.closed) return
       if (event?.code === SESSION_ENDED) {
-        this.closed = true
+        this.stop()
         this.handlers.onSessionEnded?.()
         return
       }
-      setTimeout(() => this.connect(), this.backoff)
+      this.reconnectTimer = setTimeout(() => this.connect(), this.backoff)
       this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF_MS)
     }
   }
 
   dispatch(frame) {
+    if (this.closed) return
     if (frame.type === 'message') {
       this.handlers.onMessage(frame)
     } else if (frame.type === 'subscribed') {
@@ -62,15 +65,14 @@ export class ChatSocket {
     const entry = this.pending.get(frame.client_msg_id)
     if (!entry) return
     if (frame.error.code === 'rate_limited' && frame.error.retry_after) {
-      // Sending too fast: wait as told and resend. Waiting is not a failed
-      // attempt, so it does not count towards MAX_ATTEMPTS.
+      // Preserve the server's waiting period across reconnects as well.
       clearTimeout(entry.timer)
-      entry.attempts -= 1
+      entry.notBefore = Date.now() + frame.error.retry_after * 1000
       this.handlers.onThrottled?.(entry.roomId, entry.clientMsgId, frame.error.retry_after)
       entry.timer = setTimeout(() => this.transmit(entry), frame.error.retry_after * 1000)
-    } else if (frame.error.retryable && entry.attempts < MAX_ATTEMPTS) {
+    } else if (frame.error.retryable) {
       clearTimeout(entry.timer)
-      entry.timer = setTimeout(() => this.transmit(entry), 1000 * entry.attempts)
+      entry.timer = setTimeout(() => this.transmit(entry), Math.min(1000 * entry.attempts, ACK_TIMEOUT_MS))
     } else {
       this.settle(frame.client_msg_id, { ok: false, code: frame.error.code })
     }
@@ -80,6 +82,7 @@ export class ChatSocket {
     const entry = this.pending.get(clientMsgId)
     if (!entry) return
     clearTimeout(entry.timer)
+    clearTimeout(entry.deadlineTimer)
     this.pending.delete(clientMsgId)
     this.handlers.onSendResult(entry.roomId, clientMsgId, result)
   }
@@ -101,30 +104,53 @@ export class ChatSocket {
   }
 
   send(roomId, clientMsgId, content) {
-    const entry = { roomId, clientMsgId, content, attempts: 0, timer: null }
+    if (this.closed || this.pending.has(clientMsgId)) return
+    const entry = {
+      roomId, clientMsgId, content, attempts: 0, timer: null, notBefore: 0,
+      expiresAt: Date.now() + SEND_DEADLINE_MS,
+    }
     this.pending.set(clientMsgId, entry)
+    entry.deadlineTimer = setTimeout(() => {
+      this.settle(clientMsgId, { ok: false, code: 'timeout' })
+    }, SEND_DEADLINE_MS)
     this.transmit(entry)
   }
 
   transmit(entry) {
+    if (this.closed || this.pending.get(entry.clientMsgId) !== entry) return
     clearTimeout(entry.timer)
-    if (entry.attempts >= MAX_ATTEMPTS) {
+    if (Date.now() >= entry.expiresAt) {
       this.settle(entry.clientMsgId, { ok: false, code: 'timeout' })
       return
     }
-    entry.attempts += 1
-    this.write({
+    if (Date.now() < entry.notBefore) {
+      entry.timer = setTimeout(() => this.transmit(entry), entry.notBefore - Date.now())
+      return
+    }
+    const sent = this.write({
       type: 'send',
       room_id: entry.roomId,
       client_msg_id: entry.clientMsgId,
       content: entry.content,
     })
+    // Offline messages wait for onopen; only a frame actually sent needs an ACK.
+    if (!sent) return
+    entry.attempts += 1
     entry.timer = setTimeout(() => this.transmit(entry), ACK_TIMEOUT_MS)
   }
 
-  close() {
+  stop() {
     this.closed = true
-    for (const entry of this.pending.values()) clearTimeout(entry.timer)
+    clearTimeout(this.reconnectTimer)
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer)
+      clearTimeout(entry.deadlineTimer)
+    }
+    this.pending.clear()
+  }
+
+  close() {
+    this.stop()
     this.ws.close()
   }
 }
