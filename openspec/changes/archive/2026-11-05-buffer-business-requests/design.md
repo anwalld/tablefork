@@ -51,3 +51,10 @@
 - GuardedTransaction随协程携带许可，不使用thread_local；每个SQL发送和commit前重查。未显式take提交的包装析构会rollback，避免异常时Drogon自动提交部分写入。GuardedRedis对每次请求副作用重查原stamp。
 - 现有watcher按功能开关调用同目录Python标准库协调模块；仍只操控原HAProxy和Sentinel。续约线程发送grant时持phase锁，revoke取得该锁后不会再发送旧phase的grant；延迟challenge回复必须再次匹配phase。旧grant的challenge已在revoke前产生，等待原始TTL后失效。单个现有代理协调者重启先建立新epoch并等旧TTL，不复用旧进程许可。
 - SQL请求记录不随房间删除清理，首版不自动过期；后续维护必须保留拒绝旧编号的证明。加密/参数HMAC密钥是稳定部署秘密，不能在仍有待执行/恢复请求时随意更换。
+
+## PR #12 double check 修正（2026-11-06）
+
+- HTTP排队结果未知不能伪装成退出成功。App仅在真实logout成功后清用户；等待期间只允许一个logout，unknown/queue_timeout保留当前聊天和明确提示。房间、成员、审批、API key界面共用明确的未知/超时文案；key删除未知不清元数据或发成功通知。
+- 持久化ACK后的消息分发可能晚于房间删除，且可能发生在另一实例。本地room worker串行不足以保护共享缓存。分发在SQL只读事务中以`SELECT ... FOR SHARE`锁定仍存在的房间，持锁完成缓存写；删房的独占锁等待既有写者，删房提交后新分发看不到行。持锁阶段后释放只读事务，再发布消息，不把ACK改为缓存持久化确认。
+- 删房控制器等待Redis DEL完成再报告成功。SQL已提交而清理失败/许可过期返回503/result_unknown、retryable=false，不宣称SQL回滚；复用原请求编号时，SQL结果对账先完成当前已删除房间的缓存清理再通知。跨MySQL/Redis仍不是全局原子事务。
+- CI恢复探针最多保留一个登录在途，避免同账号堆积触发合法429。默认限流未放宽，真实12次排队错密码登录验证5次401、7次429且retry_after为正。原5秒首次响应、30秒恢复、0.3秒删缓存断言保持。

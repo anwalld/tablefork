@@ -8,7 +8,6 @@
 #include "buffering/reconcile_result.h"
 #include "services/message_service.h"
 #include "services/room_service.h"
-#include "services/room_worker_pool.h"
 #include "services/session_store.h"
 #include "ws/room_hub.h"
 
@@ -105,11 +104,10 @@ RoomController::Response RoomController::leave(drogon::HttpRequestPtr req,
     }
     if (deleted)
     {
-        // Through the room's worker, so that it runs after any message still
-        // being distributed and that message cannot repopulate the cache.
-        roomWorkers().submitUnbounded(id, [id, ctx=session.request]() -> drogon::Task<> {
-            co_await MessageService::dropCache(id, ctx);
-        });
+        // Distribution holds a shared SQL room lock through its cache write.
+        // Deletion has now committed, so no backend can repopulate this key.
+        // Wait for cleanup instead of reporting success before a queued DEL.
+        co_await MessageService::dropCache(id, session.request);
         checkRequest(session.request);
         reportRoomDeleted(id);
     }

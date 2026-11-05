@@ -5,6 +5,7 @@
 #include "buffering/shared_queue.h"
 #include "buffering/request_memo.h"
 #include "services/room_service.h"
+#include "services/message_service.h"
 
 using namespace chat;
 namespace {
@@ -68,6 +69,20 @@ drogon::Task<> probe()
     expect(rows[0]["n"].as<int>()==0,"rolled-back request memo remains");
     std::cout<<"PASS: SQL service recovery, 8 concurrent retries, parameter conflict, permit-expiry rollback\n";
 
+    // Deterministic version of the CI cache-delete race: the ACK is already
+    // durable, but its detached distribution starts only after room deletion.
+    session.request=context("late-distribution-room");
+    const auto room=co_await RoomService::create(session,"late-distribution");
+    const auto roomId=room["id"].asInt64();
+    const auto message=co_await MessageService::save(session,roomId,"late-cache-message","test-cache-body");
+    session.request=context("delete-before-late-distribution");
+    expect(co_await RoomService::leave(session,roomId,true),"test room was not deleted");
+    co_await MessageService::distribute(message,context("delayed-distribution"));
+    const auto cached=co_await drogon::app().getRedisClient()->execCommandCoro(
+        "EXISTS %s",("room:"+std::to_string(roomId)+":recent").c_str());
+    expect(cached.asInteger()==0,"late distribution repopulated a deleted room cache");
+    std::cout<<"PASS: delayed distribution cannot repopulate a deleted room cache\n";
+
     SharedQueue queue(drogon::app().getRedisClient("queue"),PayloadCrypto(std::string(64,'a')),"probe",SharedQueue::Options{});
     co_await queue.initialize();
     Json::Value descriptor;
@@ -95,6 +110,7 @@ int main()
     auto &app=drogon::app();
     app.createDbClient("mysql","mysql",3306,"chat","chat",std::getenv("MYSQL_PASSWORD"),16,"","default",false,"utf8mb4",10);
     app.createRedisClient(std::getenv("QUEUE_TEST_IP"),6379,"queue","",4,false,2);
+    app.createRedisClient(std::getenv("QUEUE_TEST_IP"),6379,"default","",4,false,2);
     app.registerBeginningAdvice([&]{ drogon::async_run([&]() -> drogon::Task<> {
         try { co_await probe(); result=0; }
         catch(const std::exception &e) { std::cerr<<"FAIL: "<<e.what()<<'\n'; }

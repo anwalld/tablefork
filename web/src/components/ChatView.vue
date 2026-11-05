@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api, ApiError } from '../lib/api.js'
+import { requestErrorText } from '../lib/request-errors.js'
 import { AiDrafts } from '../lib/ai-drafts.js'
 import { ChatSocket } from '../lib/chat-socket.js'
 import { leave, prepareLeave } from '../lib/leave.js'
@@ -14,7 +15,11 @@ import SettingsDialog from './SettingsDialog.vue'
 
 const ROOM_POLL_MS = 10000
 
-const props = defineProps({ user: { type: Object, required: true } })
+const props = defineProps({
+  user: { type: Object, required: true },
+  logoutError: { type: String, default: '' },
+  loggingOut: { type: Boolean, default: false },
+})
 const emit = defineEmits(['logout', 'session-ended'])
 
 const rooms = ref([])
@@ -279,8 +284,8 @@ async function createRoom() {
     await refreshRooms()
     autoSelectRoom.value = true
     activeId.value = room.id
-  } catch {
-    notice.value = '创建房间失败，名称最多 64 个字符'
+  } catch (error) {
+    notice.value = requestErrorText(error, '创建房间失败，名称最多 64 个字符')
   }
 }
 
@@ -288,8 +293,8 @@ async function joinRoom() {
   try {
     await api.join(activeId.value)
     await refreshRooms()
-  } catch {
-    notice.value = '加入失败，房间可能已被删除'
+  } catch (error) {
+    notice.value = requestErrorText(error, '加入失败，房间可能已被删除')
     await refreshRooms()
   }
 }
@@ -302,8 +307,8 @@ async function invite() {
     notice.value = `已邀请 ${username}`
     inviteName.value = ''
   } catch (e) {
-    notice.value = e.code === 'user_banned' ? '该用户已被此房间封禁，需要先解封' :
-      e.code === 'user_not_found' ? '找不到这个用户' : '邀请失败'
+    notice.value = requestErrorText(e, e.code === 'user_banned' ? '该用户已被此房间封禁，需要先解封' :
+      e.code === 'user_not_found' ? '找不到这个用户' : '邀请失败')
   }
 }
 
@@ -372,7 +377,7 @@ async function confirmLeave() {
       showMembers.value = true
       notice.value = '你是群主，请先在成员列表里把群主转让给别人'
     } else {
-      notice.value = '退出失败，请重试'
+      notice.value = requestErrorText(e, '退出失败，请重试')
     }
   } finally {
     leaveBusy.value = false
@@ -419,7 +424,7 @@ onBeforeUnmount(() => {
       <header class="sidebar-head">
         <strong>{{ user.username }}</strong>
         <button class="link" @click="showSettings = true">设置</button>
-        <button class="link" @click="$emit('logout')">退出登录</button>
+        <button class="link" :disabled="loggingOut" @click="$emit('logout')">{{ loggingOut ? '退出中…' : '退出登录' }}</button>
       </header>
       <form class="inline-form" @submit.prevent="createRoom">
         <input v-model="newRoomName" placeholder="新房间名称" maxlength="64" aria-label="新房间名称" />
@@ -524,7 +529,7 @@ onBeforeUnmount(() => {
       <p v-else class="empty center">选择一个房间开始聊天</p>
 
       <p v-if="!connected" class="banner" role="status">连接已断开，正在重连</p>
-      <p v-if="notice" class="toast" role="status">{{ notice }}</p>
+      <p v-if="logoutError || notice" class="toast" role="status">{{ logoutError || notice }}</p>
     </main>
 
     <MembersPanel

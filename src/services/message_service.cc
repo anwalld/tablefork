@@ -268,6 +268,13 @@ drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestC
         catch (const ApiError &) { co_return; }
     }
     const auto payload = toJsonString(message.json);
+    // Distribution may start after its durable ACK, even on another backend.
+    // Serialize the cache write with SQL room deletion: a late job sees no
+    // row, and an already-running writer must finish before DELETE commits.
+    auto roomGuard = co_await newGuardedTransaction(context);
+    const auto rooms = co_await roomGuard->execSqlCoro(
+        "SELECT id FROM rooms WHERE id = ? FOR SHARE", message.roomId);
+    if (rooms.empty()) co_return;
     try
     {
         auto redis = guardedRedis(context);
@@ -289,6 +296,7 @@ drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestC
     {
         LOG_WARN << "hot cache write: " << e.what();
     }
+    roomGuard.reset(); // read-only rollback releases the room's shared lock
     co_await RoomHub::instance().publish(message.roomId, payload, context);
 }
 
@@ -333,6 +341,10 @@ drogon::Task<Json::Value> MessageService::history(Session session,
 
 drogon::Task<> MessageService::dropCache(int64_t roomId, RequestContextPtr context)
 {
+    const auto unknown = [] {
+        return ApiError(drogon::k503ServiceUnavailable, "result_unknown",
+                        "room deletion committed; cache cleanup is unconfirmed");
+    };
     try
     {
         co_await guardedRedis(context)->execCommandCoro(
@@ -341,6 +353,8 @@ drogon::Task<> MessageService::dropCache(int64_t roomId, RequestContextPtr conte
     catch (const drogon::nosql::RedisException &e)
     {
         LOG_WARN << "hot cache drop: " << e.what();
+        throw unknown();
     }
+    catch (const ApiError &) { throw unknown(); }
 }
 }  // namespace chat

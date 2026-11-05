@@ -34,10 +34,13 @@ async function save(provider) {
 
 async function remove(provider) {
   busy[provider] = true
+  errors[provider] = ''
   try {
     await api.deleteKey(provider)
     await load()
     emit('changed')
+  } catch (error) {
+    errors[provider] = keyErrorText(error)
   } finally {
     busy[provider] = false
   }

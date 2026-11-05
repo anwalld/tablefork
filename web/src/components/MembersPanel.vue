@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../lib/api.js'
 import { addRequest, providerName } from '../lib/providers.js'
+import { requestErrorText } from '../lib/request-errors.js'
 
 const props = defineProps({
   roomId: { type: Number, required: true },
@@ -39,7 +40,7 @@ function managementError(error) {
   if (error.code === 'forbidden') return '你没有权限管理该成员'
   if (error.code === 'user_not_found') return '找不到这个用户'
   if (error.code === 'invalid_argument') return '不能对自己或非人类成员执行此操作'
-  return '操作失败，请稍后重试'
+  return requestErrorText(error, '操作失败，请稍后重试')
 }
 
 async function loadBans() {
@@ -127,15 +128,15 @@ async function addAi() {
     chosen.value = ''
     emit('changed')
   } catch (e) {
-    emit('notice', e.code === 'api_key_required' ? `请先填写 ${providerName(e.provider)} 的 API key` : '操作失败')
+    emit('notice', requestErrorText(e, e.code === 'api_key_required' ? `请先填写 ${providerName(e.provider)} 的 API key` : '操作失败'))
   }
 }
 
 async function review(slug, approve) {
   try {
     await (approve ? api.approveAi : api.rejectAi)(props.roomId, slug)
-  } catch {
-    emit('notice', '这条申请已被处理')
+  } catch (error) {
+    emit('notice', requestErrorText(error, '这条申请已被处理'))
   }
   await loadRequests()
   emit('changed')
@@ -146,7 +147,7 @@ async function act(action, member) {
     await action(props.roomId, member.slug ?? member.name)
     emit('changed')
   } catch (e) {
-    emit('notice', e.code === 'forbidden' ? '只有群主或管理员能这样做' : '操作失败')
+    emit('notice', requestErrorText(e, e.code === 'forbidden' ? '只有群主或管理员能这样做' : '操作失败'))
   }
 }
 

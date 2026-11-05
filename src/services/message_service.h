@@ -52,6 +52,8 @@ class MessageService
                                              int64_t roomId,
                                              HistoryQuery query);
 
+    // Called after room deletion commits; a failed cleanup is explicitly
+    // unknown and may be reconciled with the original business request ID.
     static drogon::Task<> dropCache(int64_t roomId, RequestContextPtr context = {});
 };
 }  // namespace chat

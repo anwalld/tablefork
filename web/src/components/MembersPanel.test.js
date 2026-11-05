@@ -38,6 +38,16 @@ afterEach(() => {
 })
 
 describe('human room management', () => {
+  it('does not report success when a moderation result is unknown', async () => {
+    const view = panel()
+    await flushPromises()
+    api.banUser.mockRejectedValue({ code: 'result_unknown' })
+    await view.get('button[aria-label="封禁 carol"]').trigger('click')
+    await flushPromises()
+    expect(view.emitted('notice').at(-1)).toEqual(['执行结果尚无法确认，请勿重复提交'])
+    expect(view.emitted('changed')).toBeUndefined()
+    expect(api.banUser).toHaveBeenCalledTimes(1)
+  })
   it.each([
     [1, ['bob', 'carol', 'dana'], true], [2, ['carol'], true], [3, [], false],
   ])('shows only permitted targets for member %s', async (id, targets, canManage) => {
