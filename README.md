@@ -43,6 +43,8 @@ flowchart TD
 cp .env.example .env
 ```
 
+共享暂存还需要独立的`QUEUE_REDIS_PASSWORD`、`QUEUE_ENCRYPTION_KEY`和`BUFFER_CONTROL_TOKEN`，各自用一次`openssl rand -hex 32`生成。密钥和控制令牌不能复用模型API key。代理和共享桶使用动态分配池之外的固定地址；自定义网段时须同时修改对应地址和动态池，详见[请求暂存与恢复](docs/request-buffering.md)。
+
 ```bash
 docker compose up -d --build --wait
 ```
@@ -240,7 +242,9 @@ docker compose exec redis-1 redis-cli INFO replication
 
 原主节点会由 Sentinel 降为从节点，最终显示 `role:slave` 和 `master_link_status:up`。若查询显示 redis-2 已是主节点，演示时对调两个节点，不能再次停止已经是从节点的 redis-1 来证明主故障恢复。
 
-切换期间请求可能收到可重试的错误；Redis 异步复制可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
+启用业务暂存后，暂停期间请求先返回排队编号，由独立内存Redis共享保存；恢复后每实例按50次/秒、8并发初值处理，客户端查询最终业务结果。入队不等于成功，聊天ACK仍在MySQL提交后。共享桶不可用会明确报可重试错误，丢失的任务结果可能是unknown，不能盲重放。主动切主使用`docker compose exec redis-proxy sh /redis-proxy.sh switch`，缺暂停确认就取消。配置、内存边界、查询凭证和恢复矩阵见[请求暂存与恢复](docs/request-buffering.md)。
+
+Redis 异步复制仍可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
 
 从旧版本升级时先 `docker compose down`（不加 `-v`），然后 `docker compose up -d --build --wait`。Redis 改为新的 `redis-1-data`、`redis-2-data` 卷，旧会话会失效，需要重新登录；MySQL 卷保留。确认新环境正常后，可用 `docker volume ls` 找到项目旧的 `redis-master-data`、`redis-replica-data` 卷，再按准确名称执行 `docker volume rm`，不要删除 MySQL 卷。
 

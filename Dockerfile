@@ -48,6 +48,7 @@ COPY CMakeLists.txt ./
 COPY proto ./proto
 COPY src ./src
 COPY tests/unit ./tests/unit
+COPY tests/buffering/component_probe.cc ./tests/buffering/component_probe.cc
 COPY data ./data
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCHAT_BUILD_TESTS=ON \
     && cmake --build build -j"$(nproc)" \

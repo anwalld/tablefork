@@ -7,6 +7,8 @@
 #include "ai/ai_actions.h"
 #include "ai/ai_gateway.h"
 #include "common/config.h"
+#include "buffering/request_buffer.h"
+#include <cstdlib>
 #include "common/util.h"
 #include "services/password_policy.h"
 #include "ws/session_watcher.h"
@@ -47,6 +49,14 @@ int main()
         gateway->start();
         chat::setAiGateway(std::move(gateway));
     }
+    if (chat::RequestBuffer::instance().enabled())
+    {
+        const auto *queueHost = std::getenv("QUEUE_REDIS_HOST");
+        const auto *queuePassword = std::getenv("QUEUE_REDIS_PASSWORD");
+        if (!queuePassword || !*queuePassword) throw std::runtime_error("QUEUE_REDIS_PASSWORD is required");
+        drogon::app().createRedisClient(resolveIpv4(queueHost ? queueHost : "queue-redis"),
+            6379, "queue", queuePassword, 4, false, 2.0);
+    }
     drogon::app()
         .addListener("0.0.0.0", 8000)
         .setThreadNum(0)
@@ -77,6 +87,7 @@ int main()
         })
         // Redis clients exist only once the app runs.
         .registerBeginningAdvice([] {
+            chat::RequestBuffer::instance().start();
             chat::RoomHub::instance().start();
             chat::SessionWatcher::instance().start();
         })

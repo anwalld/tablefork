@@ -3,12 +3,13 @@
 #include <drogon/drogon.h>
 
 #include "common/util.h"
+#include "buffering/request_memo.h"
 
 namespace chat
 {
 namespace
 {
-using TransactionPtr = std::shared_ptr<drogon::orm::Transaction>;
+using TransactionPtr = GuardedTransactionPtr;
 
 ApiError aiNotFound()
 {
@@ -77,6 +78,25 @@ bool AiService::isProvider(const std::string &provider)
            provider == "gemini";
 }
 
+namespace
+{
+Json::Value memoValue(const AiService::RequestOutcome &outcome)
+{
+    Json::Value value;
+    value["joined"] = outcome.joined;
+    value["member"] = Json::Int64(outcome.aiMemberId);
+    value["reviewers"] = Json::arrayValue;
+    for (auto reviewer : outcome.reviewers) value["reviewers"].append(Json::Int64(reviewer));
+    return value;
+}
+AiService::RequestOutcome requestOutcome(const Json::Value &value)
+{
+    AiService::RequestOutcome outcome{value["joined"].asBool(), value["member"].asInt64(), {}};
+    for (const auto &reviewer : value["reviewers"]) outcome.reviewers.push_back(reviewer.asInt64());
+    return outcome;
+}
+} // namespace
+
 drogon::Task<Json::Value> AiService::catalog(Session session)
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
@@ -104,7 +124,12 @@ drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
                                                            int64_t roomId,
                                                            std::string slug)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.request"))
+    {
+        co_return requestOutcome(*prior);
+    }
     const auto role = co_await lockedRole(tx, roomId, session.memberId);
     const auto ai = co_await profile(tx, slug);
     const auto key = co_await tx->execSqlCoro(
@@ -118,6 +143,7 @@ drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
     RequestOutcome outcome{true, ai.memberId, {}};
     if (co_await inRoom(tx, roomId, ai.memberId))
     {
+        co_await RequestMemo::finish(tx, session.request, actor, memoValue(outcome));
         co_await commit(std::move(tx));
         outcome.joined = true;
         co_return outcome;
@@ -151,6 +177,7 @@ drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
             outcome.reviewers.push_back(row["member_id"].as<int64_t>());
         }
     }
+    co_await RequestMemo::finish(tx, session.request, actor, memoValue(outcome));
     co_await commit(std::move(tx));
     co_return outcome;
 }
@@ -201,7 +228,12 @@ drogon::Task<AiService::Review> AiService::review(Session session,
                                                   std::string slug,
                                                   bool approve)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.review"))
+    {
+        co_return Review{(*prior)["member"].asInt64(), (*prior)["requester"].asInt64()};
+    }
     const auto role = co_await lockedRole(tx, roomId, session.memberId);
     if (!canManage(role))
     {
@@ -227,6 +259,10 @@ drogon::Task<AiService::Review> AiService::review(Session session,
             roomId,
             ai.memberId);
     }
+    Json::Value value;
+    value["member"] = Json::Int64(ai.memberId);
+    value["requester"] = Json::Int64(request[0]["requested_by"].as<int64_t>());
+    co_await RequestMemo::finish(tx, session.request, actor, value);
     co_await commit(std::move(tx));
     co_return Review{ai.memberId, request[0]["requested_by"].as<int64_t>()};
 }
@@ -235,7 +271,12 @@ drogon::Task<std::optional<int64_t>> AiService::remove(Session session,
                                                        int64_t roomId,
                                                        std::string slug)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.remove"))
+    {
+        co_return prior->isNull() ? std::optional<int64_t>{} : std::optional<int64_t>{prior->asInt64()};
+    }
     const auto role = co_await lockedRole(tx, roomId, session.memberId);
     if (!canManage(role))
     {
@@ -246,6 +287,8 @@ drogon::Task<std::optional<int64_t>> AiService::remove(Session session,
         "DELETE FROM room_members WHERE room_id = ? AND member_id = ?",
         roomId,
         ai.memberId);
+    co_await RequestMemo::finish(tx, session.request, actor,
+        removed.affectedRows() ? Json::Value(Json::Int64(ai.memberId)) : Json::Value());
     co_await commit(std::move(tx));
     if (removed.affectedRows() == 0)
     {
@@ -280,9 +323,14 @@ drogon::Task<> AiService::deleteKey(Session session, std::string provider)
     {
         throw ApiError::invalidArgument("unknown provider");
     }
-    co_await drogon::app().getDbClient()->execSqlCoro(
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.deleteKey")) co_return;
+    co_await tx->execSqlCoro(
         "DELETE FROM user_api_keys WHERE user_id = ? AND provider = ?",
         session.userId,
         provider);
+    co_await RequestMemo::finish(tx, session.request, actor, Json::objectValue);
+    co_await commit(std::move(tx));
 }
 }  // namespace chat

@@ -1,4 +1,5 @@
 #pragma once
+#include "buffering/request_context.h"
 
 #include <drogon/utils/coroutine.h>
 #include <string>
@@ -22,9 +23,9 @@ class LoginLimiter
     // Counts an attempt before the password is checked, so that concurrent
     // attempts cannot all slip through. Throws ApiError::tooManyAttempts()
     // while the key must wait.
-    static drogon::Task<> admit(std::string key);
+    static drogon::Task<> admit(std::string key, RequestContextPtr context = {});
 
     // Forgets the attempts after a successful login.
-    static drogon::Task<> clear(std::string key);
+    static drogon::Task<> clear(std::string key, RequestContextPtr context = {});
 };
 }  // namespace chat

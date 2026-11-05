@@ -1,0 +1,40 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { api } from './api.js'
+import { taskResult, queueOwner } from './queued-task.js'
+const response = (status, body) => ({ status, ok: status < 400, json: async () => body })
+beforeEach(() => vi.useFakeTimers())
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
+it('keeps login pending and polls with the owner, then returns the original result', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(response(202, { task_id: 't1' }))
+    .mockResolvedValueOnce(response(200, { state: 'waiting' }))
+    .mockResolvedValueOnce(response(200, { state: 'succeeded', response: { status: 200, body: '{"id":7}' } }))
+  vi.stubGlobal('fetch', fetch)
+  const login = api.login('user', 'test-password')
+  let completed = false
+  login.then(() => { completed = true })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(completed).toBe(false)
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(await login).toEqual({ id: 7 })
+  expect(fetch.mock.calls[0][1].headers['X-Request-Id']).toMatch(/^[a-f0-9]{64}$/)
+  expect(fetch.mock.calls[1][1].headers['X-Queue-Owner']).toBe(fetch.mock.calls[0][1].headers['X-Queue-Owner'])
+  expect(queueOwner()).not.toBe(fetch.mock.calls[0][1].headers['X-Queue-Owner'])
+  expect(fetch.mock.calls.filter(([,options]) => options.method === 'POST')).toHaveLength(1)
+})
+it('query unavailability retries only the query and preserves a final business error', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(response(202, { task_id: 't1' }))
+    .mockResolvedValueOnce(response(503, {}))
+    .mockResolvedValueOnce(response(200, { state: 'failed', response: { status: 403, body: '{"error":{"code":"forbidden","message":"revoked"}}' } }))
+  vi.stubGlobal('fetch', fetch)
+  const outcome = api.join(7).catch(error => error)
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(await outcome).toMatchObject({ code: 'forbidden', status: 403 })
+  expect(fetch.mock.calls.filter(([,options]) => options.method === 'POST')).toHaveLength(1)
+})
+it('distinguishes expiry and unknown without authorizing blind resubmission', () => {
+  expect(taskResult({ state: 'recovering' })).toBeNull()
+  expect(taskResult({ state: 'expired' }).body.error).toMatchObject({ code: 'queue_timeout', retryable: false })
+  expect(taskResult({ state: 'unknown' }).body.error).toMatchObject({ code: 'result_unknown', retryable: false })
+})

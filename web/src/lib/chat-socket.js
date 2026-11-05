@@ -1,3 +1,4 @@
+import { queueOwner, randomId, queryTask, taskResult } from './queued-task.js'
 const ACK_TIMEOUT_MS = 5000
 const SEND_DEADLINE_MS = 60000
 const MAX_BACKOFF_MS = 10000
@@ -51,6 +52,14 @@ export class ChatSocket {
     } else if (frame.type === 'room_left') {
       this.rooms.delete(frame.room_id)
       this.handlers.onRoomLeft(frame.room_id, frame.reason ?? 'left')
+    } else if (frame.type === 'queued') {
+      const entry = this.pending.get(frame.client_msg_id)
+      if (entry && !entry.taskId) {
+        clearTimeout(entry.timer)
+        entry.taskId = frame.task_id
+        entry.capability = frame.claim_token ?? queueOwner()
+        this.pollTask(entry)
+      }
     } else if (frame.type === 'ack') {
       this.settle(frame.client_msg_id, { ok: true, seq: frame.seq, created_at: frame.created_at })
     } else if (frame.type === 'error') {
@@ -67,6 +76,8 @@ export class ChatSocket {
     if (frame.error.code === 'rate_limited' && frame.error.retry_after) {
       // Preserve the server's waiting period across reconnects as well.
       clearTimeout(entry.timer)
+      entry.taskId = null
+      entry.queueAttempt = randomId()
       entry.notBefore = Date.now() + frame.error.retry_after * 1000
       this.handlers.onThrottled?.(entry.roomId, entry.clientMsgId, frame.error.retry_after)
       entry.timer = setTimeout(() => this.transmit(entry), frame.error.retry_after * 1000)
@@ -106,7 +117,7 @@ export class ChatSocket {
   send(roomId, clientMsgId, content) {
     if (this.closed || this.pending.has(clientMsgId)) return
     const entry = {
-      roomId, clientMsgId, content, attempts: 0, timer: null, notBefore: 0,
+      roomId, clientMsgId, content, attempts: 0, timer: null, notBefore: 0, queueAttempt: randomId(),
       expiresAt: Date.now() + SEND_DEADLINE_MS,
     }
     this.pending.set(clientMsgId, entry)
@@ -119,6 +130,7 @@ export class ChatSocket {
   transmit(entry) {
     if (this.closed || this.pending.get(entry.clientMsgId) !== entry) return
     clearTimeout(entry.timer)
+    if (entry.taskId) { this.pollTask(entry); return }
     if (Date.now() >= entry.expiresAt) {
       this.settle(entry.clientMsgId, { ok: false, code: 'timeout' })
       return
@@ -132,11 +144,32 @@ export class ChatSocket {
       room_id: entry.roomId,
       client_msg_id: entry.clientMsgId,
       content: entry.content,
+      queue_owner: queueOwner(),
+      queue_attempt: entry.queueAttempt,
     })
     // Offline messages wait for onopen; only a frame actually sent needs an ACK.
     if (!sent) return
     entry.attempts += 1
     entry.timer = setTimeout(() => this.transmit(entry), ACK_TIMEOUT_MS)
+  }
+
+  async pollTask(entry) {
+    if (entry.polling || this.closed || this.pending.get(entry.clientMsgId) !== entry) return
+    entry.polling = true
+    try {
+      const task = await queryTask(entry.taskId, entry.capability)
+      if (this.closed || this.pending.get(entry.clientMsgId) !== entry) return
+      const result = taskResult(task)
+      if (result) {
+        if (result.status < 400) this.dispatch(result.body)
+        else this.handleError({ type: 'error', client_msg_id: entry.clientMsgId, error: result.body.error })
+        return
+      }
+    } catch { /* Only retry result queries; never create a second business call. */ }
+    finally { entry.polling = false }
+    if (!this.closed && this.pending.get(entry.clientMsgId) === entry) {
+      entry.timer = setTimeout(() => this.pollTask(entry), 1000)
+    }
   }
 
   stop() {

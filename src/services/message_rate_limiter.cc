@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 
 #include "common/config.h"
+#include "buffering/guarded_redis.h"
 #include "common/errors.h"
 
 namespace chat
@@ -31,7 +32,7 @@ int secondsLeftInWindow(int64_t nowSeconds, int windowSeconds)
     return static_cast<int>(windowSeconds - nowSeconds % windowSeconds);
 }
 
-drogon::Task<> MessageRateLimiter::admit(int64_t userId)
+drogon::Task<> MessageRateLimiter::admit(int64_t userId, RequestContextPtr context)
 {
     const auto &config = Config::get();
     const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
@@ -41,7 +42,7 @@ drogon::Task<> MessageRateLimiter::admit(int64_t userId)
     try
     {
         const auto result =
-            co_await drogon::app().getRedisClient()->execCommandCoro(
+            co_await guardedRedis(context)->execCommandCoro(
                 "EVAL %s 1 %s %d",
                 kCountScript,
                 messageRateKey(userId, now, config.messageRateWindowSeconds)

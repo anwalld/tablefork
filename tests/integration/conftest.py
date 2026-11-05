@@ -2,6 +2,7 @@ import ssl
 import json
 import os
 import uuid
+import time
 
 import pymysql
 import pytest
@@ -32,9 +33,45 @@ class Client:
         self.session = requests.Session()
         self.session.verify = CA_BUNDLE
         self.username = None
+        self.queue_owner = uuid.uuid4().hex + uuid.uuid4().hex
+        self.session.headers["X-Queue-Owner"] = self.queue_owner
 
     def request(self, method, path, **kwargs):
-        return self.session.request(method, self.base_url + path, timeout=30, **kwargs)
+        headers = kwargs.pop("headers", {})
+        headers.setdefault("X-Request-Id", uuid.uuid4().hex)
+        response = self.session.request(method, self.base_url + path, timeout=30, headers=headers, **kwargs)
+        if response.status_code == 202:
+            return self.task_result(response.json()["task_id"])
+        return response
+
+    def task_result(self, task_id, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                query = self.session.get(self.base_url + "/api/tasks/" + task_id, timeout=min(5, max(.01, deadline-time.monotonic())))
+                if query.status_code != 200:
+                    time.sleep(.1)
+                    continue
+                task = query.json()
+            except requests.RequestException:
+                time.sleep(.1)
+                continue
+            if task["state"] in ("waiting", "running", "recovering"):
+                time.sleep(.1)
+                continue
+            response = requests.Response()
+            response.url = self.base_url + "/api/tasks/" + task_id
+            if task["state"] in ("unknown", "expired"):
+                response.status_code = 503 if task["state"] == "unknown" else 408
+                response._content = json.dumps({"error": {"code": "result_unknown" if task["state"] == "unknown" else "queue_timeout", "retryable": False}}).encode()
+            else:
+                response.status_code = task["response"]["status"]
+                response._content = task["response"]["body"].encode()
+                response.headers["Content-Type"] = task["response"].get("content_type") or "application/json"
+                if task["response"].get("retry_after"):
+                    response.headers["Retry-After"] = task["response"]["retry_after"]
+            return response
+        raise AssertionError("queued business result exceeded its bounded deadline")
 
     def get(self, path, **kwargs):
         return self.request("GET", path, **kwargs)
@@ -78,6 +115,7 @@ class Socket:
         tls_options = {"ssl": context} if url.startswith("wss://") else {}
         self.ws = connect(url, origin=origin, additional_headers=headers, **tls_options)
         self.buffer = []
+        self.client = client
 
     def send(self, **message):
         self.ws.send(json.dumps(message))
@@ -86,6 +124,8 @@ class Socket:
         client_msg_id = client_msg_id or uuid.uuid4().hex
         self.send(
             type="send",
+            queue_owner=self.client.queue_owner,
+            queue_attempt=uuid.uuid4().hex,
             room_id=room_id,
             client_msg_id=client_msg_id,
             content=content,
@@ -108,7 +148,13 @@ class Socket:
 
     def post(self, room_id, content="hello", client_msg_id=None):
         client_msg_id = self.send_message(room_id, content, client_msg_id)
-        return self.expect("ack", "error")
+        frame = self.expect("ack", "error", "queued")
+        if frame["type"] == "queued":
+            response = self.client.task_result(frame["task_id"])
+            if response.status_code < 400:
+                return response.json()
+            return {"type": "error", "client_msg_id": client_msg_id, "room_id": room_id, "error": response.json()["error"]}
+        return frame
 
     def assert_silent(self, seconds=0.5):
         with pytest.raises(TimeoutError):
@@ -170,10 +216,11 @@ def make_user():
             "/api/auth/register",
             json={"username": client.username, "password": PASSWORD},
         ).status_code == 201
-        assert client.post(
+        login = client.post(
             "/api/auth/login",
             json={"username": client.username, "password": PASSWORD},
-        ).status_code == 200
+        )
+        assert login.status_code == 200, login.text
         return client
 
     return make

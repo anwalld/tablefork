@@ -42,6 +42,12 @@ if [ "${1:-}" = query ]; then
     exit $?
 fi
 
+# Keep the existing watcher entry point; the optional gate coordinator uses
+# the same Sentinel majority and HAProxy admin route, without Docker control.
+if [ "${BUFFER_REQUESTS_ENABLED:-0}" = 1 ]; then
+    exec python3 /usr/local/bin/request-buffer-coordinator.py
+fi
+
 # A failed watcher must terminate the main process: Docker restart policies
 # react to process exit, not to an unhealthy status alone.
 trap 'kill -TERM 1 2>/dev/null || true' EXIT

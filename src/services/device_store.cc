@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 
 #include "common/config.h"
+#include "buffering/guarded_redis.h"
 #include "common/errors.h"
 
 namespace chat
@@ -21,7 +22,7 @@ int ttlSeconds()
 }
 }  // namespace
 
-drogon::Task<std::optional<std::string>> DeviceStore::owner(std::string token)
+drogon::Task<std::optional<std::string>> DeviceStore::owner(std::string token, RequestContextPtr context)
 {
     if (token.empty())
     {
@@ -30,7 +31,7 @@ drogon::Task<std::optional<std::string>> DeviceStore::owner(std::string token)
     try
     {
         const auto result =
-            co_await drogon::app().getRedisClient()->execCommandCoro(
+            co_await guardedRedis(context)->execCommandCoro(
                 "GET %s", keyFor(token).c_str());
         if (result.isNil())
         {
@@ -45,12 +46,12 @@ drogon::Task<std::optional<std::string>> DeviceStore::owner(std::string token)
     }
 }
 
-drogon::Task<std::string> DeviceStore::issue(std::string username)
+drogon::Task<std::string> DeviceStore::issue(std::string username, RequestContextPtr context)
 {
     auto token = drogon::utils::secureRandomString(48);
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "SET %s %s EX %d",
             keyFor(token).c_str(),
             username.c_str(),
@@ -64,11 +65,11 @@ drogon::Task<std::string> DeviceStore::issue(std::string username)
     co_return token;
 }
 
-drogon::Task<> DeviceStore::refresh(std::string token)
+drogon::Task<> DeviceStore::refresh(std::string token, RequestContextPtr context)
 {
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "EXPIRE %s %d", keyFor(token).c_str(), ttlSeconds());
     }
     catch (const drogon::nosql::RedisException &e)

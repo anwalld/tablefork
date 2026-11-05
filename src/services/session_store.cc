@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 
 #include "common/config.h"
+#include "buffering/guarded_redis.h"
 #include "common/errors.h"
 
 namespace chat
@@ -75,7 +76,7 @@ drogon::Task<std::string> SessionStore::create(const Session &session)
     auto token = drogon::utils::secureRandomString(48);
     try
     {
-        auto redis = drogon::app().getRedisClient();
+        auto redis = guardedRedis(session.request);
         const auto ttl = Config::get().sessionTtlSeconds;
         co_await redis->execCommandCoro("SET %s %s EX %d",
                                         keyFor(token).c_str(),
@@ -97,7 +98,7 @@ drogon::Task<std::string> SessionStore::create(const Session &session)
     co_return token;
 }
 
-drogon::Task<std::optional<Session>> SessionStore::find(const std::string &token)
+drogon::Task<std::optional<Session>> SessionStore::find(const std::string &token, RequestContextPtr context)
 {
     if (token.empty())
     {
@@ -106,7 +107,7 @@ drogon::Task<std::optional<Session>> SessionStore::find(const std::string &token
     try
     {
         const auto result =
-            co_await drogon::app().getRedisClient()->execCommandCoro(
+            co_await guardedRedis(context)->execCommandCoro(
                 "GET %s", keyFor(token).c_str());
         if (result.isNil())
         {
@@ -121,11 +122,11 @@ drogon::Task<std::optional<Session>> SessionStore::find(const std::string &token
     }
 }
 
-drogon::Task<> SessionStore::remove(const std::string &token)
+drogon::Task<> SessionStore::remove(const std::string &token, RequestContextPtr context)
 {
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "DEL %s", keyFor(token).c_str());
     }
     catch (const drogon::nosql::RedisException &e)
@@ -142,7 +143,7 @@ drogon::Task<std::vector<std::string>> SessionStore::end(const Session &session,
     std::vector<std::string> ended;
     try
     {
-        auto redis = drogon::app().getRedisClient();
+        auto redis = guardedRedis(session.request);
         const auto users = userKey(session.userId);
         if (everywhere)
         {
@@ -183,7 +184,7 @@ drogon::Task<bool> SessionStore::extend(const Session &session, const std::strin
 {
     try
     {
-        auto redis = drogon::app().getRedisClient();
+        auto redis = guardedRedis(session.request);
         const auto ttl = Config::get().sessionTtlSeconds;
         const auto extended = co_await redis->execCommandCoro(
             "EXPIRE %s %d", keyFor(token).c_str(), ttl);
@@ -204,11 +205,13 @@ drogon::Task<bool> SessionStore::extend(const Session &session, const std::strin
 
 drogon::Task<Session> SessionStore::require(const drogon::HttpRequestPtr &req)
 {
-    auto session = co_await find(req->getCookie(kSessionCookie));
+    auto session = co_await find(req->getCookie(kSessionCookie), requestContext(req));
     if (!session)
     {
         throw ApiError::unauthenticated();
     }
+    session->request = requestContext(req);
+    checkRequest(session->request);
     co_return *session;
 }
 

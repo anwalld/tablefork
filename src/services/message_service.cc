@@ -5,8 +5,12 @@
 #include <sstream>
 
 #include "common/config.h"
+#include "buffering/guarded_transaction.h"
+#include "buffering/request_buffer.h"
+#include "buffering/guarded_redis.h"
 #include "common/util.h"
 #include "services/room_service.h"
+#include "services/message_rate_limiter.h"
 #include "ws/room_hub.h"
 
 namespace chat
@@ -148,10 +152,10 @@ struct Author
 drogon::Task<StoredMessage> store(Author author,
                                   int64_t roomId,
                                   std::string clientMsgId,
-                                  std::string content)
+                                  std::string content, RequestContextPtr context = {}, int64_t rateUser = 0)
 {
     validate(clientMsgId, content);
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(context);
     const auto rooms = co_await tx->execSqlCoro(
         "SELECT last_seq FROM rooms WHERE id = ? FOR UPDATE", roomId);
     if (rooms.empty())
@@ -174,6 +178,8 @@ drogon::Task<StoredMessage> store(Author author,
         clientMsgId);
     if (!existing.empty())
     {
+        if (existing[0]["content"].as<std::string>() != content)
+            throw ApiError(drogon::k409Conflict,"request_conflict","message ID was already used for different content");
         const auto seq = existing[0]["seq"].as<int64_t>();
         co_return StoredMessage{
             messageJson(roomId,
@@ -188,6 +194,7 @@ drogon::Task<StoredMessage> store(Author author,
             seq,
             true};
     }
+    if (rateUser) co_await MessageRateLimiter::admit(rateUser, context);
     const auto seq = rooms[0]["last_seq"].as<int64_t>() + 1;
     const auto createdAtMs = trantor::Date::now().microSecondsSinceEpoch() / 1000;
     co_await tx->execSqlCoro("UPDATE rooms SET last_seq = ? WHERE id = ?",
@@ -226,7 +233,7 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
     co_return co_await store(Author{session.memberId, session.username, "human"},
                              roomId,
                              std::move(clientMsgId),
-                             std::move(content));
+                             std::move(content), session.request, session.userId);
 }
 
 drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
@@ -234,6 +241,7 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
                                                           std::string generationId,
                                                           std::string content)
 {
+    auto context = RequestBuffer::instance().backgroundContext();
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT display_name FROM members WHERE id = ? AND type = 'ai'", aiMemberId);
     if (rows.empty())
@@ -249,15 +257,20 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
         Author{aiMemberId, rows[0]["display_name"].as<std::string>(), "ai"},
         roomId,
         std::move(generationId),
-        std::move(content));
+        std::move(content), std::move(context));
 }
 
-drogon::Task<> MessageService::distribute(const StoredMessage &message)
+drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestContextPtr context)
 {
+    if (!context && RequestBuffer::instance().enabled())
+    {
+        try { context = RequestBuffer::instance().backgroundContext(); }
+        catch (const ApiError &) { co_return; }
+    }
     const auto payload = toJsonString(message.json);
     try
     {
-        auto redis = drogon::app().getRedisClient();
+        auto redis = guardedRedis(context);
         const auto key = cacheKey(message.roomId);
         co_await redis->execCommandCoro("ZADD %s %lld %s",
                                         key.c_str(),
@@ -271,11 +284,12 @@ drogon::Task<> MessageService::distribute(const StoredMessage &message)
                                         key.c_str(),
                                         kCacheTtlSeconds);
     }
+    catch (const ApiError &) { co_return; }
     catch (const drogon::nosql::RedisException &e)
     {
         LOG_WARN << "hot cache write: " << e.what();
     }
-    co_await RoomHub::instance().publish(message.roomId, payload);
+    co_await RoomHub::instance().publish(message.roomId, payload, context);
 }
 
 drogon::Task<Json::Value> MessageService::history(Session session,
@@ -317,11 +331,11 @@ drogon::Task<Json::Value> MessageService::history(Session session,
     co_return body;
 }
 
-drogon::Task<> MessageService::dropCache(int64_t roomId)
+drogon::Task<> MessageService::dropCache(int64_t roomId, RequestContextPtr context)
 {
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "DEL %s", cacheKey(roomId).c_str());
     }
     catch (const drogon::nosql::RedisException &e)

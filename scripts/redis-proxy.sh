@@ -11,6 +11,10 @@ if [ "${1:-}" = health ]; then
         nc -w 2 127.0.0.1 6379 | grep -q '^+PONG'
     exit $?
 fi
+if [ "${1:-}" = switch ]; then
+    [ "${BUFFER_REQUESTS_ENABLED:-0}" = 1 ] || exit 1
+    exec python3 /usr/local/bin/request-buffer-coordinator.py request
+fi
 # RESP 的十六进制形式，避免空格、引号或反斜杠改变 AUTH 的参数边界。
 REDIS_AUTH_HEX=$(auth_command | od -An -v -tx1 | tr -d ' \n')
 export REDIS_AUTH_HEX

@@ -83,7 +83,7 @@ describe('ChatSocket', () => {
     expect(handlers.onStatus).toHaveBeenLastCalledWith(true)
     expect(second.sent).toEqual([
       { type: 'subscribe', room_id: 7 },
-      { type: 'send', room_id: 7, client_msg_id: 'c1', content: 'hello' },
+      { type: 'send', room_id: 7, client_msg_id: 'c1', content: 'hello', queue_owner: expect.stringMatching(/^[a-f0-9]{64}$/), queue_attempt: expect.stringMatching(/^[a-f0-9]{64}$/) },
     ])
     second.reply({ type: 'ack', client_msg_id: 'c1', seq: 3 })
     expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'c1', { ok: true, seq: 3 })
@@ -153,7 +153,7 @@ describe('ChatSocket', () => {
 
     ws.open()
     expect(ws.sent).toEqual([
-      { type: 'send', room_id: 7, client_msg_id: 'offline', content: 'waiting for recovery' },
+      { type: 'send', room_id: 7, client_msg_id: 'offline', content: 'waiting for recovery', queue_owner: expect.stringMatching(/^[a-f0-9]{64}$/), queue_attempt: expect.stringMatching(/^[a-f0-9]{64}$/) },
     ])
     ws.reply({ type: 'ack', client_msg_id: 'offline', seq: 8 })
     await vi.advanceTimersByTimeAsync(60000)
@@ -361,5 +361,22 @@ it('forwards the acknowledgement creation time', () => {
   expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'dated', { ok: true, seq: 4, created_at: 1700000000000 })
   socket.close()
 })
+
+  it('polls a queued message without resending or reporting an admission as an ACK', async () => {
+    const { socket, handlers } = makeSocket()
+    latest().open()
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'waiting' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'succeeded', response: { status: 200, body: '{"type":"ack","client_msg_id":"queued","seq":7}' } }) })
+    vi.stubGlobal('fetch', fetch)
+    socket.send(7, 'queued', 'hello')
+    latest().reply({ type: 'queued', client_msg_id: 'queued', task_id: 't1', claim_token: 'capability' })
+    expect(handlers.onSendResult).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(latest().sent).toHaveLength(1)
+    expect(handlers.onSendResult).toHaveBeenCalledWith(7, 'queued', expect.objectContaining({ ok: true, seq: 7 }))
+    socket.close()
+    vi.unstubAllGlobals()
+  })
 
 })

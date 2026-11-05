@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 
 #include "common/config.h"
+#include "buffering/guarded_redis.h"
 #include "common/errors.h"
 
 namespace chat
@@ -70,7 +71,7 @@ std::string LoginLimiter::deviceKey(const std::string &deviceToken)
     return "login_fail:d:" + drogon::utils::getSha256(deviceToken);
 }
 
-drogon::Task<> LoginLimiter::admit(std::string key)
+drogon::Task<> LoginLimiter::admit(std::string key, RequestContextPtr context)
 {
     static const std::string schedule = scheduleArgument();
     const auto &config = Config::get();
@@ -78,7 +79,7 @@ drogon::Task<> LoginLimiter::admit(std::string key)
     try
     {
         const auto result =
-            co_await drogon::app().getRedisClient()->execCommandCoro(
+            co_await guardedRedis(context)->execCommandCoro(
                 "EVAL %s 1 %s %d %d %s",
                 kAdmitScript,
                 key.c_str(),
@@ -98,11 +99,11 @@ drogon::Task<> LoginLimiter::admit(std::string key)
     }
 }
 
-drogon::Task<> LoginLimiter::clear(std::string key)
+drogon::Task<> LoginLimiter::clear(std::string key, RequestContextPtr context)
 {
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "DEL %s", key.c_str());
     }
     catch (const drogon::nosql::RedisException &e)

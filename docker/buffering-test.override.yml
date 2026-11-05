@@ -1,0 +1,38 @@
+# Isolated test image names: never replace another checkout's application.
+services:
+  app-1:
+    image: cppai-buffering-runtime-test
+  app-2:
+    image: cppai-buffering-runtime-test
+  redis-proxy:
+    image: cppai-buffering-proxy-test
+    environment:
+      BUFFER_BACKENDS: app-1 buffer-control-2
+  sentinel-1:
+    image: cppai-buffering-sentinel-test
+  sentinel-2:
+    image: cppai-buffering-sentinel-test
+  sentinel-3:
+    image: cppai-buffering-sentinel-test
+  ai:
+    image: cppai-buffering-ai-test
+  web-1:
+    image: cppai-buffering-web-test
+  web-2:
+    image: cppai-buffering-web-test
+  gateway:
+    image: cppai-buffering-gateway-test
+  certs:
+    image: cppai-buffering-certs-test
+    # Reuse and verify the already trusted leaf/CA; this test checkout has no
+    # CA signing key and must never generate a replacement trust root.
+    entrypoint: ["sh", "-ec", "openssl verify -CAfile /certs/ca.crt /certs/server.crt && openssl x509 -in /certs/server.crt -checkend 0 -noout"]
+  buffer-control-2:
+    image: nginx:1.27.5-alpine
+    volumes:
+      - ./docker/buffering-control-proxy.conf:/etc/nginx/nginx.conf:ro
+      - ${BUFFER_FAULT_DIR:-/private/tmp/cppai-buffering-control-faults}:/control:ro
+  tests:
+    image: cppai-buffering-integration-test
+    volumes:
+      - ${BUFFER_FAULT_DIR:-/private/tmp/cppai-buffering-control-faults}:/fault-control

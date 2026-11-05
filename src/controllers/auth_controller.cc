@@ -2,6 +2,8 @@
 
 #include "common/config.h"
 #include "common/util.h"
+#include "buffering/request_buffer.h"
+#include "buffering/external_request.h"
 #include "services/device_store.h"
 #include "services/device_trust.h"
 #include "services/login_limiter.h"
@@ -25,42 +27,48 @@ Json::Value userJson(const Session &session)
 drogon::Task<drogon::HttpResponsePtr> AuthController::registerUser(
     drogon::HttpRequestPtr req)
 {
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::registerUser")) co_return queued;
     const auto &body = jsonBody(req);
     co_await UserService::registerUser(stringField(body, "username"),
-                                       stringField(body, "password"));
+                                       stringField(body, "password"), requestContext(req));
     co_return jsonResponse(Json::objectValue, drogon::k201Created);
 }
 
 drogon::Task<drogon::HttpResponsePtr> AuthController::login(
     drogon::HttpRequestPtr req)
 {
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::login")) co_return queued;
     const auto &body = jsonBody(req);
     const auto username = stringField(body, "username");
     const auto password = stringField(body, "password");
 
+    const auto context = requestContext(req);
+    co_await beginExternalRequest(context, context ? "anonymous:" + context->anonymousOwner : "legacy", "auth.login");
     // A browser that has logged in as this user before counts its attempts
     // apart from everyone else, so others guessing the name cannot lock it
     // out.
     const auto device = req->getCookie(kDeviceCookie);
-    const bool knownDevice = co_await DeviceStore::owner(device) == username;
+    const bool knownDevice = co_await DeviceStore::owner(device, requestContext(req)) == username;
     const auto limitKey = knownDevice ? LoginLimiter::deviceKey(device)
                                       : LoginLimiter::nameKey(username);
-    co_await LoginLimiter::admit(limitKey);
+    co_await LoginLimiter::admit(limitKey, requestContext(req));
 
     auto session = co_await UserService::authenticate(username, password);
-    co_await LoginLimiter::clear(limitKey);
+    session.request = requestContext(req);
+    checkRequest(session.request);
+    co_await LoginLimiter::clear(limitKey, requestContext(req));
     // The session remembers its device, so that messages sent over the
     // WebSocket, which never sees the device cookie, can be counted for it.
-    const auto deviceToken = knownDevice ? device : co_await DeviceStore::issue(username);
+    const auto deviceToken = knownDevice ? device : co_await DeviceStore::issue(username, requestContext(req));
     session.device = drogon::utils::getSha256(deviceToken);
     session.deviceKind = deviceKind(req->getHeader("user-agent"));
     const auto token = co_await SessionStore::create(session);
-    co_await DeviceTrust::evaluate(session.userId, session.device, session.deviceKind);
+    co_await DeviceTrust::evaluate(session.userId, session.device, session.deviceKind, session.request);
     auto resp = jsonResponse(userJson(session));
     SessionStore::setCookie(resp, token);
     if (knownDevice)
     {
-        co_await DeviceStore::refresh(device);
+        co_await DeviceStore::refresh(device, requestContext(req));
     }
     else
     {
@@ -72,10 +80,12 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::login(
 drogon::Task<drogon::HttpResponsePtr> AuthController::logout(
     drogon::HttpRequestPtr req)
 {
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::logout")) co_return queued;
     const auto session = co_await SessionStore::require(req);
+    co_await beginExternalRequest(session.request, "user:" + std::to_string(session.userId), "auth.logout");
     // Logging out on a trusted device logs the user out everywhere.
     const bool trusted =
-        co_await DeviceTrust::isTrusted(session.userId, session.device, session.deviceKind);
+        co_await DeviceTrust::isTrusted(session.userId, session.device, session.deviceKind, session.request);
     co_await SessionStore::end(session, req->getCookie(kSessionCookie), trusted);
     auto resp = jsonResponse(Json::objectValue);
     SessionStore::clearCookie(resp);
@@ -85,15 +95,18 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::logout(
 drogon::Task<drogon::HttpResponsePtr> AuthController::me(
     drogon::HttpRequestPtr req)
 {
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::me")) co_return queued;
     co_return jsonResponse(userJson(co_await SessionStore::require(req)));
 }
 
 drogon::Task<drogon::HttpResponsePtr> AuthController::refresh(
     drogon::HttpRequestPtr req)
 {
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::refresh")) co_return queued;
     const auto session = co_await SessionStore::require(req);
+    co_await beginExternalRequest(session.request, "user:" + std::to_string(session.userId), "auth.refresh");
     // Refreshing is also a chance for a well-used device to become trusted.
-    if (!co_await DeviceTrust::evaluate(session.userId, session.device, session.deviceKind))
+    if (!co_await DeviceTrust::evaluate(session.userId, session.device, session.deviceKind, session.request))
     {
         throw ApiError(drogon::k403Forbidden,
                        "device_required",
@@ -105,9 +118,9 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::refresh(
     {
         throw ApiError::unauthenticated();
     }
-    if (co_await DeviceStore::owner(device) == session.username)
+    if (co_await DeviceStore::owner(device, requestContext(req)) == session.username)
     {
-        co_await DeviceStore::refresh(device);
+        co_await DeviceStore::refresh(device, requestContext(req));
     }
     Json::Value body;
     body["expires_in"] = Config::get().sessionTtlSeconds;
