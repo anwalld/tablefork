@@ -487,6 +487,14 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
             f"confirmed={len(confirmed)} all present once; "
             f"late post-ack retryable errors={len(late_errors)}; "
             f"explicit cross-Redis unknown={len(login_unknown)}")
+    except ConnectionClosed as error:
+        print("business window disconnected:",
+            "received_close=", getattr(error.rcvd, "code", None),
+            "sent_close=", getattr(error.sent, "code", None),
+            "receive_error=", repr(writer.ws.recv_exc),
+            "completed_samples=", [(kind, ok, round(seconds, 3)) for kind, ok, seconds in samples],
+            flush=True)
+        raise
     finally:
         if pending_messages or pending_logins:
             print(f"business window diagnostics: samples={len(samples)} "
