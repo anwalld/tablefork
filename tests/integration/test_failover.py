@@ -64,15 +64,15 @@ def proxy_clients(cache):
         if client["addr"].rsplit(":", 1)[0].strip("[]") == address]
 
 
-def observe_controlled_switch():
-    old = node("redis-2")
+def observe_controlled_switch(new_host="redis-1", old_host="redis-2"):
+    old = node(old_host)
     switched_at = None
     drained = False
     deadline = time.monotonic() + 30
     try:
         while time.monotonic() < deadline:
             state = proxy_state()
-            if state["srv_addr"] == socket.gethostbyname("redis-1"):
+            if state["srv_addr"] == socket.gethostbyname(new_host):
                 switched_at = switched_at or time.monotonic()
             clients = proxy_clients(old)
             if switched_at is not None:
@@ -98,6 +98,47 @@ def restore_user(data):
     return client
 
 
+def wait_for_sentinel_election(sentinel):
+    observers = [node(f"sentinel-{index}", 26379) for index in (1, 2, 3)]
+    try:
+        wait_for(lambda: all(observer.info("sentinel")["sentinel_tilt"] == 0
+            for observer in observers) and "failover-in-progress" not in
+            sentinel.sentinel_master("chat")["flags"], timeout=120)
+    finally:
+        for observer in observers:
+            observer.close()
+
+
+@pytest.mark.skipif(PHASE != "controlled", reason="controlled Redis switch phase")
+def test_controlled_switch_drains_existing_connections(redis):
+    sentinel = node("sentinel-1", 26379)
+    try:
+        wait_for_sentinel_election(sentinel)
+        # End on redis-2 so prepare always exercises the return switch on CI,
+        # including on a fresh stack whose initial primary is redis-1.
+        for new_host in ("redis-1", "redis-2"):
+            following = node(new_host)
+            old_host = "redis-2" if new_host == "redis-1" else "redis-1"
+            previous = node(old_host)
+            try:
+                if following.info("replication")["role"] == "master":
+                    continue
+                wait_for(lambda: following.info("replication").get("master_link_status") == "up"
+                    and proxy_routes_to(old_host))
+                redis.set("test:controlled-switch:barrier", "1", ex=60)
+                assert redis.wait(1, 3000) == 1
+                assert proxy_clients(previous), "no old connections to exercise"
+                sentinel.execute_command("SENTINEL", "FAILOVER", "chat")
+                observe_controlled_switch(new_host, old_host)
+                wait_for(lambda: following.info("replication")["role"] == "master"
+                    and proxy_routes_to(new_host))
+            finally:
+                previous.close()
+                following.close()
+    finally:
+        sentinel.close()
+
+
 @pytest.mark.skipif(PHASE != "prepare", reason="Redis 故障阶段 prepare")
 def test_prepare_redis_failover(make_user, make_room, make_socket, redis):
     primary = node("redis-1")
@@ -105,14 +146,7 @@ def test_prepare_redis_failover(make_user, make_room, make_socket, redis):
     try:
         # 只延长测试准备等待；实际主故障后的 30 秒恢复要求保持不变。
         # 时钟跳变后 Sentinel 会安全地暂停选举，不能把 TILT 当作服务逻辑失败。
-        observers = [node(f"sentinel-{index}", 26379) for index in (1, 2, 3)]
-        try:
-            wait_for(lambda: all(observer.info("sentinel")["sentinel_tilt"] == 0
-                for observer in observers) and "failover-in-progress" not in
-                sentinel.sentinel_master("chat")["flags"], timeout=120)
-        finally:
-            for observer in observers:
-                observer.close()
+        wait_for_sentinel_election(sentinel)
         # 上一次运行可能已提升 redis-2。通过 Sentinel 恢复同一测试起点，
         # 确保每次 stop redis-1 都是真正停止主节点，而不是停止一个从节点。
         if primary.info("replication")["role"] != "master":
@@ -289,3 +323,124 @@ def test_new_connections_survive_a_web_instance_failure(make_user):
                 headers={"Cookie": user.cookie_header()}, timeout=5)
             assert response.status_code == 200
             assert response.json()["username"] == user.username
+
+
+@pytest.mark.skipif(PHASE != "window", reason="Redis business window phase")
+def test_business_requests_during_redis_failover(make_user, make_room, make_socket, redis):
+    # Start and warm this client before the shell stops the primary.
+    assert proxy_routes_to("redis-1")
+    user = make_user()
+    room_id = make_room(user)
+    writer = make_socket(user)
+    assert writer.subscribe(room_id)["type"] == "subscribed"
+    assert writer.ws.socket.version() == "TLSv1.3"
+    # A write on this connection makes WAIT cover all preceding fixture writes.
+    # This is test synchronization, not a production consistency promise.
+    prefix = f"test:redis-window:{os.environ['FAULT_TEST_ID']}"
+    redis.set(prefix + ":fixture-barrier", "1", ex=120)
+    assert redis.wait(1, 3000) == 1
+    promoted = node("redis-2")
+    confirmed, sent, late_errors, samples = {}, set(), [], []
+    try:
+        redis.set(prefix + ":ready", "1", ex=120)
+        wait_for(lambda: redis.get(prefix + ":begin"))
+        started = time.monotonic()
+        deadline = started + 30
+        redis.set(prefix + ":started", "1", ex=120)
+
+        def send_result(message_id, request_deadline):
+            while True:
+                remaining = request_deadline - time.monotonic()
+                assert remaining > 0, "message response exceeded its deadline"
+                if writer.buffer:
+                    frame = writer.buffer.pop(0)
+                else:
+                    frame = json.loads(writer.ws.recv(timeout=remaining))
+                if frame["type"] not in ("ack", "error"):
+                    continue
+                response_id = frame.get("client_msg_id")
+                assert response_id in sent, "response has unknown client_msg_id"
+                if response_id != message_id:
+                    # Post-ack side effects may report an error later. Attribute
+                    # it to that request, never to the next send.
+                    assert response_id in confirmed and frame["type"] == "error"
+                    assert frame["error"]["retryable"] is True
+                    late_errors.append(response_id)
+                    continue
+                return frame
+
+        while True:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, "business recovery exceeded 30 seconds"
+            before = time.monotonic()
+            response = user.session.post(BASE_URL + "/api/auth/login",
+                json={"username": user.username, "password": PASSWORD},
+                timeout=min(5, remaining))
+            login_seconds = time.monotonic() - before
+            assert login_seconds < 5
+            assert response.status_code in (200, 503), response.status_code
+            if response.status_code == 503:
+                assert response.json()["error"]["retryable"] is True
+            samples.append(("login", response.status_code == 200, login_seconds))
+
+            before = time.monotonic()
+            message_id = writer.send_message(room_id, "Redis window probe")
+            sent.add(message_id)
+            frame = send_result(message_id, min(before + 5, deadline))
+            message_seconds = time.monotonic() - before
+            assert message_seconds < 5
+            if frame["type"] == "ack":
+                assert frame["room_id"] == room_id
+                confirmed[message_id] = frame["seq"]
+            else:
+                assert frame["error"]["retryable"] is True
+            samples.append(("message", frame["type"] == "ack", message_seconds))
+
+            if (promoted.info("replication")["role"] == "master"
+                    and proxy_routes_to("redis-2")
+                    and response.status_code == 200 and frame["type"] == "ack"):
+                recovered = time.monotonic() - started
+                assert recovered < 30
+                break
+
+        # Every acknowledged message remains exactly once in paginated history.
+        stored, cursor = {}, 0
+        while True:
+            response = user.session.get(BASE_URL + f"/api/rooms/{room_id}/messages",
+                params={"after": cursor, "limit": 100}, timeout=5)
+            assert response.status_code == 200
+            page = response.json()["messages"]
+            if not page:
+                break
+            next_cursor = max(message["seq"] for message in page)
+            assert next_cursor > cursor
+            for message in page:
+                stored.setdefault(message["client_msg_id"], []).append(message["seq"])
+            cursor = next_cursor
+        assert confirmed, "no message was acknowledged during observation"
+        for message_id, seq in confirmed.items():
+            assert stored.get(message_id) == [seq]
+
+        for kind in ("login", "message"):
+            rows = [sample for sample in samples if sample[0] == kind]
+            ok = sum(sample[1] for sample in rows)
+            print(f"business window: {kind} samples={len(rows)} ok={ok} "
+                f"retryable={len(rows) - ok} max={max(row[2] for row in rows):.3f}s")
+        print(f"business window: recovered in {recovered:.3f}s; "
+            f"confirmed={len(confirmed)} all present once; "
+            f"late post-ack retryable errors={len(late_errors)}")
+    except ConnectionClosed as error:
+        print("business window disconnected:",
+            "received_close=", getattr(error.rcvd, "code", None),
+            "sent_close=", getattr(error.sent, "code", None),
+            "receive_error=", repr(writer.ws.recv_exc),
+            "completed_samples=", [(kind, ok, round(seconds, 3)) for kind, ok, seconds in samples],
+            flush=True)
+        raise
+    finally:
+        promoted.close()
+        try:
+            redis.delete(*(prefix + ":" + suffix for suffix in ("fixture-barrier", "ready", "begin", "started")))
+        except redis_client.RedisError:
+            # Short TTL bounds cleanup if the assertion failed during outage.
+            pass

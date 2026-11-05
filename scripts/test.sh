@@ -18,6 +18,11 @@ fi
 restore_stack() {
     result=$?
     trap - EXIT
+    if [[ "$result" != 0 ]]; then
+        # Preserve the failing containers before normal settings recreate them.
+        docker compose ps -a || true
+        docker compose logs --no-color --tail=200 app-1 app-2 ai web-1 web-2 gateway redis-proxy sentinel-1 sentinel-2 sentinel-3 || true
+    fi
     if ! docker compose up -d --wait; then
         echo "恢复正常配置失败" >&2
         [[ "$result" != 0 ]] || result=1
@@ -29,6 +34,8 @@ trap restore_stack EXIT
 docker build --target unit -t cppaiserver-unit .
 docker build -f ai/Dockerfile --target test -t cppaiserver-ai-test .
 docker compose --profile test build tests
+docker compose build sentinel-1
+python3 scripts/test_sentinel.py
 
 # The suite registers, logs in and sends far more often than the limits allow,
 # so it runs with the Nginx and message limits lifted, a short login count
@@ -78,10 +85,31 @@ ai_test_env() {
             pytest -q -s test_failover.py
     }
     export FAULT_TEST_ID="$$-$RANDOM"
+    run_failover_phase controlled
     run_failover_phase prepare
+    run_failover_phase window &
+    redis_window_pid=$!
+    docker compose --profile test run --rm --no-deps -T -e FAULT_TEST_ID tests python - <<'WINDOW_READY'
+import os, time
+import redis
+cache = redis.Redis(host=os.environ.get("REDIS_HOST", "redis-proxy"),
+    password=os.environ["REDIS_PASSWORD"], socket_connect_timeout=2, socket_timeout=2)
+prefix = f"test:redis-window:{os.environ['FAULT_TEST_ID']}"
+deadline = time.monotonic() + 30
+while not cache.exists(prefix + ":ready"):
+    assert time.monotonic() < deadline, "business observer did not become ready"
+    time.sleep(0.1)
+cache.set(prefix + ":begin", "1", ex=120)
+while not cache.exists(prefix + ":started"):
+    assert time.monotonic() < deadline, "business observer did not start"
+    time.sleep(0.1)
+cache.close()
+print("business window: observer active before stopping redis-1")
+WINDOW_READY
     export FAILOVER_STOPPED_AT="$(date +%s)"
     docker compose stop redis-1
     run_failover_phase after
+    wait "$redis_window_pid"
     # Start observing before Redis starts, so its temporary master role cannot
     # be missed while a test container is still being created.
     run_failover_phase rejoined &

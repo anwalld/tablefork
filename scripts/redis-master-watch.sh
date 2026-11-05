@@ -51,15 +51,27 @@ while :; do
     if next=$(query_majority) && [ "$next" != "$current" ]; then
         result=$(printf 'set server redis_master/master fqdn %s\n' "$next" |
             nc -w 1 127.0.0.1 9998)
-        # Verify that HAProxy accepted the new FQDN before closing sessions.
-        printf 'show servers state\n' | nc -w 1 127.0.0.1 9998 |
-            awk -v expected="$next" '
+        # FQDN acceptance precedes async DNS resolution. Closing sessions now
+        # would let reconnects bind to the old address until DNS catches up.
+        # Wait for the actual address first, then drain all existing sessions.
+        expected_address=$(timeout 2 getent hosts "$next" | awk 'NR == 1 { print $1 }')
+        [ -n "$expected_address" ] || exit 1
+        route_deadline=$(( $(date +%s) + 10 ))
+        while ! printf 'show servers state\n' | nc -w 1 127.0.0.1 9998 |
+            awk -v expected="$next" -v address="$expected_address" '
                 /^#/ { for (i = 2; i <= NF; ++i) col[$i] = i - 1; next }
                 col["be_name"] && $(col["be_name"]) == "redis_master" &&
                 $(col["srv_name"]) == "master" &&
-                $(col["srv_fqdn"]) == expected { found = 1 }
+                $(col["srv_fqdn"]) == expected &&
+                $(col["srv_addr"]) == address { found = 1 }
                 END { exit !found }
-            '
+            '; do
+            if [ "$(date +%s)" -ge "$route_deadline" ]; then
+                echo 'redis master watcher: route address did not resolve in time' >&2
+                exit 1
+            fi
+            sleep 0.1
+        done
         result=$(printf 'shutdown sessions server redis_master/master\n' |
             nc -w 1 127.0.0.1 9998)
         if [ -n "$result" ]; then

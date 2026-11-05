@@ -125,7 +125,8 @@ services:
       retries: 20
 
   sentinel-1: &sentinel
-    image: redis:7.4.5
+    image: cppaiserver-sentinel:7.4.5-self-guard
+    build: docker/sentinel
     command: ["sh", "/sentinel.sh"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}

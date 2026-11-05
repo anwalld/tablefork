@@ -142,3 +142,20 @@ def test_another_ip_keeps_its_auth_budget(redis):
             json={"username": unique_name(), "password": PASSWORD})
     assert response.status_code == 401
     redis.set(prefix + ":peer-ok", "1", ex=90)
+
+
+def test_repeated_service_unavailable_preserves_json_error(make_user, redis):
+    user = make_user()
+    assert user.get("/api/auth/me").status_code == 200
+    # Both app processes stay alive; only the shared session lookup is denied.
+    # An application 503 must not exhaust the gateway's healthy upstream set.
+    redis.execute_command("ACL", "SETUSER", "default", "-get")
+    try:
+        statuses = []
+        for _ in range(3):
+            response = user.get("/api/auth/me")
+            statuses.append(response.status_code)
+            assert response.status_code == 503, statuses
+            assert response.json()["error"]["retryable"] is True
+    finally:
+        redis.execute_command("ACL", "SETUSER", "default", "+get")

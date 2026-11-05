@@ -1,0 +1,24 @@
+--- a/src/sentinel.c
++++ b/src/sentinel.c
+@@ -520,0 +521,16 @@
++
++    /* Old peer addresses may have pointed back to us before this guard was
++     * installed. Remove only our own ID after all config entries are loaded,
++     * irrespective of directive order; preserve epochs, votes and real peers. */
++    int removed_self = 0;
++    sds self_id = sdsnew(sentinel.myid);
++    dictIterator *di = dictGetIterator(sentinel.masters);
++    dictEntry *de;
++    while ((de = dictNext(di)) != NULL) {
++        sentinelRedisInstance *master = dictGetVal(de);
++        if (dictDelete(master->sentinels, self_id) == DICT_OK)
++            removed_self = 1;
++    }
++    dictReleaseIterator(di);
++    sdsfree(self_id);
++    if (removed_self) sentinelFlushConfig();
+@@ -2847,0 +2864,4 @@
++        /* Both Pub/Sub and direct Sentinel PUBLISH arrive here. A stale peer
++         * address can point back to us after container IP reuse. */
++        if (!strcmp(token[2], sentinel.myid)) goto cleanup;
++
