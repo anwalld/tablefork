@@ -9,6 +9,7 @@ option(CHAT_BUILD_TESTS "Build unit tests" OFF)
 
 find_package(Drogon CONFIG REQUIRED)
 find_package(Protobuf REQUIRED)
+find_package(OpenSSL REQUIRED)
 # Ubuntu's gRPC package links against c-ares::cares without defining it.
 if(NOT TARGET c-ares::cares)
     find_library(CARES_LIBRARY cares REQUIRED)
@@ -38,8 +39,11 @@ file(GLOB_RECURSE CHAT_SOURCES CONFIGURE_DEPENDS src/*.cc)
 list(REMOVE_ITEM CHAT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc)
 
 add_library(chat-core STATIC ${CHAT_SOURCES} ${PROTO_GENERATED})
-target_include_directories(chat-core PUBLIC src ${PROTO_OUT})
-target_link_libraries(chat-core PUBLIC Drogon::Drogon gRPC::grpc++ protobuf::libprotobuf)
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/src/buffering/lua/queue.lua QUEUE_LUA)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/buffering/lua/queue.lua)
+configure_file(src/buffering/queue_script.h.in buffering/queue_script.h @ONLY)
+target_include_directories(chat-core PUBLIC src ${PROTO_OUT} ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(chat-core PUBLIC Drogon::Drogon gRPC::grpc++ protobuf::libprotobuf OpenSSL::Crypto)
 
 # Controllers register themselves through static initializers, so the whole
 # library must be linked in.
@@ -48,6 +52,7 @@ target_link_libraries(chat-server PRIVATE
     -Wl,--whole-archive chat-core -Wl,--no-whole-archive)
 
 if(CHAT_BUILD_TESTS)
+    target_compile_definitions(chat-core PRIVATE CHAT_BUFFER_TEST_HOOKS=1)
     enable_testing()
     add_subdirectory(tests/unit)
 endif()

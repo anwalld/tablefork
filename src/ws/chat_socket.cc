@@ -6,6 +6,7 @@
 
 #include "ai/ai_events.h"
 #include "common/util.h"
+#include "buffering/request_buffer.h"
 #include "services/device_trust.h"
 #include "services/message_rate_limiter.h"
 #include "services/message_service.h"
@@ -76,32 +77,54 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
     auto job = [connection, context, request, roomId]() -> drogon::Task<> {
         co_await reportingErrors(
             connection, request, [=]() -> drogon::Task<> {
-                // Checked per message: the session may have ended since the
-                // socket opened.
-                const auto session = co_await SessionStore::find(context->token);
-                if (!session)
+                if (RequestBuffer::instance().enabled())
                 {
-                    throw ApiError::unauthenticated();
+                    auto capability = request.get("queue_owner", "").asString();
+                    if (capability.empty()) capability = PayloadCrypto::randomToken();
+                    if (capability.size() != 64 || capability.find_first_not_of("0123456789abcdef") != std::string::npos)
+                        throw ApiError::invalidArgument("invalid queue owner capability");
+                    Json::Value value;
+                    value["kind"]="ws"; value["token"]=context->token;
+                    value["room_id"]=Json::Int64(roomId);
+                    value["client_msg_id"]=stringField(request,"client_msg_id");
+                    value["content"]=stringField(request,"content");
+                    value["request_id"]=std::to_string(roomId)+":"+value["client_msg_id"].asString();
+                    value["fingerprint"]=std::string(64,'0');
+                    value["owner"]="ws";
+                    const auto attempt=request.get("queue_attempt",value["request_id"]).asString();
+                    auto admitted=co_await RequestBuffer::instance().enqueue(value,capability,
+                        attempt,toJsonString(request).size(),true);
+                    if(admitted["direct"].asBool())
+                    {
+                        auto ctx=RequestBuffer::instance().backgroundContext();
+                        sendJson(connection,co_await RequestBuffer::sendChat(value,ctx));
+                    }
+                    else
+                    {
+                        if(admitted.isMember("error"))
+                        {
+                            if(admitted["error"]=="request_conflict")
+                                throw ApiError(drogon::k409Conflict,"request_conflict","message ID was reused for different parameters");
+                            throw ApiError::unavailable();
+                        }
+                        Json::Value queued;
+                        queued["type"]="queued"; queued["task_id"]=admitted["id"];
+                        queued["claim_token"]=capability; queued["room_id"]=Json::Int64(roomId);
+                        queued["client_msg_id"]=request["client_msg_id"];
+                        sendJson(connection,queued);
+                    }
+                    co_return;
                 }
-                // Before saving, so a refused message can be resent later
-                // with the same client_msg_id.
-                co_await MessageRateLimiter::admit(session->userId);
-                const auto message = co_await MessageService::save(
-                    *session,
-                    roomId,
-                    stringField(request, "client_msg_id"),
-                    stringField(request, "content"));
-
+                const auto session=co_await SessionStore::find(context->token);
+                if(!session) throw ApiError::unauthenticated();
+                const auto message=co_await MessageService::save(*session,roomId,
+                    stringField(request,"client_msg_id"),stringField(request,"content"));
                 Json::Value ack;
-                ack["type"] = "ack";
-                ack["room_id"] = Json::Int64(roomId);
-                ack["client_msg_id"] = request["client_msg_id"];
-                ack["seq"] = Json::Int64(message.seq);
-                ack["created_at"] = message.json["created_at"];
-                ack["duplicate"] = message.duplicate;
-                sendJson(connection, ack);
-
-                if (!message.duplicate)
+                ack["type"]="ack"; ack["room_id"]=Json::Int64(roomId);
+                ack["client_msg_id"]=request["client_msg_id"]; ack["seq"]=Json::Int64(message.seq);
+                ack["created_at"]=message.json["created_at"]; ack["duplicate"]=message.duplicate;
+                sendJson(connection,ack);
+                if(!message.duplicate)
                 {
                     co_await MessageService::distribute(message);
                     co_await reportMessage(message);

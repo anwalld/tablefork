@@ -46,12 +46,14 @@ class MessageService
 
     // Updates the hot cache and publishes. The message is already durable, so
     // failures are only logged; clients backfill by seq.
-    static drogon::Task<> distribute(const StoredMessage &message);
+    static drogon::Task<> distribute(const StoredMessage &message, RequestContextPtr context = {});
 
     static drogon::Task<Json::Value> history(Session session,
                                              int64_t roomId,
                                              HistoryQuery query);
 
-    static drogon::Task<> dropCache(int64_t roomId);
+    // Called after room deletion commits; a failed cleanup is explicitly
+    // unknown and may be reconciled with the original business request ID.
+    static drogon::Task<> dropCache(int64_t roomId, RequestContextPtr context = {});
 };
 }  // namespace chat

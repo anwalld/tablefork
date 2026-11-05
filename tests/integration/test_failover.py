@@ -238,6 +238,9 @@ def test_redis_primary_failure_recovers_without_restarts(redis, make_socket):
             reader.ws.recv(timeout=2)
     assert ended.value.rcvd.code == 4401
     assert time.time() - started < 30
+    # The parallel window observer must not require direct traffic while this
+    # phase is still adding legitimate work to the same GLOBAL queue.
+    redis.set(f"test:redis-window:{os.environ['FAULT_TEST_ID']}:after-complete", "1", ex=120)
 
 
 @pytest.mark.skipif(PHASE != "rejoined", reason="Redis 故障阶段 rejoined")
@@ -341,6 +344,8 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
     assert redis.wait(1, 3000) == 1
     promoted = node("redis-2")
     confirmed, sent, late_errors, samples = {}, set(), [], []
+    pending_messages, pending_logins = {}, set()
+    login_unknown = []
     try:
         redis.set(prefix + ":ready", "1", ex=120)
         wait_for(lambda: redis.get(prefix + ":begin"))
@@ -356,7 +361,7 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
                     frame = writer.buffer.pop(0)
                 else:
                     frame = json.loads(writer.ws.recv(timeout=remaining))
-                if frame["type"] not in ("ack", "error"):
+                if frame["type"] not in ("ack", "error", "queued"):
                     continue
                 response_id = frame.get("client_msg_id")
                 assert response_id in sent, "response has unknown client_msg_id"
@@ -369,19 +374,54 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
                     continue
                 return frame
 
+        def collect_tasks():
+            for task_id in list(pending_logins) + list(pending_messages):
+                response = user.session.get(BASE_URL + "/api/tasks/" + task_id,
+                    timeout=min(5, max(.01, deadline-time.monotonic())))
+                if response.status_code != 200:
+                    assert response.status_code == 503
+                    continue
+                task = response.json()
+                if task["state"] in ("waiting", "running", "recovering"):
+                    continue
+                if task_id in pending_logins:
+                    # Cross-Redis work already started when a fault is detected
+                    # can be unknown. The intent fence forbids blind replay.
+                    if task["state"] == "unknown":
+                        login_unknown.append(task_id)
+                    else:
+                        assert task["state"] == "succeeded", task
+                        assert task["response"]["status"] == 200, task
+                    pending_logins.remove(task_id)
+                else:
+                    assert task["state"] == "succeeded", task
+                    assert task["response"]["status"] == 200, task
+                    ack = json.loads(task["response"]["body"])
+                    message_id = pending_messages.pop(task_id)
+                    assert ack["type"] == "ack" and ack["client_msg_id"] == message_id
+                    confirmed[message_id] = ack["seq"]
+
         while True:
             remaining = deadline - time.monotonic()
             assert remaining > 0, "business recovery exceeded 30 seconds"
-            before = time.monotonic()
-            response = user.session.post(BASE_URL + "/api/auth/login",
-                json={"username": user.username, "password": PASSWORD},
-                timeout=min(5, remaining))
-            login_seconds = time.monotonic() - before
-            assert login_seconds < 5
-            assert response.status_code in (200, 503), response.status_code
-            if response.status_code == 503:
-                assert response.json()["error"]["retryable"] is True
-            samples.append(("login", response.status_code == 200, login_seconds))
+            # Like the browser's disabled submit button, one client keeps at
+            # most one login in flight. A recovery probe must not create a
+            # burst against the existing per-account brute-force protection.
+            # Queued login bursts are verified separately, including 429.
+            if not pending_logins:
+                before = time.monotonic()
+                response = user.session.post(BASE_URL + "/api/auth/login",
+                    json={"username": user.username, "password": PASSWORD},
+                    timeout=min(5, remaining))
+                login_seconds = time.monotonic() - before
+                assert login_seconds < 5
+                assert response.status_code in (200, 202, 503), response.status_code
+                if response.status_code == 202:
+                    assert "Set-Cookie" not in response.headers
+                    pending_logins.add(response.json()["task_id"])
+                if response.status_code == 503:
+                    assert response.json()["error"]["retryable"] is True
+                samples.append(("login", response.status_code == 200, login_seconds))
 
             before = time.monotonic()
             message_id = writer.send_message(room_id, "Redis window probe")
@@ -392,17 +432,66 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
             if frame["type"] == "ack":
                 assert frame["room_id"] == room_id
                 confirmed[message_id] = frame["seq"]
+            elif frame["type"] == "queued":
+                pending_messages[frame["task_id"]] = message_id
             else:
                 assert frame["error"]["retryable"] is True
             samples.append(("message", frame["type"] == "ack", message_seconds))
 
+            collect_tasks()
             if (promoted.info("replication")["role"] == "master"
-                    and proxy_routes_to("redis-2")
-                    and response.status_code == 200 and frame["type"] == "ack"):
+                    and proxy_routes_to("redis-2")):
+                # 202 is only acceptance. Stop adding more probe work once the
+                # route is restored, then require every accepted outcome and
+                # a fresh direct login/ACK inside the ORIGINAL 30s deadline.
+                # Continuing to add work until an initial response is 200
+                # confuses a correctly draining bucket with a failed service.
+                # Our own terminal receipts do not mean the shared bucket is
+                # empty: the parallel after-phase still submits other users'
+                # login/history/WS/logout work. Synchronize that producer, then
+                # observe global direct state and both permits without adding
+                # business requests. Keep the ORIGINAL deadline and final
+                # HTTP-200/WS-ACK assertions; never accept 202 as recovery.
+                while True:
+                    assert time.monotonic() < deadline, "queued outcomes exceeded 30-second recovery"
+                    collect_tasks()
+                    if (not pending_messages and not pending_logins
+                            and redis.get(prefix + ":after-complete")):
+                        direct = True
+                        for instance in (1, 2):
+                            status_response = user.session.post(
+                                f"http://app-{instance}:8000/internal/buffer/status", json={},
+                                headers={"Authorization": "Bearer " + os.environ["BUFFER_CONTROL_TOKEN"]},
+                                timeout=min(5, max(.01, deadline-time.monotonic())))
+                            assert status_response.status_code == 200
+                            status = status_response.json()
+                            queue = status.get("queue", {})
+                            direct &= (status.get("queue_ready") is True
+                                and status.get("mode") != "paused"
+                                and queue.get("mode") == "direct"
+                                and queue.get("waiting") == 0 and queue.get("running") == 0)
+                        if direct:
+                            print("business window: parallel producer finished; shared bucket empty and both permits ready")
+                            break
+                    time.sleep(.05)
+                remaining=deadline-time.monotonic()
+                assert remaining > 0, "business recovery exceeded 30 seconds"
+                response=user.session.post(BASE_URL + "/api/auth/login",
+                    json={"username":user.username,"password":PASSWORD},timeout=min(5,remaining))
+                assert response.status_code == 200, response.status_code
+                before=time.monotonic()
+                message_id=writer.send_message(room_id,"Redis restored direct probe")
+                sent.add(message_id)
+                frame=send_result(message_id,min(before+5,deadline))
+                assert frame["type"] == "ack", frame
+                assert frame["room_id"] == room_id
+                confirmed[message_id]=frame["seq"]
                 recovered = time.monotonic() - started
                 assert recovered < 30
                 break
 
+        collect_tasks()
+        assert not pending_messages and not pending_logins, "queued outcomes exceeded 30-second recovery"
         # Every acknowledged message remains exactly once in paginated history.
         stored, cursor = {}, 0
         while True:
@@ -428,7 +517,8 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
                 f"retryable={len(rows) - ok} max={max(row[2] for row in rows):.3f}s")
         print(f"business window: recovered in {recovered:.3f}s; "
             f"confirmed={len(confirmed)} all present once; "
-            f"late post-ack retryable errors={len(late_errors)}")
+            f"late post-ack retryable errors={len(late_errors)}; "
+            f"explicit cross-Redis unknown={len(login_unknown)}")
     except ConnectionClosed as error:
         print("business window disconnected:",
             "received_close=", getattr(error.rcvd, "code", None),
@@ -438,6 +528,19 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
             flush=True)
         raise
     finally:
+        if pending_messages or pending_logins:
+            print(f"business window diagnostics: samples={len(samples)} "
+                f"confirmed={len(confirmed)} pending_messages={len(pending_messages)} "
+                f"pending_logins={len(pending_logins)}", flush=True)
+            # Safe protocol fields only; never print credentials/cookies/tasks.
+            import requests
+            for host in ("app-1", "app-2"):
+                try:
+                    status=requests.post(f"http://{host}:8000/internal/buffer/status",json={},
+                        headers={"Authorization":"Bearer "+os.environ["BUFFER_CONTROL_TOKEN"]},timeout=2)
+                    print(f"business window {host}: {status.text}",flush=True)
+                except requests.RequestException as error:
+                    print(f"business window {host}: {type(error).__name__}",flush=True)
         promoted.close()
         try:
             redis.delete(*(prefix + ":" + suffix for suffix in ("fixture-barrier", "ready", "begin", "started")))

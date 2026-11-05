@@ -1,3 +1,5 @@
+import { requestErrorText } from './request-errors.js'
+
 export const PROVIDERS = [
   { id: 'deepseek', name: 'DeepSeek' },
   { id: 'openai', name: 'OpenAI' },
@@ -13,7 +15,7 @@ export function providerName(id) {
 export function keyErrorText(error) {
   if (error?.code === 'api_key_invalid') return '服务商拒绝了这个 key，请检查后重试'
   if (error?.code === 'invalid_argument') return 'key 格式不正确'
-  return '暂时无法验证，请稍后再试'
+  return requestErrorText(error, '暂时无法验证，请稍后再试')
 }
 
 // Adds a request announced over the socket, unless it is already listed.

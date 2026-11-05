@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 
 import pytest
 
@@ -82,6 +83,38 @@ def test_deleted_room_leaves_no_cached_messages(
         socket.expect("ack", "error")
     time.sleep(0.3)
     assert not [r for r in rooms if redis.exists(f"room:{r}:recent")]
+
+
+def test_room_delete_replay_finishes_unconfirmed_cache_cleanup(make_user, make_room, make_socket, redis, db):
+    user = make_user()
+    room_id = make_room(user)
+    socket = make_socket(user)
+    assert socket.post(room_id, "cache cleanup recovery")["type"] == "ack"
+    key = f"room:{room_id}:recent"
+    deadline = time.monotonic() + 3
+    while not redis.exists(key):
+        assert time.monotonic() < deadline, "fixture message never reached hot cache"
+        time.sleep(.01)
+    request_id = uuid.uuid4().hex
+    headers = {"X-Request-Id": request_id}
+    redis.execute_command("ACL", "SETUSER", "default", "-del")
+    try:
+        response = user.post(f"/api/rooms/{room_id}/leave", json=CONFIRM_DELETE, headers=headers)
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "result_unknown"
+        assert response.json()["error"]["retryable"] is False
+        with db.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM rooms WHERE id=%s", (room_id,))
+            assert cursor.fetchone()[0] == 0
+        assert redis.exists(key), "cleanup fault was not exercised"
+    finally:
+        redis.execute_command("ACL", "SETUSER", "default", "+del")
+    # The same committed SQL receipt must re-check current room state and
+    # finish the pending cleanup, rather than just repeat a success response.
+    response = user.post(f"/api/rooms/{room_id}/leave", json=CONFIRM_DELETE, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["room_deleted"] is True
+    assert not redis.exists(key)
 
 
 @pytest.mark.skipif(

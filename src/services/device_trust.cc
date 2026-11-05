@@ -6,6 +6,7 @@
 #include <trantor/utils/Date.h>
 
 #include "common/errors.h"
+#include "buffering/guarded_redis.h"
 
 namespace chat
 {
@@ -78,7 +79,7 @@ std::vector<std::string> recentDays(int days)
     return result;
 }
 
-drogon::Task<bool> DeviceTrust::evaluate(int64_t userId, std::string device, std::string kind)
+drogon::Task<bool> DeviceTrust::evaluate(int64_t userId, std::string device, std::string kind, RequestContextPtr context)
 {
     if (device.empty())
     {
@@ -92,7 +93,7 @@ drogon::Task<bool> DeviceTrust::evaluate(int64_t userId, std::string device, std
     }
     try
     {
-        const auto result = co_await drogon::app().getRedisClient()->execCommandCoro(
+        const auto result = co_await guardedRedis(context)->execCommandCoro(
             command.c_str(), kEvaluate, trustedKey(userId).c_str(), kind.c_str(), device.c_str());
         co_return result.asInteger() == 1;
     }
@@ -103,7 +104,7 @@ drogon::Task<bool> DeviceTrust::evaluate(int64_t userId, std::string device, std
     }
 }
 
-drogon::Task<bool> DeviceTrust::isTrusted(int64_t userId, std::string device, std::string kind)
+drogon::Task<bool> DeviceTrust::isTrusted(int64_t userId, std::string device, std::string kind, RequestContextPtr context)
 {
     if (device.empty())
     {
@@ -111,7 +112,7 @@ drogon::Task<bool> DeviceTrust::isTrusted(int64_t userId, std::string device, st
     }
     try
     {
-        const auto current = co_await drogon::app().getRedisClient()->execCommandCoro(
+        const auto current = co_await guardedRedis(context)->execCommandCoro(
             "HGET %s %s", trustedKey(userId).c_str(), kind.c_str());
         co_return !current.isNil() && current.asString() == device;
     }
@@ -122,7 +123,7 @@ drogon::Task<bool> DeviceTrust::isTrusted(int64_t userId, std::string device, st
     }
 }
 
-drogon::Task<> DeviceTrust::countSend(std::string device)
+drogon::Task<> DeviceTrust::countSend(std::string device, RequestContextPtr context)
 {
     if (device.empty())
     {
@@ -131,7 +132,7 @@ drogon::Task<> DeviceTrust::countSend(std::string device)
     const auto key = "device_sends:" + device + ":" + recentDays(1)[0];
     try
     {
-        auto redis = drogon::app().getRedisClient();
+        auto redis = guardedRedis(context);
         co_await redis->execCommandCoro("INCR %s", key.c_str());
         co_await redis->execCommandCoro("EXPIRE %s %d", key.c_str(), 31 * 86400);
     }

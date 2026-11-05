@@ -31,11 +31,11 @@ restore_stack() {
 }
 trap restore_stack EXIT
 
-docker build --target unit -t cppaiserver-unit .
-docker build -f ai/Dockerfile --target test -t cppaiserver-ai-test .
+docker build --target unit -t "${UNIT_TEST_IMAGE:-cppaiserver-unit}" .
+docker build -f ai/Dockerfile --target test -t "${AI_UNIT_TEST_IMAGE:-cppaiserver-ai-test}" .
 docker compose --profile test build tests
 docker compose build sentinel-1
-python3 scripts/test_sentinel.py
+python3 scripts/test_sentinel.py --image "${SENTINEL_TEST_IMAGE:-cppaiserver-sentinel:7.4.5-self-guard}"
 
 # The suite registers, logs in and sends far more often than the limits allow,
 # so it runs with the Nginx and message limits lifted, a short login count

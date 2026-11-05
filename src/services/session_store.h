@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "buffering/request_context.h"
 #include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 #include <drogon/utils/coroutine.h>
@@ -19,6 +20,7 @@ struct Session
     // and its kind; empty for sessions from before devices were recorded.
     std::string device{};
     std::string deviceKind{};
+    RequestContextPtr request{}; // not serialized into a session
 };
 
 inline constexpr const char *kSessionCookie = "chat_session";
@@ -29,8 +31,8 @@ class SessionStore
 {
   public:
     static drogon::Task<std::string> create(const Session &session);
-    static drogon::Task<std::optional<Session>> find(const std::string &token);
-    static drogon::Task<> remove(const std::string &token);
+    static drogon::Task<std::optional<Session>> find(const std::string &token, RequestContextPtr context = {});
+    static drogon::Task<> remove(const std::string &token, RequestContextPtr context = {});
 
     // The Redis key of a token's session; connections are tracked by it.
     static std::string keyFor(const std::string &token);

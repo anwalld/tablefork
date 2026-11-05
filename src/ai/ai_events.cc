@@ -38,7 +38,7 @@ drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
 }
 }  // namespace
 
-drogon::Task<> reportMessage(StoredMessage message)
+drogon::Task<> reportMessage(StoredMessage message, RequestContextPtr context)
 {
     auto *gateway = aiGateway();
     if (!gateway)
@@ -80,6 +80,7 @@ drogon::Task<> reportMessage(StoredMessage message)
         saved->set_seq(message.seq);
         saved->set_content(json["content"].asString());
         saved->set_created_at_ms(json["created_at"].asInt64());
+        checkRequest(context);
         gateway->send(std::move(event));
     }
     catch (const std::exception &e)
@@ -88,7 +89,7 @@ drogon::Task<> reportMessage(StoredMessage message)
     }
 }
 
-drogon::Task<> reportMembersChanged(int64_t roomId)
+drogon::Task<> reportMembersChanged(int64_t roomId, RequestContextPtr context)
 {
     auto *gateway = aiGateway();
     if (!gateway)
@@ -99,6 +100,7 @@ drogon::Task<> reportMembersChanged(int64_t roomId)
     {
         ai::GatewayEvent event;
         co_await fillSnapshot(roomId, event.mutable_members_changed()->mutable_room());
+        checkRequest(context);
         gateway->send(std::move(event));
     }
     catch (const std::exception &e)

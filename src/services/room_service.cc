@@ -5,12 +5,13 @@
 #include <optional>
 
 #include "common/util.h"
+#include "buffering/request_memo.h"
 
 namespace chat
 {
 namespace
 {
-using TransactionPtr = std::shared_ptr<drogon::orm::Transaction>;
+using TransactionPtr = GuardedTransactionPtr;
 
 // Every membership change locks the room row first, so that "is this the last
 // human?" cannot race with a join or an invite.
@@ -171,7 +172,12 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
         throw ApiError::invalidArgument(
             "name must be 1 to 64 printable characters");
     }
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.create"))
+    {
+        co_return *prior;
+    }
     const auto room =
         co_await tx->execSqlCoro("INSERT INTO rooms (name) VALUES (?)", name);
     const auto roomId = static_cast<int64_t>(room.insertId());
@@ -180,7 +186,6 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
         "VALUES (?, ?, 'owner')",
         roomId,
         session.memberId);
-    co_await commit(std::move(tx));
 
     Json::Value body;
     body["id"] = Json::Int64(roomId);
@@ -188,6 +193,9 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
     body["member_count"] = 1;
     body["status"] = "joined";
     body["last_seq"] = 0;
+    co_await RequestMemo::finish(tx, session.request, actor, body);
+    checkRequest(session.request);
+    co_await commit(std::move(tx));
     co_return body;
 }
 
@@ -228,7 +236,12 @@ drogon::Task<> RoomService::invite(Session session,
                                    int64_t roomId,
                                    std::string username)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.invite"))
+    {
+        co_return;
+    }
     co_await lockRoom(tx, roomId);
     if (!co_await isMember(tx, roomId, session.memberId))
     {
@@ -258,12 +271,19 @@ drogon::Task<> RoomService::invite(Session session,
             userId,
             session.memberId);
     }
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
 }
 
 drogon::Task<> RoomService::join(Session session, int64_t roomId)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.join"))
+    {
+        co_return;
+    }
     co_await lockRoom(tx, roomId);
     if (!co_await isMember(tx, roomId, session.memberId))
     {
@@ -286,6 +306,8 @@ drogon::Task<> RoomService::join(Session session, int64_t roomId)
             roomId,
             session.memberId);
     }
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
 }
 
@@ -293,7 +315,12 @@ drogon::Task<bool> RoomService::leave(Session session,
                                       int64_t roomId,
                                       bool confirmDelete)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.leave"))
+    {
+        co_return prior->asBool();
+    }
     co_await lockRoom(tx, roomId);
     const auto role = co_await roleOf(tx, roomId, session.memberId);
     if (!role)
@@ -330,6 +357,8 @@ drogon::Task<bool> RoomService::leave(Session session,
             roomId,
             session.memberId);
     }
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(deleted));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
     co_return deleted;
 }
@@ -368,7 +397,12 @@ drogon::Task<int64_t> RoomService::transferOwner(Session session,
                                                  int64_t roomId,
                                                  std::string username)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.transferOwner"))
+    {
+        co_return prior->asInt64();
+    }
     co_await requireOwner(tx, roomId, session.memberId);
     const auto target = co_await humanMember(tx, roomId, username);
     if (target != session.memberId)
@@ -384,6 +418,8 @@ drogon::Task<int64_t> RoomService::transferOwner(Session session,
             roomId,
             target);
     }
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target)));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
     co_return target;
 }
@@ -393,7 +429,12 @@ drogon::Task<int64_t> RoomService::setAdmin(Session session,
                                             std::string username,
                                             bool admin)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.setAdmin"))
+    {
+        co_return prior->asInt64();
+    }
     co_await requireOwner(tx, roomId, session.memberId);
     const auto target = co_await humanMember(tx, roomId, username);
     if (target == session.memberId)
@@ -406,6 +447,8 @@ drogon::Task<int64_t> RoomService::setAdmin(Session session,
         std::string(admin ? "admin" : "member"),
         roomId,
         target);
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target)));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
     co_return target;
 }
@@ -418,17 +461,29 @@ bool RoomService::canManage(std::string_view actorRole, std::string_view targetR
 
 drogon::Task<int64_t> RoomService::kick(Session session, int64_t roomId, std::string username)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.kick"))
+    {
+        co_return prior->asInt64();
+    }
     co_await lockRoom(tx, roomId);
     const auto target = co_await managedHuman(tx, session, roomId, username, true);
     co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target.memberId)));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
     co_return target.memberId;
 }
 
 drogon::Task<int64_t> RoomService::ban(Session session, int64_t roomId, std::string username)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.ban"))
+    {
+        co_return prior->asInt64();
+    }
     co_await lockRoom(tx, roomId);
     const auto target = co_await managedHuman(tx, session, roomId, username, false);
     co_await tx->execSqlCoro(
@@ -439,13 +494,20 @@ drogon::Task<int64_t> RoomService::ban(Session session, int64_t roomId, std::str
     {
         co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
     }
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target.inRoom ? target.memberId : 0)));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
     co_return target.inRoom ? target.memberId : 0;
 }
 
 drogon::Task<> RoomService::unban(Session session, int64_t roomId, std::string username)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.unban"))
+    {
+        co_return;
+    }
     co_await lockRoom(tx, roomId);
     co_await requireManager(tx, roomId, session.memberId);
     const auto users = co_await tx->execSqlCoro("SELECT id FROM users WHERE username = ?", username);
@@ -454,12 +516,14 @@ drogon::Task<> RoomService::unban(Session session, int64_t roomId, std::string u
         throw ApiError(drogon::k404NotFound, "user_not_found", "user not found");
     }
     co_await tx->execSqlCoro("DELETE FROM room_bans WHERE room_id = ? AND user_id = ?", roomId, users[0]["id"].as<int64_t>());
+    co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
+    checkRequest(session.request);
     co_await commit(std::move(tx));
 }
 
 drogon::Task<Json::Value> RoomService::bans(Session session, int64_t roomId)
 {
-    auto tx = co_await drogon::app().getDbClient()->newTransactionCoro();
+    auto tx = co_await newGuardedTransaction(session.request);
     co_await requireManager(tx, roomId, session.memberId);
     const auto rows = co_await tx->execSqlCoro(
         "SELECT u.username, bu.username AS banned_by, UNIX_TIMESTAMP(b.created_at) * 1000 AS created_at_ms "

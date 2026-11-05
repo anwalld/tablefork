@@ -26,6 +26,13 @@ describe('authErrorText', () => {
   it('falls back for unknown errors', () => {
     expect(authErrorText(new Error('network'))).toBe('服务暂时不可用，请稍后再试')
   })
+
+  it('distinguishes a task that never started from an uncertain execution', () => {
+    expect(authErrorText(new ApiError('queue_timeout', 'x', 408))).toBe('排队超时，请重试')
+    expect(authErrorText(new ApiError('result_unknown', 'x', 503))).toBe(
+      '执行结果尚无法确认，请勿重复提交',
+    )
+  })
 })
 
 describe('waitSeconds', () => {

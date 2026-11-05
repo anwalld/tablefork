@@ -1,4 +1,5 @@
 import { ApiError } from './api.js'
+import { requestErrorText } from './request-errors.js'
 
 const messages = {
   invalid_credentials: '用户名或密码错误',
@@ -15,7 +16,7 @@ export function authErrorText(error) {
   if (error.code === 'weak_password') {
     return error.message.includes('username') ? '密码不能与用户名相同' : '这个密码太常见，请换一个'
   }
-  return messages[error.code] ?? '服务暂时不可用，请稍后再试'
+  return requestErrorText(error, messages[error.code] ?? '服务暂时不可用，请稍后再试')
 }
 
 // Whether the error asks the user to wait before trying again.

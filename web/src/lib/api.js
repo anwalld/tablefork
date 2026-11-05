@@ -1,3 +1,4 @@
+import { queueOwner, randomId, waitForTask, rotateQueueOwner } from './queued-task.js'
 export class ApiError extends Error {
   constructor(code, message, status, retryAfter = null, provider = null) {
     super(message)
@@ -11,21 +12,30 @@ export class ApiError extends Error {
 }
 
 async function request(method, path, body) {
+  const capability = queueOwner()
+  const requestId = randomId()
   const response = await fetch(path, {
     method,
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    headers: { 'X-Queue-Owner': capability, 'X-Request-Id': requestId, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
+  let data = await response.json().catch(() => ({}))
+  let status = response.status ?? (response.ok ? 200 : 503)
+  if (status === 202 && data.task_id) {
+    const result = await waitForTask(data.task_id, data.claim_token ?? capability)
+    data = result.body
+    status = result.status
+  }
+  if (status >= 400) {
     throw new ApiError(
       data.error?.code ?? 'unavailable',
       data.error?.message ?? '服务暂时不可用',
-      response.status,
+      status,
       data.error?.retry_after ?? null,
       data.error?.provider ?? null,
     )
   }
+  if (method === 'POST' && ['/api/auth/login', '/api/auth/logout'].includes(path)) rotateQueueOwner()
   return data
 }
 

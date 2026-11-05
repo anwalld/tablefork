@@ -5,6 +5,19 @@ x-app: &app
     target: runtime
   restart: unless-stopped
   environment:
+    BUFFER_REQUESTS_ENABLED: ${BUFFER_REQUESTS_ENABLED:-1}
+    BUFFER_CONTROL_TOKEN: ${BUFFER_CONTROL_TOKEN:?set it in .env}
+    BUFFER_PERMIT_MS: ${BUFFER_PERMIT_MS:-5000}
+    QUEUE_REDIS_HOST: queue-redis
+    QUEUE_REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?set it in .env}
+    QUEUE_ENCRYPTION_KEY: ${QUEUE_ENCRYPTION_KEY:?set it in .env}
+    QUEUE_MAX_WAITING: ${QUEUE_MAX_WAITING:-1024}
+    QUEUE_MAX_BODY_BYTES: ${QUEUE_MAX_BODY_BYTES:-16777216}
+    QUEUE_MAX_MEMORY_BYTES: ${QUEUE_MAX_MEMORY_BYTES:-67108864}
+    QUEUE_DRAIN_RATE: ${QUEUE_DRAIN_RATE:-50}
+    QUEUE_MAX_RUNNING: ${QUEUE_MAX_RUNNING:-8}
+    QUEUE_WAIT_MS: ${QUEUE_WAIT_MS:-45000}
+    QUEUE_RESULT_MS: ${QUEUE_RESULT_MS:-300000}
     MYSQL_HOST: mysql
     MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set it in .env, see .env.example}
     REDIS_HOST: ${REDIS_HOST:-redis-proxy}
@@ -28,6 +41,8 @@ x-app: &app
     migrate:
       condition: service_completed_successfully
     redis-proxy:
+      condition: service_healthy
+    queue-redis:
       condition: service_healthy
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
@@ -95,6 +110,23 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  queue-redis:
+    image: redis:7.4.5
+    command: ["sh", "-c", 'exec redis-server /queue-redis.conf --requirepass "$$REDISCLI_AUTH"']
+    restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: ${QUEUE_REDIS_IP:-172.28.0.11}
+    environment:
+      REDISCLI_AUTH: ${QUEUE_REDIS_PASSWORD:?set a distinct queue password in .env}
+    volumes:
+      - ./docker/queue-redis.conf:/queue-redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   redis-1:
     image: redis:7.4.5
     command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDISCLI_AUTH" --masterauth "$$REDISCLI_AUTH" --replica-announce-ip redis-1']
@@ -159,12 +191,24 @@ services:
       - sentinel-3-data:/data
 
   redis-proxy:
-    image: haproxy:3.0.5-alpine
+    image: cppaiserver-redis-proxy
+    build:
+      context: .
+      dockerfile: docker/redis-proxy.Dockerfile
     restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: ${REDIS_PROXY_IP:-172.28.0.10}
     entrypoint: ["sh", "/redis-proxy.sh"]
     environment:
+      BUFFER_REQUESTS_ENABLED: ${BUFFER_REQUESTS_ENABLED:-1}
+      BUFFER_CONTROL_TOKEN: ${BUFFER_CONTROL_TOKEN:?set it in .env}
+      BUFFER_PERMIT_MS: ${BUFFER_PERMIT_MS:-5000}
+      BUFFER_RENEW_SECONDS: ${BUFFER_RENEW_SECONDS:-1}
+      BUFFER_BACKENDS: ${BUFFER_BACKENDS:-app-1 app-2}
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set it in .env, see .env.example}
     volumes:
+      - ./scripts/request-buffer-coordinator.py:/usr/local/bin/request-buffer-coordinator.py:ro
       - ./docker/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - ./scripts/redis-proxy.sh:/redis-proxy.sh:ro
       - ./scripts/redis-master-watch.sh:/usr/local/bin/redis-master-watch.sh:ro
@@ -271,6 +315,8 @@ services:
     build:
       context: tests/integration
     environment:
+      BUFFER_CONTROL_TOKEN: ${BUFFER_CONTROL_TOKEN:?set it in .env}
+      BUFFER_REQUESTS_ENABLED: ${BUFFER_REQUESTS_ENABLED:-1}
       REDIS_HOST: ${REDIS_HOST:-redis-proxy}
       BASE_URL: https://gateway
       WS_URL: wss://gateway/ws
@@ -300,3 +346,4 @@ networks:
     ipam:
       config:
         - subnet: ${DOCKER_SUBNET:-172.28.0.0/16}
+          ip_range: ${DOCKER_DYNAMIC_RANGE:-172.28.128.0/17}

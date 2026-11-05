@@ -1,4 +1,5 @@
 #pragma once
+#include "buffering/request_context.h"
 
 #include <cstdint>
 #include <drogon/utils/coroutine.h>
@@ -26,11 +27,11 @@ class DeviceTrust
     // Makes the device trusted if its kind has none yet, or if it sent more
     // than 1.5 times the messages of the trusted one in the last 30 days.
     // Returns whether it is trusted afterwards.
-    static drogon::Task<bool> evaluate(int64_t userId, std::string device, std::string kind);
+    static drogon::Task<bool> evaluate(int64_t userId, std::string device, std::string kind, RequestContextPtr context = {});
 
-    static drogon::Task<bool> isTrusted(int64_t userId, std::string device, std::string kind);
+    static drogon::Task<bool> isTrusted(int64_t userId, std::string device, std::string kind, RequestContextPtr context = {});
 
     // Counts one message sent from the device. Failures are only logged.
-    static drogon::Task<> countSend(std::string device);
+    static drogon::Task<> countSend(std::string device, RequestContextPtr context = {});
 };
 }  // namespace chat

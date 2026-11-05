@@ -1,0 +1,2 @@
+#pragma once
+namespace chat { inline constexpr char kQueueScript[] = R"queue_lua(@QUEUE_LUA@)queue_lua"; }

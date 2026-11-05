@@ -1,4 +1,5 @@
 #pragma once
+#include "buffering/request_context.h"
 
 #include <cstdint>
 #include <drogon/utils/coroutine.h>
@@ -20,6 +21,6 @@ class MessageRateLimiter
   public:
     // Counts the message, or throws ApiError::rateLimited() when the user has
     // sent too many in this window.
-    static drogon::Task<> admit(int64_t userId);
+    static drogon::Task<> admit(int64_t userId, RequestContextPtr context = {});
 };
 }  // namespace chat

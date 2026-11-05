@@ -21,6 +21,9 @@ jobs:
             sed -i "s/^$name=.*/$name=$(openssl rand -hex 24)/" .env
           done
           sed -i "s|^AI_KEY_ENCRYPTION_KEY=.*|AI_KEY_ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
+          for name in QUEUE_REDIS_PASSWORD QUEUE_ENCRYPTION_KEY BUFFER_CONTROL_TOKEN; do
+            sed -i "s/^$name=.*/$name=$(openssl rand -hex 32)/" .env
+          done
 
       - name: Run unit, web and integration tests
         run: scripts/test.sh

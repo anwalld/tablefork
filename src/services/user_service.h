@@ -11,7 +11,7 @@ class UserService
 {
   public:
     static drogon::Task<> registerUser(std::string username,
-                                       std::string password);
+                                       std::string password, RequestContextPtr context = {});
     // Throws an ApiError that does not reveal whether the username exists.
     static drogon::Task<Session> authenticate(std::string username,
                                               std::string password);

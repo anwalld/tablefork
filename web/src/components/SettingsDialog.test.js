@@ -15,6 +15,19 @@ beforeEach(() => {
 })
 
 describe('API key settings', () => {
+  it('retains saved metadata when key deletion has an uncertain result', async () => {
+    api.keys.mockResolvedValue({ keys: [{ provider: 'deepseek', last4: '1234', updated_at: 1 }] })
+    api.deleteKey.mockRejectedValue({ code: 'result_unknown' })
+    const view = mount(SettingsDialog)
+    await flushPromises()
+    await view.get('button.danger').trigger('click')
+    await flushPromises()
+    expect(view.text()).toContain('执行结果尚无法确认，请勿重复提交')
+    expect(view.text()).toContain('…1234')
+    expect(view.emitted('changed')).toBeUndefined()
+    expect(api.deleteKey).toHaveBeenCalledTimes(1)
+    view.unmount()
+  })
   it('disables the row while saving and displays masked metadata after success', async () => {
     let finish
     api.storeKey.mockImplementation(() => new Promise(resolve => { finish = resolve }))

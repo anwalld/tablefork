@@ -57,7 +57,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == ["1", "2", "3", "4"]
+    assert [version for version, _ in rows] == ["1", "2", "3", "4", "5"]
     assert all(success for _, success in rows)
 
 
@@ -146,3 +146,42 @@ def test_ai_account_reads_what_it_needs(ai_db, query):
 def test_ai_account_is_denied_everything_else(ai_db, query):
     with ai_db.cursor() as cursor, pytest.raises(pymysql.err.OperationalError):
         cursor.execute(query)
+
+
+def test_committed_receipt_survives_resource_deletion(make_user, make_room, db):
+    import uuid
+    owner=make_user(); request_id=uuid.uuid4().hex
+    body={"name":"receipt-resource"}
+    first=owner.request("POST","/api/rooms",json=body,headers={"X-Request-Id":request_id})
+    assert first.status_code==201
+    room=first.json()["id"]
+    assert owner.post(f"/api/rooms/{room}/leave",json={"confirm_delete":True}).status_code==200
+    repeated=owner.request("POST","/api/rooms",json=body,headers={"X-Request-Id":request_id})
+    assert repeated.status_code==201 and repeated.json()==first.json()
+    with db.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE id=%s",(room,))
+        assert cursor.fetchone()[0]==0
+        cursor.execute("SELECT COUNT(*) FROM business_request_results WHERE request_id=%s",(request_id,))
+        assert cursor.fetchone()[0]==1
+
+
+def test_replaying_old_kick_does_not_remove_a_rejoined_subscription(make_user,make_room,make_socket):
+    import uuid
+    owner,guest=make_user(),make_user(); room=make_room(owner)
+    def join():
+        assert owner.post(f"/api/rooms/{room}/invites",json={"username":guest.username}).status_code==200
+        assert guest.post(f"/api/rooms/{room}/join").status_code==200
+    join()
+    original=make_socket(guest)
+    assert original.subscribe(room)["type"]=="subscribed"
+    request_id=uuid.uuid4().hex
+    path=f"/api/rooms/{room}/members/{guest.username}"
+    assert owner.request("DELETE",path,headers={"X-Request-Id":request_id}).status_code==200
+    assert original.expect("room_left")["reason"]=="kicked"
+    join()
+    rejoined=make_socket(guest)
+    assert rejoined.subscribe(room)["type"]=="subscribed"
+    assert owner.request("DELETE",path,headers={"X-Request-Id":request_id}).status_code==200
+    ack=rejoined.post(room,"still subscribed after historical receipt")
+    assert ack["type"]=="ack"
+    assert rejoined.expect("message")["seq"]==ack["seq"]

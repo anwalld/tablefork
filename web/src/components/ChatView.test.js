@@ -7,7 +7,7 @@ import { api } from '../lib/api.js'
 const state = vi.hoisted(() => ({ handlers: null, sent: [] }))
 vi.mock('../lib/api.js', () => ({
   ApiError: class extends Error {},
-  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn() },
+  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn(), createRoom: vi.fn() },
 }))
 vi.mock('../lib/chat-socket.js', () => ({ ChatSocket: class {
   constructor(handlers) { state.handlers = handlers; this.handlers = handlers; this.rooms = new Set() }
@@ -50,6 +50,17 @@ afterEach(() => {
   views.forEach(view => view.unmount())
   vi.clearAllTimers()
   vi.useRealTimers()
+})
+
+it('keeps the room draft and warns against repeating an uncertain creation', async () => {
+  const view = await chat()
+  api.createRoom.mockRejectedValue({ code: 'result_unknown' })
+  await view.get('input[aria-label="新房间名称"]').setValue('new-room')
+  await view.get('.sidebar > form').trigger('submit')
+  await flushPromises()
+  expect(view.get('.toast[role="status"]').text()).toBe('执行结果尚无法确认，请勿重复提交')
+  expect(view.get('input[aria-label="新房间名称"]').element.value).toBe('new-room')
+  expect(api.createRoom).toHaveBeenCalledTimes(1)
 })
 
 it.each([

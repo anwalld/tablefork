@@ -1,4 +1,5 @@
 #pragma once
+#include "buffering/request_context.h"
 
 #include <atomic>
 #include <cstdint>
@@ -40,10 +41,10 @@ class RoomHub
     void removeConnection(const drogon::WebSocketConnectionPtr &connection);
 
     // Stops delivery to a member who left, here and on other instances.
-    drogon::Task<> removeMember(int64_t roomId, int64_t memberId, std::string reason = "left");
+    drogon::Task<> removeMember(int64_t roomId, int64_t memberId, std::string reason = "left", RequestContextPtr context = {});
 
     // Returns false when Redis refused or could not be reached.
-    drogon::Task<bool> publish(int64_t roomId, const std::string &payload);
+    drogon::Task<bool> publish(int64_t roomId, const std::string &payload, RequestContextPtr context = {});
 
   private:
     struct Room

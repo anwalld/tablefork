@@ -1,4 +1,5 @@
 #pragma once
+#include "buffering/request_context.h"
 
 #include <drogon/HttpResponse.h>
 #include <drogon/utils/coroutine.h>
@@ -16,13 +17,13 @@ class DeviceStore
 {
   public:
     // The user name the token was issued to, if it is still valid.
-    static drogon::Task<std::optional<std::string>> owner(std::string token);
+    static drogon::Task<std::optional<std::string>> owner(std::string token, RequestContextPtr context = {});
 
     // A new token for username.
-    static drogon::Task<std::string> issue(std::string username);
+    static drogon::Task<std::string> issue(std::string username, RequestContextPtr context = {});
 
     // Restarts the token's lifetime.
-    static drogon::Task<> refresh(std::string token);
+    static drogon::Task<> refresh(std::string token, RequestContextPtr context = {});
 
     static void setCookie(const drogon::HttpResponsePtr &resp,
                           const std::string &token);

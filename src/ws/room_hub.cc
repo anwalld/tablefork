@@ -1,4 +1,6 @@
 #include "ws/room_hub.h"
+#include "buffering/guarded_redis.h"
+#include "buffering/request_buffer.h"
 
 #include <drogon/drogon.h>
 #include <json/json.h>
@@ -262,19 +264,19 @@ void RoomHub::eraseIfEmpty(int64_t roomId)
     }
 }
 
-drogon::Task<> RoomHub::removeMember(int64_t roomId, int64_t memberId, std::string reason)
+drogon::Task<> RoomHub::removeMember(int64_t roomId, int64_t memberId, std::string reason, RequestContextPtr context)
 {
     removeMemberLocally(roomId, memberId, reason);
     Json::Value event;
     event["type"] = "member_left";
     event["member_id"] = Json::Int64(memberId);
     event["reason"] = reason;
-    co_await publish(roomId, toJsonString(event));
+    co_await publish(roomId, toJsonString(event), context);
     // Preserve publication order: revoke first, then refresh the member list.
     Json::Value changed;
     changed["type"] = "members_changed";
     changed["room_id"] = Json::Int64(roomId);
-    co_await publish(roomId, toJsonString(changed));
+    co_await publish(roomId, toJsonString(changed), context);
 }
 
 void RoomHub::removeMemberLocally(int64_t roomId, int64_t memberId, const std::string &reason)
@@ -313,14 +315,20 @@ void RoomHub::removeMemberLocally(int64_t roomId, int64_t memberId, const std::s
     }
 }
 
-drogon::Task<bool> RoomHub::publish(int64_t roomId, const std::string &payload)
+drogon::Task<bool> RoomHub::publish(int64_t roomId, const std::string &payload, RequestContextPtr context)
 {
+    if (!context && RequestBuffer::instance().enabled())
+    {
+        try { context = RequestBuffer::instance().backgroundContext(); }
+        catch (const ApiError &) { co_return false; }
+    }
     try
     {
-        co_await drogon::app().getRedisClient()->execCommandCoro(
+        co_await guardedRedis(context)->execCommandCoro(
             "PUBLISH %s %s", channelFor(roomId).c_str(), payload.c_str());
         co_return true;
     }
+    catch (const ApiError &) { co_return false; }
     catch (const drogon::nosql::RedisException &e)
     {
         markRedisTrouble();

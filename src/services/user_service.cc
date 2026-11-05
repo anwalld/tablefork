@@ -4,6 +4,7 @@
 #include <drogon/drogon.h>
 
 #include "common/util.h"
+#include "buffering/request_memo.h"
 #include "services/password.h"
 #include "services/password_policy.h"
 
@@ -42,20 +43,19 @@ void validate(const std::string &username, const std::string &password)
 }  // namespace
 
 drogon::Task<> UserService::registerUser(std::string username,
-                                         std::string password)
+                                         std::string password, RequestContextPtr context)
 {
     validate(username, password);
     auto db = drogon::app().getDbClient();
-    const auto existing = co_await db->execSqlCoro(
-        "SELECT id FROM users WHERE username = ?", username);
-    if (!existing.empty())
-    {
-        throw usernameTaken();
-    }
     const auto hash = co_await hashPassword(password);
     try
     {
-        auto tx = co_await db->newTransactionCoro();
+        auto tx = co_await newGuardedTransaction(context);
+        const auto actor = context ? "anonymous:" + context->anonymousOwner : "legacy";
+        if (auto prior = co_await RequestMemo::begin(tx, context, actor, "auth.register"))
+            co_return;
+        const auto existing = co_await tx->execSqlCoro("SELECT id FROM users WHERE username = ?", username);
+        if (!existing.empty()) throw usernameTaken();
         const auto user = co_await tx->execSqlCoro(
             "INSERT INTO users (username, password_hash) VALUES (?, ?)",
             username,
@@ -65,6 +65,7 @@ drogon::Task<> UserService::registerUser(std::string username,
             "VALUES ('human', ?, ?)",
             static_cast<int64_t>(user.insertId()),
             username);
+        co_await RequestMemo::finish(tx, context, actor, Json::objectValue);
         co_await commit(std::move(tx));
     }
     catch (const drogon::orm::DrogonDbException &e)
