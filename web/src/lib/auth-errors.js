@@ -7,6 +7,8 @@ const messages = {
   // Only reached when a limit error carries no retry_after.
   too_many_attempts: '尝试次数过多，请稍后再试',
   rate_limited: '尝试次数过多，请稍后再试',
+  queue_timeout: '排队超时，请重试',
+  result_unknown: '执行结果尚无法确认，请勿重复提交',
 }
 
 // What the login or registration form shows for an error.
