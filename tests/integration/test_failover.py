@@ -401,19 +401,24 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
         while True:
             remaining = deadline - time.monotonic()
             assert remaining > 0, "business recovery exceeded 30 seconds"
-            before = time.monotonic()
-            response = user.session.post(BASE_URL + "/api/auth/login",
-                json={"username": user.username, "password": PASSWORD},
-                timeout=min(5, remaining))
-            login_seconds = time.monotonic() - before
-            assert login_seconds < 5
-            assert response.status_code in (200, 202, 503), response.status_code
-            if response.status_code == 202:
-                assert "Set-Cookie" not in response.headers
-                pending_logins.add(response.json()["task_id"])
-            if response.status_code == 503:
-                assert response.json()["error"]["retryable"] is True
-            samples.append(("login", response.status_code == 200, login_seconds))
+            # Like the browser's disabled submit button, one client keeps at
+            # most one login in flight. A recovery probe must not create a
+            # burst against the existing per-account brute-force protection.
+            # Queued login bursts are verified separately, including 429.
+            if not pending_logins:
+                before = time.monotonic()
+                response = user.session.post(BASE_URL + "/api/auth/login",
+                    json={"username": user.username, "password": PASSWORD},
+                    timeout=min(5, remaining))
+                login_seconds = time.monotonic() - before
+                assert login_seconds < 5
+                assert response.status_code in (200, 202, 503), response.status_code
+                if response.status_code == 202:
+                    assert "Set-Cookie" not in response.headers
+                    pending_logins.add(response.json()["task_id"])
+                if response.status_code == 503:
+                    assert response.json()["error"]["retryable"] is True
+                samples.append(("login", response.status_code == 200, login_seconds))
 
             before = time.monotonic()
             message_id = writer.send_message(room_id, "Redis window probe")

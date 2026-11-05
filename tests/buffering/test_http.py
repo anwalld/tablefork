@@ -140,6 +140,29 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(denied.json()['state'],'failed',denied.text)
         self.assertEqual(denied.json()['response']['status'],401,denied.text)
         print('PASS real HTTP: queued register/login, final double Cookie, cross-instance query, SQL replay/conflict, permission revocation')
+        # The shared bucket must not bypass the existing per-account login
+        # guard. With no device cookie and all passwords wrong, exactly the
+        # default five free attempts run; the rest retain explicit 429/backoff.
+        self.pause()
+        login_tasks=[]
+        for _ in range(12):
+            attempt=self.call(requests.Session(),'POST','/api/auth/login',
+                json={'username':name,'password':'wrong-password-probe'})
+            self.assertEqual(attempt.status_code,202,attempt.text)
+            login_tasks.append(attempt.json()['task_id'])
+        self.resume()
+        login_outcomes=[self.wait(task).json() for task in login_tasks]
+        self.assertTrue(all(task['state']=='failed' for task in login_outcomes),login_outcomes)
+        statuses=[task['response']['status'] for task in login_outcomes]
+        self.assertEqual(statuses.count(401),5,statuses)
+        self.assertEqual(statuses.count(429),7,statuses)
+        for task in login_outcomes:
+            if task['response']['status']==429:
+                error=json.loads(task['response']['body'])['error']
+                self.assertEqual(error['code'],'too_many_attempts')
+                self.assertTrue(error['retryable'])
+                self.assertGreater(error['retry_after'],0)
+        print('PASS queued login burst preserves default protection: five invalid credentials, seven explicit 429 with backoff',flush=True)
         if os.environ.get('BUFFER_EXTENDED_TESTS')!='1': return
         self.pause()
         expiring=self.call(session,'GET','/api/auth/me')
