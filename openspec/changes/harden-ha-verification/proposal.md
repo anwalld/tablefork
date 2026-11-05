@@ -25,8 +25,10 @@
 
 ## Impact
 
-- 测试：`tests/integration/conftest.py`、新的同步 TLS 辅助模块/回归、`test_failover.py`、`scripts/test.sh`、`scripts/test_sentinel.py`。
-- 部署：Sentinel 补丁镜像与 compose 引用、`scripts/redis-master-watch.sh` 的实际地址就绪判断；`.gitignore`。
+- 测试：`tests/integration/conftest.py`、新的同步 TLS 辅助模块/回归、`test_failover.py`、`scripts/test.sh`、`scripts/test_sentinel.py`、`tests/integration/test_gateway.py`。
+- 部署：Sentinel 补丁镜像与 compose 引用、`scripts/redis-master-watch.sh` 的实际地址就绪判断、Nginx业务503转发策略；`.gitignore`。
 - 文档：本 change 的 design、tasks、verification-report、handoff。
-- 不改变生产 TLS、Nginx、Redis 拓扑或认证/消息接口；不调用真实模型。Sentinel 使用基于原 7.4.5 的最小源码补丁镜像，过滤自身 ID；普通 Redis 节点仍用原镜像。
+- 不改变生产 TLS、Redis 拓扑或认证/消息接口；不调用真实模型。Sentinel 使用基于原 7.4.5 的最小源码补丁镜像，过滤自身 ID；普通 Redis 节点仍用原镜像。
 - 握手 401/403 正文后的 WebSocket 关闭帧问题继续保留，本轮不改 Dockerfile 或 Drogon。
+
+Nginx业务503误计为实例故障的问题已修复；WS断连根因未明，2026-11-05按用户要求停止调查，保留warning及原断言，不记作已修复。
