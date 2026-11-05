@@ -238,6 +238,9 @@ def test_redis_primary_failure_recovers_without_restarts(redis, make_socket):
             reader.ws.recv(timeout=2)
     assert ended.value.rcvd.code == 4401
     assert time.time() - started < 30
+    # The parallel window observer must not require direct traffic while this
+    # phase is still adding legitimate work to the same GLOBAL queue.
+    redis.set(f"test:redis-window:{os.environ['FAULT_TEST_ID']}:after-complete", "1", ex=120)
 
 
 @pytest.mark.skipif(PHASE != "rejoined", reason="Redis 故障阶段 rejoined")
@@ -443,9 +446,33 @@ def test_business_requests_during_redis_failover(make_user, make_room, make_sock
                 # a fresh direct login/ACK inside the ORIGINAL 30s deadline.
                 # Continuing to add work until an initial response is 200
                 # confuses a correctly draining bucket with a failed service.
-                while pending_messages or pending_logins:
+                # Our own terminal receipts do not mean the shared bucket is
+                # empty: the parallel after-phase still submits other users'
+                # login/history/WS/logout work. Synchronize that producer, then
+                # observe global direct state and both permits without adding
+                # business requests. Keep the ORIGINAL deadline and final
+                # HTTP-200/WS-ACK assertions; never accept 202 as recovery.
+                while True:
                     assert time.monotonic() < deadline, "queued outcomes exceeded 30-second recovery"
                     collect_tasks()
+                    if (not pending_messages and not pending_logins
+                            and redis.get(prefix + ":after-complete")):
+                        direct = True
+                        for instance in (1, 2):
+                            status_response = user.session.post(
+                                f"http://app-{instance}:8000/internal/buffer/status", json={},
+                                headers={"Authorization": "Bearer " + os.environ["BUFFER_CONTROL_TOKEN"]},
+                                timeout=min(5, max(.01, deadline-time.monotonic())))
+                            assert status_response.status_code == 200
+                            status = status_response.json()
+                            queue = status.get("queue", {})
+                            direct &= (status.get("queue_ready") is True
+                                and status.get("mode") != "paused"
+                                and queue.get("mode") == "direct"
+                                and queue.get("waiting") == 0 and queue.get("running") == 0)
+                        if direct:
+                            print("business window: parallel producer finished; shared bucket empty and both permits ready")
+                            break
                     time.sleep(.05)
                 remaining=deadline-time.monotonic()
                 assert remaining > 0, "business recovery exceeded 30 seconds"
