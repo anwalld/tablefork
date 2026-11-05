@@ -18,6 +18,11 @@ fi
 restore_stack() {
     result=$?
     trap - EXIT
+    if [[ "$result" != 0 ]]; then
+        # Preserve the failing containers before normal settings recreate them.
+        docker compose ps -a || true
+        docker compose logs --no-color --tail=200 app-1 app-2 ai web-1 web-2 gateway redis-proxy sentinel-1 sentinel-2 sentinel-3 || true
+    fi
     if ! docker compose up -d --wait; then
         echo "恢复正常配置失败" >&2
         [[ "$result" != 0 ]] || result=1

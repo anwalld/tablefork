@@ -1,5 +1,7 @@
 # Verification Report: harden-ha-verification
 
+> 2026-11-05 复查更新：最终交接提交 c6dd101 的 CI #41852645569 在 Redis 故障业务窗口发生 WebSocket 无关闭帧断连；此前实现提交 36239e3 的成功结果是历史证据，不能代替最新提交的验收。任务5.4已重新打开，正在保留现场并定位，当前尚未最终通过。
+
 日期：2026-11-04，Asia/Shanghai。按 openspec-verify-change 核对 status、apply context、proposal、design、tasks、实际源码与原始日志。
 
 ## Summary

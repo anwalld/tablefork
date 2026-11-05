@@ -62,3 +62,9 @@ https://github.com/openssl/openssl/issues/7967
 新增 Sentinel 补丁后的首轮完整回归在原 observe_controlled_switch 断言失败：HAProxy 先接受 fqdn，watcher 立即 shutdown sessions，但 DNS 约两秒后才更新 srv_addr；新连接可以在此期间重新落到旧主，实际地址切换后仍然存活。原日志和失败完整脚本保留。
 
 watcher 在固定受信任主机名解析后，要求 show servers state 同时匹配 fqdn 和实际 IP，才关闭全部旧会话。实际地址在 10 秒内未更新则退出，沿用既有异常退出触发容器重启的机制。保持一个后端、多数派查询、0.5 秒轮询、30 秒业务恢复及切换后 1 秒清连接断言；不改拓扑或通过延长测试时限掩盖失败。
+
+## D6. 最终 CI 复查与故障诊断（2026-11-05）
+
+c6dd101 的 CI #41852645569 在 Redis 故障窗口出现 WebSocket 无关闭帧断连，虽然36239e3完整CI曾成功，也不能当作当前最终验收通过。保留严格原断言并重新打开任务；恢复服务前保存故障容器日志和状态，窗口输出关闭码、底层接收异常类型与已完成采样，不输出凭据或cookie。
+
+首次三轮定向复现在第二轮发现独立的HTTP问题：两台app返回共享Redis故障的503，Nginx的proxy_next_upstream http_503把两台暂时摘除，后续请求变为裸502。改为仅对error/timeout/http_502尝试其他实例，保留应用503的JSON及retryable语义。新增ACL临时拒绝GET的真实网关回归，finally恢复权限；修复前失败，修复后连同TLS测试8项通过。此项不等同于已证明WS断连根因，继续定向复现。
