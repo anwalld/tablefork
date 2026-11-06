@@ -316,3 +316,10 @@ docker compose up -d --wait
 浏览器从实时推送和历史查询得到正式消息时都会清除对应草稿。流式片段携带尝试编号和累计文本，重试及重连后能替换旧草稿。`scripts/test.sh` 包含 Python 单元测试与生成中重启 AI 服务的故障测试。
 
 本机运行完整故障测试时应保持 Docker Desktop 的时钟连续。脚本在 macOS 测试进程存活期间用 `caffeinate` 防止空闲休眠；测试准备会等 Sentinel 退出 TILT，实际主节点故障后的恢复仍按 30 秒验收。暂停虚拟机或强制系统休眠仍会影响计时。
+
+## Contributors
+
+本项目由开发者与以下 AI 编程工具协作完成代码实现、评审、测试和文档整理：
+
+- **Codex**（OpenAI）
+- **Claude Code**（Anthropic）
