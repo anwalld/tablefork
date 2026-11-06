@@ -1,0 +1,30 @@
+{
+  "implementation_head": "b9883480ce5c5ca51c103f973065981740f9a264",
+  "pr": "https://github.com/anwalld/CppAiWebServer/pull/13",
+  "first_branch_ci": {
+    "id": 42154648877,
+    "headSha": "b9883480ce5c5ca51c103f973065981740f9a264",
+    "status": "completed",
+    "conclusion": "success",
+    "url": "https://github.com/anwalld/CppAiWebServer/actions/runs/42154648877",
+    "completedAt": "2026-11-06T03:33:02Z"
+  },
+  "final_branch_ci": "pending archive commit",
+  "merge_sha": null,
+  "main_ci": null,
+  "raw_log_local": "/private/tmp/cppai-pr13-ci-b988348.log",
+  "source_manifest_files": 236,
+  "archive": {
+    "path": "openspec/changes/archive/2026-11-06-add-chat-controls-and-observability",
+    "main_specs_synced_manually": true,
+    "capabilities": [
+      "ai-controls",
+      "ai-replies",
+      "message-search",
+      "request-observability",
+      "room-attention"
+    ],
+    "cli_skip_specs_reason": "main specs already synced and compared before archive",
+    "active_changes_after_archive": 0
+  }
+}

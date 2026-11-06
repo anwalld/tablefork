@@ -1,13 +1,13 @@
 # Verification Report: add-chat-controls-and-observability
 
-2026-11-06。本报告检查实际代码、规格、设计和测试证据。当前为提交前报告；最终源码完整回归与准确head CI待PR执行后补充。
+2026-11-06。本报告检查实际代码、规格、设计和测试证据。最终实现提交b988348的完整分支CI已成功；本次更新仅整理验证、规格和归档，归档后准确head CI及合并后main CI继续跟进。
 
 ## Summary
 
 | Dimension | Status |
 |---|---|
-| Completeness | 8/10任务，7项需求均有实现；4.1最终全量与4.2 PR/CI待完成 |
-| Correctness | 7/7需求与9/9场景映射到代码及测试；最终源码全量由分支CI确认 |
+| Completeness | 10/10任务完成，7项需求均有实现；准确实现head完整CI成功 |
+| Correctness | 7/7需求与9/9场景映射到代码及测试；最终实现源码完整分支CI成功 |
 | Coherence | 锁顺序、幂等、共享桶、迁移、Vue/Python结构与设计一致 |
 
 ## Requirement Implementation Mapping and Scenario Coverage
@@ -54,10 +54,22 @@
 
 ## Issues by Priority
 
-- CRITICAL：交付任务4.1最终源码完整CI、4.2提交/PR/准确head CI尚待完成；执行后更新报告，不提前archive。
-- WARNING：无已确认未修复的实现/规格偏离。最终源码全量验证仍待CI，不作为已通过。
+- CRITICAL：无。任务4.1/4.2已由准确head完整CI成功闭合。
+- WARNING：无已确认未修复的实现/规格偏离。
 - SUGGESTION：让他double check权限、控制状态持久化和迟到事件，以及日志热路径开销。本次两轮review来自同一执行者。
 
 ## Final Assessment
 
-实现与专项证据齐全；当前交付验证未闭合。PR准确head完整回归成功后再更新任务、同步规格和归档，归档提交还需最终head CI；合并后检查main准确merge SHA的CI。
+实现完整性、正确性及一致性检查通过，未跳过适用检查，可同步规格和归档。归档文档提交仍需最终head CI，合并后检查main准确merge SHA的CI；这些后续交付状态不能冒充已通过。
+
+## 最终实现源码的CI验收
+
+PR13：https://github.com/anwalld/CppAiWebServer/pull/13。准确实现head为b9883480ce5c5ca51c103f973065981740f9a264；CI 42154648877的status=completed、conclusion=success，完成于2026-11-06 11:33:02 Asia/Shanghai。运行：https://github.com/anwalld/CppAiWebServer/actions/runs/42154648877。原始完整日志/private/tmp/cppai-pr13-ci-b988348.log。236项运行/构建/测试输入哈希与该实现一致。
+
+本次最终源码实际结果：C++编译与ctest 100%通过，81项Python、15文件108项前端通过；常规集成261 passed/27 skipped；AI中断恢复、Sentinel保护及Redis/app/web故障各阶段通过。共享桶业务恢复13.163秒，58条确认消息全部恰好一次，确认后迟到retryable错误0；旧主重加入54样本零代理连接；最后严格9项通过；追加真实Redis队列18项及升级/SQL/HTTP4项成功。
+
+原本地260项与最终CI261项结果分别记录，避免混淆运行输入。未放宽5秒首次响应、30秒恢复、不断线、权限/幂等或旧主零连接断言。两轮review仍为同一执行者，要求让他double check。
+
+## 主规格同步检查
+
+四项新能力及ai-replies修改均已同步；逐条比较delta全部内容相符，ai-replies原Purpose与其余需求保持不变。全部13项主规格常规验证通过，本批5项主规格分别strict验证通过。全仓strict为12/13：既有realtime-messaging的Purpose不足50字符产生WARNING，该文件本批未改动且基线同样如此，不扩展本批范围去修改。
