@@ -1,6 +1,6 @@
 # 私人AI角色与房间人设
 
-状态：在`codex/private-ai-personas`完成实现及专项，最终故障verify未全通过，任务14/15。原服务未部署；准确证据与剩余项见[本次交接](../openspec/changes/add-private-ai-personas/handoff.md)。
+状态：已随[PR #15](https://github.com/anwalld/CppAiWebServer/pull/15)合并进main（合并提交`5f33431`），change已归档为[2026-11-07-add-private-ai-personas](../openspec/changes/archive/2026-11-07-add-private-ai-personas/)，主规格见`openspec/specs/ai-personas`。原服务尚未部署。
 
 ## 设计更改对照表
 

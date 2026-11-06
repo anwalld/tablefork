@@ -1,5 +1,7 @@
 # 当前实现与验证索引
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 更新时间：2026-11-04。完整当前交接见 [handoff.md](handoff.md)，OpenSpec 验证见 [verification-report.md](verification-report.md)，原始调查见 [handoff-history-2026-11-03.md](handoff-history-2026-11-03.md)。历史记录中的“5/31”“尚未修复”不再代表当前状态。
 
 - 当前 27/31。HTTPS/L4/L7、Redis Sentinel/HAProxy、双应用、房间踢人封禁、Vue 交互及回归已实现。

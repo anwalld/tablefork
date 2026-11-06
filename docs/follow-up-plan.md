@@ -1,3 +1,11 @@
+# 历史计划说明（2026-11-06更新）
+
+本文件保留PR #13原计划及历史探索原文，不再作为当前待办入口。PR #13已合并main `9dae3ff9cbe90966acc0944e51dbb4e6e1b7b853`，最终PR head CI及main CI 42186121155均成功。日志追踪、未读/人的@提醒、AI停止/暂停、搜索均已完成并归档；下文“尚未实现”、旧分支进度和旧调度为历史状态。
+
+当前任务统一见[后续计划](roadmap.md)，交付与CI见[当前交接](handoff.md)，本批证据见[归档交接](../openspec/changes/archive/2026-11-06-add-chat-controls-and-observability/handoff.md)。下一项为已确认设计的私有AI角色与房间人设；不按本历史文件重复开发或恢复旧任务。
+
+---
+
 # 本批执行入口
 
 本批代码位于codex/chat-controls-and-observability，OpenSpec为add-chat-controls-and-observability。基线main a1bfbc0已合并PR12，共享桶及离线重试直接复用。最新实现、测试和交付状态见该change的handoff.md及verification-report.md，历史待办状态按其更新。

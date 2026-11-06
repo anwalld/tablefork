@@ -1,5 +1,7 @@
 # Verification Report: harden-ha-verification
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 > 最新交付状态：用户随后明确要求合并并归档，PR #10已合并。归档后的状态见同目录 archive-completion.md；下文的“未合并或归档”是此前交接时的历史状态。
 
 日期：2026-11-05，Asia/Shanghai。按 openspec-verify-change 核对 status、apply context、proposal、design、tasks、实际源码与原始日志。

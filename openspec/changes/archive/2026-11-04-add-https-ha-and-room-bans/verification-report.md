@@ -1,5 +1,7 @@
 # Verification Report: add-https-ha-and-room-bans
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 验证日期：2026-11-04，Asia/Shanghai。按 `.agents/skills/openspec-verify-change/SKILL.md` 核对 status、apply context、proposal、四份 delta、design、tasks、当前源码及实测日志。以 CC 最新交接和用户确认的来源隔离、watcher 异常退出恢复决定为准。
 
 ## Summary

@@ -10,7 +10,7 @@ PUT /api/rooms/{id}/read接受整数seq。服务端按房间锁串行、单调�
 
 ## 搜索
 
-GET /api/rooms/{id}/search支持q（最多200字符的字面子串）、sender（成员ID）、from/to（Unix毫秒）、before（seq游标）及limit（1—100）。结果按seq倒序，next_before用于下一页。每次查询重新约束房间成员权限。结果定位复用messages接口的before/after分页。
+GET /api/rooms/{id}/search支持q（最多200字符的字面子串，%和_不作通配符，按数据库排序规则不区分大小写）、sender（成员ID）、from/to（Unix毫秒）、before（seq游标）及limit（1—100）。结果按seq倒序，next_before用于下一页。每次查询重新约束房间成员权限。结果定位复用messages接口的before/after分页。
 
 ## AI控制
 
@@ -20,7 +20,7 @@ GET /api/rooms/{id}/ai-state返回paused及当前generation列表，含payer_mem
 
 房间暂停会停止当前生成、保存其已输出快照并阻止新回复。恢复以当时房间last_seq为截止线，旧消息、冷场任务及接话链不会补发。历史仍用于后续新回复上下文。
 
-ai_generations保存每次生成的触发者、尝试、快照和结束状态。停止与消息提交都先锁房间，再处理生成记录。完整回复先保存时，停止保留该完整消息；停止先提交时，迟到Final改用已停止快照并沿用generation_id去重。部分消息的stopped状态在实时和历史中一致，停止消息结束接话链。空内容只结束草稿。
+ai_generations保存每次生成的触发者、尝试、快照和结束状态。停止与消息提交都先锁房间，再处理生成记录。完整回复先保存时，停止保留该完整消息；停止先提交时，迟到Final改用已停止快照并沿用generation_id去重。部分消息的stopped状态在实时和历史中一致，停止消息结束接话链。空内容或仅空白只结束草稿。AI已离开房间时，其停止快照无法保存，直接结束为saved并清除草稿，不阻塞该房间之后的停止或暂停。
 
 ## 运行与日志
 

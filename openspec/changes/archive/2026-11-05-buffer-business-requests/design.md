@@ -6,7 +6,7 @@
 
 ## Goals / Non-Goals
 
-**Goals:** 按docs/request-buffering-plan.md最新决定，所有既有业务入口暂停时转为共享异步任务；真实认证/持久化结果保持。
+**Goals:** 按docs/history/exploration-2026-11-05.md最新决定，所有既有业务入口暂停时转为共享异步任务；真实认证/持久化结果保持。
 **Non-Goals:** 不实现持久化任务队列、队列Redis主从、容器停止/断网、全局单一限速或后台真实模型费用测试。WS握手、订阅管理、控制和健康检查作为连接/控制通道单列，不序列化进程指针或连接回调。
 
 ## Decisions
