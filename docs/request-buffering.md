@@ -1,5 +1,7 @@
 # Redis 切换期间的业务暂存
 
+本文件维护稳定协议和运维约束；最近部署/验收见[当前交接](handoff.md)，后续需求见[后续计划](roadmap.md)。
+
 本功能启用后，HTTP业务和WS聊天发送使用同一共享暂存机制。正常状态不创建任务，暂停时入桶；恢复时新旧请求同桶，由每台后端按自己的节奏领取；全部等待及执行任务清空后原子切回直通。首次受理不是业务成功，聊天最终ACK仍以MySQL提交为依据。
 
 ## 部署与地址
@@ -8,7 +10,7 @@
 - 所有后端使用同一`QUEUE_ENCRYPTION_KEY`（64位十六进制）与`BUFFER_CONTROL_TOKEN`（至少32字节），分别生成，不能复用模型API key。部署秘密放`.env`，不写入Git、日志或交接。
 - Compose默认代理地址`172.28.0.10`、桶地址`172.28.0.11`，普通容器从`172.28.128.0/17`动态分配。两固定地址必须位于`DOCKER_SUBNET`内、动态池外。自定义网段时同时设置`DOCKER_DYNAMIC_RANGE`、`REDIS_PROXY_IP`和`QUEUE_REDIS_IP`。
 - 固定地址是恢复保证的一部分：Drogon当前仅启动时解析Redis主机名。动态地址曾导致代理重启后，旧地址被副本复用，出现PING成功但写入READONLY；不能只看PING就认为后端路由正确。
-- 原网络修改IPAM配置需要维护窗口重建网络，保留MySQL、业务Redis和Sentinel的数据卷。不要使用`down -v`迁移真实环境。本次只操作隔离测试项目，不自动部署或重建原项目。
+- 原网络修改IPAM配置需要维护窗口重建网络，保留MySQL、业务Redis和Sentinel的数据卷。不要使用`down -v`迁移真实环境。最近一次经用户授权的本机升级已按此方式完成，具体数据校验与结果见当前交接；这些步骤不代表可自动操作其他环境。
 - 前后端须同步更新。新协议引入202/queued，旧页面需要刷新；不把旧客户端误认成功当成兼容保证。
 
 ## 参数
@@ -89,6 +91,6 @@ docker compose exec redis-proxy sh /redis-proxy.sh switch
 
 ## 验证与交接
 
-当前change的`handoff.md`和`verification-report.md`记录准确提交/源码、日志、退出码、未测项目和归档结果。单元、组件、真实进程故障、Sentinel切换及完整严格回归分别报告，不能用旧PR的CI或一次数据库查询代替完整链路。
+[当前交接](handoff.md)记录准确部署与CI状态；[归档验证报告](../openspec/changes/archive/2026-11-05-buffer-business-requests/verification-report.md)保留对应提交的源码、日志、退出码、未测项目和归档结果。单元、组件、真实进程故障、Sentinel切换及完整严格回归分别报告，不能用旧PR的CI或一次数据库查询代替完整链路。
 
 测试专用Compose覆盖使用独立镜像/项目和控制路径故障代理；它不是生产组件。C++提交后等待钩子仅在`CHAT_BUILD_TESTS`构建，runtime不编译。只使用fake模型，不增加真实模型费用。

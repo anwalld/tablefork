@@ -10,7 +10,7 @@
 
 - 工作区：`/private/tmp/cppai-private-ai-personas`。
 - 分支：`codex/private-ai-personas`，基线为PR #13合并提交`9dae3ff9cbe90966acc0944e51dbb4e6e1b7b853`。
-- change：`openspec/changes/add-private-ai-personas`。完整需求、设计和任务在本目录；[接口和设计更改对照表](../../../docs/private-ai-personas.md)。
+- change：`openspec/changes/add-private-ai-personas`。完整需求、设计和任务在本目录；[接口和设计更改对照表](../../../../docs/private-ai-personas.md)。
 - 用户先要求只完成规划/数据结构后停下；该阶段已完成并汇报，[phase-1-report.md](phase-1-report.md)是历史记录。用户随后明确授权继续apply、verify和交接，旧“只做前两项”不是当前阻塞。
 - 没有提交、推送、创建PR、合并、归档或升级原服务。不要把当前HEAD的PR #13 CI当作本功能CI；功能代码仍为本工作区未提交改动。
 - 当前为最终交接版：功能实现和专项完成，任务14/15；最后故障复验失败，verify未全通过，不能归档/合并/部署。准确结果见“交付验收结果”和verification-report.md。

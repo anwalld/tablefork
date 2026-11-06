@@ -1,5 +1,7 @@
 # 给 Claude 的交接（2026-11-06，PR #12）
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 **让他double check。** 本文替换归档时的旧状态；change已归档，不再归档一次。
 
 ## 当前交付
@@ -7,7 +9,7 @@
 - 工作区 `/private/tmp/cppai-shared-request-buffering`，分支 `codex/shared-request-buffering`；[PR #12](https://github.com/anwalld/CppAiWebServer/pull/12)。原功能提交3f34eaa、归档ef55548，最新main 193a53d已通过d12013b整合；运行修正f6c3c1d、共享桶测试同步2979626；234个最终输入见`verified-integration-source.sha256`。旧`verified-source.sha256`只证明3f34eaa历史输入，不能用于最终源码。
 - 已实现全部28个HTTP业务路由和WS发送的共享异步暂存：正常直通、暂停入桶、恢复新旧同桶、排空直通；单独Redis纯内存，默认1024条/16MiB等待体、45秒未开始过期、每台50/s与8并发、结果5分钟。加密载荷/结果、领取认证、真实最终Cookie；queued不是持久化ACK。
 - MySQL同事务请求编号/唯一约束，聊天复用原消息ID；执行前重查认证、权限、限流；external副作用先记意向，不能证明时unknown，不盲重放。原脚本主动缺ACK取消，自动故障等待旧运行许可失效后健康实例先恢复。
-- 已同步request-buffering主规格并归档至本目录，12/12任务完成。保留完整探索副本`docs/request-buffering-plan.md`及协议/运维`docs/request-buffering.md`。
+- 已同步request-buffering主规格并归档至本目录，12/12任务完成。保留完整探索副本`docs/history/exploration-2026-11-05.md`及协议/运维`docs/request-buffering.md`。
 
 ## 本次 double check 修了什么
 

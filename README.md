@@ -1,6 +1,8 @@
-# CppAiServer
+# 基于 C++ 的分布式 AI 实时通信系统
 
-多人加多个 AI 的聊天室。房间里可以有多名用户和 DeepSeek、GPT、Claude、Gemini 四个预置 AI，AI 的调用费用由用户自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
+文档入口：[索引](docs/README.md) · [当前交接与部署](docs/handoff.md) · [后续计划](docs/roadmap.md)。
+
+面向多人群聊的实时通信系统，支持多实例接入、跨实例消息推送、故障恢复与多模型 AI 成员。房间里可以有多名用户和多个 AI。AI 角色由用户自己创建，底层可选 DeepSeek、GPT、Claude、Gemini 四类模型，每个房间单独设置人设；AI 的调用费用由触发回复的用户用自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
 
 ```mermaid
 flowchart TD
@@ -13,6 +15,8 @@ flowchart TD
     web2 --> app2
     app1 --> mysql[mysql]
     app2 --> mysql
+    app1 --> queue[queue-redis · 共享内存桶]
+    app2 --> queue
     app1 <-->|gRPC| ai[ai]
     app2 <-->|gRPC| ai
     ai --> providers[模型 API]
@@ -28,6 +32,7 @@ flowchart TD
 - `gateway` 是唯一发布 HTTP/HTTPS 端口的服务；它按源 IP 一致性哈希到 L7，并保留真实地址。本机单节点部署下 L4 仍是单点。
 - `web-1`、`web-2` 结束 TLS、提供静态文件并代理到两个应用。普通 HTTP 保留上游连接池；WebSocket 使用同样的两个应用、独立的新上游连接，以适配 Drogon 1.9.13 的首次请求升级限制。
 - `app-1`、`app-2` 共用镜像及 MySQL/Redis 状态，任一实例都能处理会话和房间请求。日志仅记方法、路径、状态，不记录 Cookie 或请求体。
+- `queue-redis`是独立单实例纯内存共享桶，供两个后端暂存切换期间的业务及结果；与业务Redis主从分开，重启可能丢任务，入桶不代表成功。
 - `ai` 通过 gRPC 与两个应用交互；`redis-proxy` 只路由到当前 Redis 主节点，3 个 Sentinel 自动选举。服务详见下面 Redis 章节。
 - `certs`、`migrate`、`db-users` 是一次性准备服务，分别生成本地证书、执行迁移、配置 AI 数据库账号；`tests` 只在 test profile 下运行。
 
@@ -43,7 +48,7 @@ flowchart TD
 cp .env.example .env
 ```
 
-共享暂存还需要独立的`QUEUE_REDIS_PASSWORD`、`QUEUE_ENCRYPTION_KEY`和`BUFFER_CONTROL_TOKEN`，各自用一次`openssl rand -hex 32`生成。密钥和控制令牌不能复用模型API key。代理和共享桶使用动态分配池之外的固定地址；自定义网段时须同时修改对应地址和动态池，详见[请求暂存与恢复](docs/request-buffering.md)。
+共享暂存还需要独立的`QUEUE_REDIS_PASSWORD`、`QUEUE_ENCRYPTION_KEY`和`BUFFER_CONTROL_TOKEN`，各自用一次`openssl rand -hex 32`生成，不能复用模型API key或其他密码；已有环境保留原`.env`的值，只补缺少的项。代理和共享桶使用动态分配池之外的固定地址；自定义网段时须同时修改对应地址和动态池，详见[请求暂存与恢复](docs/request-buffering.md)。
 
 ```bash
 docker compose up -d --build --wait
@@ -63,7 +68,7 @@ HTTP 入口 `http://localhost:8080` 仅做 301 跳转，不处理登录或 WebSo
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
-修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V4__add_message_reactions.sql`。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V7__add_message_reactions.sql`（当前最新为 V7）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
 
 查看迁移状态，或在修正后清理失败记录：
 
@@ -127,19 +132,23 @@ docker compose down -v
 | `AI_KEY_ENCRYPTION_KEY` | 加密用户 API key 的主密钥（AES-256-GCM），丢失后已保存的 key 全部无法解密 | 只有 ai |
 | `AI_MYSQL_PASSWORD` | AI 服务的 MySQL 账号 `ai` | db-users、ai |
 
-`ai` 账号由一次性的 `db-users` 服务创建，只能读写 `user_api_keys`（不能删除）、读 `ai_profiles` 和 `messages`，以及读 `members` 的 `id`、`type`、`display_name` 三列。root 密码只给 MySQL 和 `db-users`。
+`ai` 账号由一次性的 `db-users` 服务创建，只能读写 `user_api_keys` 和 `ai_generations`（不能删除）、读和新增 `room_ai_controls`、读 `ai_profiles`、`ai_model_types`、`room_ai_personas` 和 `messages`，以及读 `members` 的 `id`、`type`、`display_name` 三列。授权以 `scripts/db-users.sh` 为准。root 密码只给 MySQL 和 `db-users`。
 
 ### 填写 API key 和邀请 AI
 
 1. 登录后点左上角的“设置”，按服务商填写 API key。保存前会先向服务商验证，之后只显示末 4 位。
-2. 在房间里点“成员”，从“邀请 AI”里选择。群主和管理员邀请时 AI 直接加入；普通成员提交申请，由群主或管理员审批。邀请人必须有对应服务商的 key。
-3. 只有一个人的房间里，AI 回复你的每条消息，冷场时还会主动说话，第 3 条主动发言是告别；多人房间里，用 `@Claude` 这样的方式提及 AI 才会回复。完整规则见 `openspec/specs/ai-replies/spec.md`。
+2. 在房间里点“成员”，在“我的AI”里选底层模型、起名创建自己的角色。角色是私有的，只有创建者能邀请，邀请时填写本房间的人设，之后也只有创建者能修改。群主和管理员邀请自己的角色时直接加入；普通成员提交申请，由群主或管理员审批。邀请人必须有对应服务商的 key。创建者退出、被踢或被封禁时，他的 AI 一起离开房间，聊天记录保留。详见[私人AI角色与房间人设](docs/private-ai-personas.md)。
+3. 只有一个人的房间里，AI 回复你的每条消息，冷场时还会主动说话，第 3 条主动发言是告别；多人房间里，用 `@` 选择 AI 成员才会回复，重名时按选中的成员区分。完整规则见 `openspec/specs/ai-replies/spec.md`。
 
 DeepSeek 默认使用 `deepseek-flash`，并在调用时显式关闭思考模式，减少日常聊天的 token 开销。模型与定价以 [DeepSeek 官方价格表](https://api-docs.deepseek.com/quick_start/pricing/) 为准。
 
-预置 AI 的模型名和人设在 `ai/agents.toml`，改完运行 `docker compose up -d --build --wait ai` 重新构建并启动 AI 服务。模型名要按各家当时可用的型号填写。国内网络访问 OpenAI、Anthropic、Gemini 可能需要代理，适配器支持修改 `base_url`。
+四类底层模型的型号和旧版预置 AI 的默认人设在 `ai/agents.toml`（旧版预置 AI 只保留在已有房间里，不能再新邀请），改完运行 `docker compose up -d --build --wait ai` 重新构建并启动 AI 服务。模型名要按各家当时可用的型号填写。国内网络访问 OpenAI、Anthropic、Gemini 可能需要代理，适配器支持修改 `base_url`。
 
 行为参数（都在 `.env`）：`AI_CHAIN_P`（AI 之间接话的起始概率）、`AI_PROACTIVE_P1`（主动发言的概率）、`AI_IDLE_SECONDS`（冷场多久算冷场）、`AI_CONTEXT_MESSAGES`（带多少条历史）、`AI_GENERATION_TIMEOUT`（单次生成超时秒数）。
+
+### 未读、搜索和 AI 控制
+
+房间列表显示未读数和“有人@我”，房间内可按关键词、发送者和时间搜索。群主和管理员可以暂停或恢复房间里的 AI，触发者本人也可以停止自己引发的回复，已输出的部分会保存为带“已停止”标记的消息。接口、并发语义和结构化日志见[聊天阅读、搜索与 AI 控制](docs/chat-controls.md)。
 
 ### 不用真实 key 在本地试
 
@@ -181,10 +190,10 @@ scripts/test.sh
 
 ```bash
 export WORKER_COUNT=1 WORKER_QUEUE_LIMIT=1 SMALL_QUEUE=1
-docker compose up -d --wait app
+docker compose up -d --wait app-1 app-2
 docker compose --profile test run --rm tests pytest -q test_faults.py -k full_queue
 unset WORKER_COUNT WORKER_QUEUE_LIMIT SMALL_QUEUE
-docker compose up -d --wait app
+docker compose up -d --wait app-1 app-2
 ```
 
 ### 清理测试数据
@@ -217,7 +226,7 @@ docker compose --profile test run --rm tests python cleanup_test_data.py --apply
 
 2. 打开 Settings > Build, Execution, Deployment > Toolchains，新建 Docker 工具链，Image 选择 `cppaiserver-dev:latest`。
 3. 在 Settings > Build, Execution, Deployment > CMake 中把工具链切换为刚建的 Docker 工具链。
-4. 用 `docker compose up -d mysql redis-1 redis-2 sentinel-1 sentinel-2 sentinel-3 redis-proxy` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
+4. 用 `docker compose up -d mysql redis-1 redis-2 sentinel-1 sentinel-2 sentinel-3 redis-proxy queue-redis` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
 
 ## Redis 自动故障切换
 
@@ -246,7 +255,7 @@ docker compose exec redis-1 redis-cli INFO replication
 
 Redis 异步复制仍可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
 
-从旧版本升级时先 `docker compose down`（不加 `-v`），然后 `docker compose up -d --build --wait`。Redis 改为新的 `redis-1-data`、`redis-2-data` 卷，旧会话会失效，需要重新登录；MySQL 卷保留。确认新环境正常后，可用 `docker volume ls` 找到项目旧的 `redis-master-data`、`redis-replica-data` 卷，再按准确名称执行 `docker volume rm`，不要删除 MySQL 卷。
+共享桶版本升级前补齐独立密钥并备份现有配置、证书和数据。网络IPAM有变化时，需要维护窗口：先准备镜像，停止写入并备份，再用`docker compose down`（不加`-v`）重建网络，最后`docker compose up -d --wait`并核对迁移、数据、许可和业务结果。保留现有MySQL、Redis和Sentinel命名卷，不自动删除旧卷或承诺会话一定失效；[请求暂存专题](docs/request-buffering.md)说明固定地址约束，[当前交接](docs/handoff.md)记录最近部署结果及备份位置。
 
 `SENTINEL_DOWN_AFTER_MS` 控制判定下线的时长。测试脚本会在 AI 故障阶段之后执行 Redis 主节点停止、恢复验证、旧主节点重新加入，并用测试专用复制屏障保存跨阶段夹具；产品不承诺 Redis 写入强一致。
 
@@ -291,6 +300,7 @@ docker compose up -d --wait
 
 | 路径 | 内容 |
 |---|---|
+| `docs/` | 当前交接、后续计划、专题和历史索引 |
 | `src/` | C++ 后端 |
 | `web/` | Vue 前端 |
 | `ai/` | Python AI 服务：触发规则、模型适配器、key 加密 |

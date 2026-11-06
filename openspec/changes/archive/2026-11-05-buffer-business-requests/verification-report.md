@@ -1,5 +1,7 @@
 # 验证报告：buffer-business-requests / PR #12
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 本报告以最终源码清单和逐阶段日志区分验收，不将归档、脚本清理成功或旧CI当作业务通过。原实现3f34eaa、归档ef55548、main整合d12013b；运行修正提交`f6c3c1dfac2272e21c95e5eb683564dee45ecbeb`；最终测试同步提交`297962660a433f3543f7160695f9eb22e60baca2`。234个最终构建/运行/测试输入冻结在`verified-integration-source.sha256`；原`verified-source.sha256`只作历史证据。
 
 ## Completeness 与 Coherence

@@ -1,5 +1,7 @@
 # 给Claude的交接：fix-offline-message-retries
 
+> 历史阶段记录：保留本阶段的提交、失败与验收范围，不代表当前部署或剩余任务。最新结果见[当前交接](../../../../docs/handoff.md)，未完成需求见[后续计划](../../../../docs/roadmap.md)。历史操作限制不替代用户后续明确指令。
+
 2026-11-05。让他double check。
 
 ## 做了什么
@@ -14,7 +16,7 @@
 ## 未做与后续
 
 未执行真实浏览器/Redis故障端到端、远程CI或新PR；没有把PR#10的CI当本change结果。此处不是后端共享漏桶的完成证明。
-后端共享桶、MySQL业务事务去重、任务查询及控制运行许可将作为独立change推进；集中决定在原项目openspec/changes/harden-ha-verification/follow-up-request-buffering.md，以最新决定为准。
+后端共享桶、MySQL业务事务去重、任务查询及控制运行许可将作为独立change推进；集中决定在原项目docs/roadmap.md，以最新决定为准。
 让他double check：取消和迟到事件无重发、旧消息ID保留、限流与期限互不覆盖，浏览器真实恢复仍需单独验收。
 
 ## 归档结果
