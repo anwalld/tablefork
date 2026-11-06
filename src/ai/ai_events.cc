@@ -79,6 +79,8 @@ drogon::Task<> reportMessage(StoredMessage message, RequestContextPtr context)
         }
         saved->set_seq(message.seq);
         saved->set_content(json["content"].asString());
+        saved->set_stopped(json["stopped"].asBool());
+        saved->set_client_msg_id(json["client_msg_id"].asString());
         saved->set_created_at_ms(json["created_at"].asInt64());
         checkRequest(context);
         gateway->send(std::move(event));

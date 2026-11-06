@@ -2,12 +2,15 @@
 #include <drogon/drogon.h>
 #include "ai/ai_events.h"
 #include "common/util.h"
+#include "common/trace.h"
 #include "services/session_store.h"
 #include "services/message_service.h"
 #include "services/device_trust.h"
 namespace chat {
 drogon::Task<Json::Value> RequestBuffer::sendChat(Json::Value value,RequestContextPtr context)
 {
+    if (context && context->requestId.empty())
+        context->requestId = safeTraceId(std::to_string(value["room_id"].asInt64()) + ":" + value["client_msg_id"].asString());
     auto session=co_await SessionStore::find(value["token"].asString(),context);
     if(!session) throw ApiError::unauthenticated();
     session->request=context;

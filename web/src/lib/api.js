@@ -82,6 +82,12 @@ export const api = {
   storeKey: (provider, key) => request('PUT', `/api/keys/${provider}`, { key }),
   deleteKey: (provider) => request('DELETE', `/api/keys/${provider}`),
 
+  aiState: (roomId) => request('GET', `/api/rooms/${roomId}/ai-state`),
+  pauseAi: (roomId, paused) => request('PUT', `/api/rooms/${roomId}/ai-state`, { paused }),
+  stopAi: (roomId, id) => request('POST', `/api/rooms/${roomId}/ai-generations/${encodeURIComponent(id)}/stop`),
+  markRead: (roomId, seq) => request('PUT', `/api/rooms/${roomId}/read`, { seq }),
+  search: (roomId, params = {}) => request('GET', `/api/rooms/${roomId}/search?${new URLSearchParams({ limit: 50, ...params })}`),
+
   history: (roomId, params = {}) => {
     const query = new URLSearchParams({ limit: 100, ...params })
     return request('GET', `/api/rooms/${roomId}/messages?${query}`)

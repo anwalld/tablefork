@@ -39,6 +39,8 @@ class RoomState:
     # Bumped on every human message, so that replies to older messages no
     # longer continue a chain.
     epoch: int = 0
+    last_trigger_seq: int = 0
+    last_trigger_id: str = ""
 
     def ai(self, slug: str) -> RoomAi | None:
         return next((a for a in self.ais if a.slug == slug), None)
@@ -51,7 +53,7 @@ class RoomState:
             "proactive_mask": self.proactive_mask,
             "timer_due": self.timer_due, "pending": self.pending,
             "active": self.active, "deleted": self.deleted,
-            "epoch": self.epoch,
+            "epoch": self.epoch, "last_trigger_seq": self.last_trigger_seq, "last_trigger_id": self.last_trigger_id,
         }
 
     @classmethod
@@ -63,7 +65,8 @@ class RoomState:
             proactive_mask=data.get("proactive_mask", (1 << min(data.get("proactive_sent", 0), 3)) - 1),
             timer_due=data.get("timer_due"), pending=data.get("pending", []),
             active=data.get("active"), deleted=data.get("deleted", False),
-            epoch=data.get("epoch", 0),
+            epoch=data.get("epoch", 0), last_trigger_seq=data.get("last_trigger_seq", 0),
+            last_trigger_id=data.get("last_trigger_id", ""),
         )
 
 

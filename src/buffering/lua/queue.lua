@@ -105,7 +105,7 @@ if action=='admit' then
     end
     local seq=redis.call('HINCRBY',meta,'sequence',1)
     local t={id=a.id,owner=a.owner,binding=a.binding,payload=a.payload,body_bytes=a.body_bytes,
-             charge=charge,state='waiting',sequence=seq,deadline=now+cfg.wait_ms,recoverable=a.recoverable==true}
+             charge=charge,state='waiting',sequence=seq,enqueued_at=now,deadline=now+cfg.wait_ms,recoverable=a.recoverable==true}
     save(t)
     redis.call('ZADD',waiting,seq,a.id)
     redis.call('ZADD',deadlines,t.deadline,a.id)
@@ -145,9 +145,10 @@ if action=='claim' then
         else
             redis.call('ZREM',recovery,t.id)
             redis.call('ZREM',waiting,t.id); redis.call('ZREM',deadlines,t.id)
+            t.wait_ms=math.max(0,now-(t.enqueued_at or now))
             t.state,t.worker,t.claim,t.claim_deadline='running',a.worker,a.claim,now+cfg.claim_ms
             save(t); redis.call('ZADD',running,t.claim_deadline,t.id)
-            return response({id=t.id,payload=t.payload,claim=t.claim})
+            return response({id=t.id,payload=t.payload,claim=t.claim,wait_ms=t.wait_ms})
         end
     end
     return response({empty=true})

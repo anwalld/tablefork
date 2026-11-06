@@ -1,6 +1,7 @@
 #pragma once
 #include <drogon/drogon.h>
 #include "buffering/request_context.h"
+#include "common/trace.h"
 namespace chat {
 class GuardedRedis
 {
@@ -9,10 +10,13 @@ class GuardedRedis
       : client_(drogon::app().getRedisClient()),context_(std::move(context)) {}
   GuardedRedis *operator->() { return this; }
   template<typename... Args>
-  auto execCommandCoro(const std::string &command,Args &&...args)
+  drogon::Task<drogon::nosql::RedisResult> execCommandCoro(std::string command, Args... args)
   {
       checkRequest(context_);
-      return client_->execCommandCoro(command,std::forward<Args>(args)...);
+      TraceSpan trace(context_ ? context_->requestId : "", "business", "redis");
+      auto result = co_await client_->execCommandCoro(command, args...);
+      trace.finish();
+      co_return result;
   }
  private:
   drogon::nosql::RedisClientPtr client_;

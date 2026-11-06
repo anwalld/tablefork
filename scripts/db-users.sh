@@ -16,6 +16,8 @@ mysql --defaults-extra-file="$defaults" <<SQL
 CREATE USER IF NOT EXISTS 'ai'@'%' IDENTIFIED BY '$password';
 ALTER USER 'ai'@'%' IDENTIFIED BY '$password';
 GRANT SELECT, INSERT, UPDATE ON chat.user_api_keys TO 'ai'@'%';
+GRANT SELECT, INSERT ON chat.room_ai_controls TO 'ai'@'%';
+GRANT SELECT, INSERT, UPDATE ON chat.ai_generations TO 'ai'@'%';
 GRANT SELECT ON chat.ai_profiles TO 'ai'@'%';
 GRANT SELECT ON chat.messages TO 'ai'@'%';
 GRANT SELECT (id, type, display_name) ON chat.members TO 'ai'@'%';

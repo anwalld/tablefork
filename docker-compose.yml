@@ -1,3 +1,9 @@
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILES:-3}"
+
 x-app: &app
   image: cppaiserver-app
   build:
@@ -53,6 +59,7 @@ x-app: &app
 
 services:
   certs:
+    logging: *bounded-logging
     build:
       context: .
       dockerfile: docker/certs.Dockerfile
@@ -61,6 +68,7 @@ services:
       - ./data/certs:/certs
 
   mysql:
+    logging: *bounded-logging
     image: mysql:8.4.6
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set it in .env, see .env.example}
@@ -77,6 +85,7 @@ services:
       retries: 40
 
   migrate:
+    logging: *bounded-logging
     image: flyway/flyway:11.14.1
     command: ["migrate"]
     environment:
@@ -98,6 +107,7 @@ services:
   # Creates the AI service's restricted MySQL account. The only service besides
   # MySQL that gets the root password.
   db-users:
+    logging: *bounded-logging
     image: mysql:8.4.6
     entrypoint: ["bash", "/db-users.sh"]
     environment:
@@ -111,6 +121,7 @@ services:
         condition: service_completed_successfully
 
   queue-redis:
+    logging: *bounded-logging
     image: redis:7.4.5
     command: ["sh", "-c", 'exec redis-server /queue-redis.conf --requirepass "$$REDISCLI_AUTH"']
     restart: unless-stopped
@@ -128,6 +139,7 @@ services:
       retries: 20
 
   redis-1:
+    logging: *bounded-logging
     image: redis:7.4.5
     command: ["sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDISCLI_AUTH" --masterauth "$$REDISCLI_AUTH" --replica-announce-ip redis-1']
     environment:
@@ -141,6 +153,7 @@ services:
       retries: 20
 
   redis-2:
+    logging: *bounded-logging
     image: redis:7.4.5
     command: ["sh", "-c", 'exec redis-server --appendonly yes --replicaof redis-1 6379 --requirepass "$$REDISCLI_AUTH" --masterauth "$$REDISCLI_AUTH" --replica-announce-ip redis-2']
     environment:
@@ -157,6 +170,7 @@ services:
       retries: 20
 
   sentinel-1: &sentinel
+    logging: *bounded-logging
     image: cppaiserver-sentinel:7.4.5-self-guard
     build: docker/sentinel
     command: ["sh", "/sentinel.sh"]
@@ -179,18 +193,21 @@ services:
       retries: 20
 
   sentinel-2:
+    logging: *bounded-logging
     <<: *sentinel
     volumes:
       - ./scripts/sentinel.sh:/sentinel.sh:ro
       - sentinel-2-data:/data
 
   sentinel-3:
+    logging: *bounded-logging
     <<: *sentinel
     volumes:
       - ./scripts/sentinel.sh:/sentinel.sh:ro
       - sentinel-3-data:/data
 
   redis-proxy:
+    logging: *bounded-logging
     image: cppaiserver-redis-proxy
     build:
       context: .
@@ -224,14 +241,17 @@ services:
       retries: 30
 
   app-1:
+    logging: *bounded-logging
     <<: *app
 
   app-2:
+    logging: *bounded-logging
     <<: *app
 
   # The AI service. Holds the key encryption key; reachable only on the
   # internal network.
   ai:
+    logging: *bounded-logging
     build:
       context: .
       dockerfile: ai/Dockerfile
@@ -261,6 +281,7 @@ services:
         condition: service_healthy
 
   web-1: &web
+    logging: *bounded-logging
     image: cppaiserver-web
     build:
       context: .
@@ -288,9 +309,11 @@ services:
       retries: 20
 
   web-2:
+    logging: *bounded-logging
     <<: *web
 
   gateway:
+    logging: *bounded-logging
     build:
       context: .
       dockerfile: docker/gateway.Dockerfile
@@ -311,6 +334,7 @@ services:
       retries: 20
 
   tests:
+    logging: *bounded-logging
     profiles: ["test"]
     build:
       context: tests/integration

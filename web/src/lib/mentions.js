@@ -7,6 +7,12 @@ export function mentionQuery(text, caret = text.length) {
   return match ? match[2] : null
 }
 
+export function matchingMembers(members, query) {
+  if (query === null) return []
+  const lowered = query.toLowerCase()
+  return members.filter((m) => m.name.toLowerCase().startsWith(lowered))
+}
+
 export function matchingAis(members, query) {
   if (query === null) return []
   const lowered = query.toLowerCase()

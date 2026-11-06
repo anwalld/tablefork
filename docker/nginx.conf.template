@@ -1,4 +1,4 @@
-log_format upstream '$remote_addr "$request" $status upstream=$upstream_addr upstream_status=$upstream_status';
+log_format upstream escape=json '{"event":"gateway_request","request_id":"$upstream_http_x_request_id","instance":"$hostname","method":"$request_method","status":$status,"elapsed_s":$request_time,"upstream_connect_s":"$upstream_connect_time","upstream_response_s":"$upstream_response_time","upstream":"$upstream_addr"}';
 access_log /dev/stdout upstream;
 map $http_upgrade $connection_upgrade {
     default upgrade;

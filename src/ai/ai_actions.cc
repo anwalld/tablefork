@@ -47,6 +47,9 @@ Json::Value noticeEvent(int64_t memberId,
 
 drogon::Task<> onChunk(ai::Chunk chunk)
 {
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT stopped FROM ai_generations WHERE generation_id = ? AND room_id = ?", chunk.generation_id(), chunk.room_id());
+    if (!rows.empty() && rows[0]["stopped"].as<bool>()) co_return;
     Json::Value event;
     event["type"] = "ai_chunk";
     event["generation_id"] = chunk.generation_id();
