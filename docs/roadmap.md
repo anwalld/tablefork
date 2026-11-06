@@ -127,7 +127,7 @@ PR #13已完成搜索、@定位、未读、AI控制与共享桶/日志的整合�
 ## 8. 以后再做（2026-11-07整理，均需用户单独授权）
 
 1. **部署到原服务**：原服务最近部署为PR #12。按PR #12的做法：受保护备份（.env、一致性SQL、证书、Redis/Sentinel），构建镜像，停写入后执行V6、V7迁移并逐表核对计数，`db-users`应用新授权，起服务后做冒烟验收（注册登录、消息、私人AI创建和邀请用fake或不调用付费模型）；保留旧镜像便于回退，不运行`down -v`。
-2. **Redis回调线程加固**：Drogon 1.9.13在hiredis回调里内联恢复业务协程，后续业务会在Redis IO线程上继续运行并可能重入发命令，是堆损坏的头号嫌疑。方案是`GuardedRedis`等每次await后切回应用线程；影响所有Redis路径，需单独OpenSpec、压测和完整故障回归。
+2. **Redis断连补丁的后续观察**：2026-11-07 main CI（`712572a`）在Redis故障切换窗口出现后端`It is forbidden to run loop on threads other than event-loop thread`后`exit(1)`。根因是Drogon 1.9.13跨线程排队发送Redis命令时只持有连接裸指针，连接断开后hiredis已释放上下文，排队发送随后访问已释放内存；`docker/drogon-redis-disconnect.patch`已修复。之后若升级Drogon，先确认上游是否已修，再决定是否保留补丁。Drogon在hiredis回调里内联恢复业务协程这一点仍在，目前没有证据表明它会导致问题，暂不改。
 3. **停止控制的数据库压力**：每个生成中的回复，Python每100ms查一次停止状态，C++每个片段也查一次。可改为发布控制事件（Redis Pub/Sub或gRPC下行）并降低轮询频率，需保持跨重启停止语义。
 4. **生成失败的独立状态**：`ai_generations`失败时复用`saved`并清空内容，事后无法区分失败与已保存；`status`和`stopped`字段也有重复。新增迁移增加`failed`状态并统一停止标记。
 5. **搜索性能**：搜索按房间`LOCATE`逐条扫描，消息量大时变慢；可评估ngram全文索引，保持字面子串和不区分大小写语义。

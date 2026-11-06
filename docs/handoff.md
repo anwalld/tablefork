@@ -18,7 +18,7 @@
 - 同批文档整理：本文件、[文档索引](README.md)、[后续计划](roadmap.md)和`docs/history/`随修复文档PR进入版本控制，并修正了AI账号授权、迁移示例、README中的旧版邀请流程等过时内容。
 - **未部署**：原服务`https://localhost:8443`最近一次有证据的部署仍是PR #12的`a1bfbc0`，PR #13、#15均未上线。部署需要用户单独授权，步骤见[后续计划](roadmap.md)第8节。
 
-**让他double check**：Codex调试时出现过一次堆损坏（`malloc(): unsorted double linked list corrupted`，Redis故障切换窗口），根因未查明，后续ASAN和发布版多轮故障切换均未复现。可疑点及加固方案见调试记录和roadmap第8节。
+**让他double check**：Codex调试时的堆损坏和2026-11-07 main CI `712572a`的后端退出，已定位为Drogon 1.9.13 Redis连接断开时的释放后使用，由`docker/drogon-redis-disconnect.patch`修复。压力探针在补丁版中60秒内拦下3241次发往已断开连接的发送；未打补丁的发布版碰巧没崩，所以没有拿到补丁前必现、补丁后消失的直接对比，以修复PR的完整CI和后续运行为准。
 
 ## PR #12既有部署与验证记录
 
