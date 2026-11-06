@@ -18,6 +18,7 @@ class RoomService
     static drogon::Task<Json::Value> list(Session session,
                                           int64_t limit,
                                           int64_t offset);
+    static drogon::Task<> markRead(Session session, int64_t roomId, int64_t seq);
     static drogon::Task<> invite(Session session,
                                  int64_t roomId,
                                  std::string username);

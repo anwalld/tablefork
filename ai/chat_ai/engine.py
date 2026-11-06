@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import copy
 import json
+import hashlib
+import re
 import logging
 import random
 import time
@@ -11,6 +13,7 @@ import uuid
 from typing import Awaitable, Callable
 
 from . import rules
+from .controls import GenerationControls
 from .context import recent_messages, to_chat
 from .gen import ai_pb2
 from .providers.base import ChatMessage, KeyRejected
@@ -41,6 +44,7 @@ return 1
 class Engine:
     def __init__(self, settings, cache, pool, keys, agents, providers, send,
                  rng=None, clock=time.time):
+        self.controls = GenerationControls(pool) if pool is not None else None
         self.settings = settings
         self.cache = cache
         self.pool = pool
@@ -79,6 +83,7 @@ class Engine:
             else:
                 available = await self.keys.providers(value.sender.user_id)
 
+        paused, cutoff = await self.controls.room(room_id) if self.controls else (False, 0)
         decision = rules.Decision()
         async with self._room(room_id, seen) as state:
             if state is not None and not state.deleted:
@@ -90,10 +95,20 @@ class Engine:
                     state.target = None
                 elif body == 'generation_rejected':
                     if state.active and state.active['id'] == value.generation_id:
+                        if self.controls:
+                            await self.controls.failed(state.active)
                         self._finish_failed(state, state.active)
                 elif body == 'members_changed':
                     _apply_snapshot(state, value.room)
+                elif body == 'message_saved' and not value.sender.is_ai and (paused or (cutoff and value.seq <= cutoff)):
+                    state.pending.clear()
+                    state.timer_due = None
+                    state.target = None
                 elif not value.sender.is_ai:
+                    state.last_trigger_seq = value.seq
+                    raw_trace = f"{room_id}:{value.client_msg_id or value.seq}"
+                    state.last_trigger_id = (raw_trace if re.fullmatch(r'[a-zA-Z0-9:_-]{1,128}', raw_trace)
+                                             else hashlib.sha256(raw_trace.encode()).hexdigest())
                     _apply_snapshot(state, value.room)
                     payer = rules.Human(value.sender.member_id, value.sender.user_id)
                     decision = rules.on_human_message(state, payer, value.content, available, self.rng)
@@ -106,7 +121,9 @@ class Engine:
                     job = state.active
                     if job and job['id'] == value.generation_id:
                         state.active = None
-                        if job['epoch'] == state.epoch:
+                        if (job['epoch'] == state.epoch and not paused and
+                            (not cutoff or job.get('trigger_seq', 0) > cutoff) and
+                            not value.stopped and not job.get('stopped')):
                             if job['kind'] in ('proactive', 'goodbye'):
                                 rules.on_proactive_saved(state, job['epoch'], job['slot'])
                                 state.timer_due = self._next_timer(state)
@@ -132,6 +149,7 @@ class Engine:
                 'kind': request.kind, 'hop': request.hop, 'epoch': state.epoch,
                 'slot': state.proactive_mask.bit_count(), 'attempt': 0,
                 'member_id': state.ai(request.slug).member_id, 'trigger': trigger,
+                'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
                 'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
             })
 
@@ -142,6 +160,14 @@ class Engine:
             # Fetching keys may take time. Recheck the timer under the same
             # room lock used by human messages before accepting this firing.
             state = await self._load(room_id)
+            if self.controls:
+                paused, cutoff = await self.controls.room(room_id)
+                if paused or (cutoff and state.last_trigger_seq <= cutoff):
+                    async with self._room(room_id) as current:
+                        current.timer_due = None
+                        current.target = None
+                        current.pending.clear()
+                    continue
             human = state.humans[0] if len(state.humans) == 1 else None
             available = await self.keys.providers(human.user_id) if human else set()
             decision = rules.Decision()
@@ -181,9 +207,27 @@ class Engine:
     async def _claim(self, room_id):
         job = None
         exhausted = None
+        paused, cutoff = await self.controls.room(room_id) if self.controls else (False, 0)
+        durable_id = None
+        durable = None
+        if self.controls:
+            observed = await self._load(room_id)
+            if observed.active:
+                durable_id = observed.active['id']
+                durable = await self.controls.generation(durable_id)
         async with self._room(room_id) as state:
             if state.deleted:
                 return None
+            if paused or cutoff:
+                state.pending = [item for item in state.pending if not paused and item.get('trigger_seq', 0) > cutoff]
+                if state.active and state.active['status'] != 'final' and (paused or state.active.get('trigger_seq', 0) <= cutoff):
+                    # A running owner will observe the SQL stopped snapshot.
+                    # Keep it until then, or recover it after its lease expires.
+                    if state.active.get('lease_until', 0) > self.clock():
+                        return None
+                if paused:
+                    state.timer_due = None
+                    state.target = None
             if state.active is None:
                 # Messages queued before generation starts share one reply
                 # per AI. The latest trigger supplies the payer and epoch.
@@ -196,6 +240,12 @@ class Engine:
                 state.active = pending.pop(0) if pending else None
                 state.pending = pending
             active = state.active
+            if active and active['id'] == durable_id and durable and durable[0] in ('final', 'stopped', 'saved'):
+                if durable[1].strip():
+                    active.update(status='final', content=durable[1], stopped=bool(durable[2]))
+                else:
+                    state.active = None
+                    return None
             if active is None or active.get('retry_at', 0) > self.clock():
                 return None
             if active['status'] == 'final':
@@ -204,6 +254,8 @@ class Engine:
             elif active['lease_until'] <= self.clock():
                 if active['attempt'] >= self.settings.generation_max_attempts:
                     exhausted = copy.deepcopy(active)
+                    if self.controls:
+                        await self.controls.failed(active)
                     self._finish_failed(state, active)
                 else:
                     # The claim is the start boundary. A human message that
@@ -218,31 +270,61 @@ class Engine:
         return job
 
     async def _run_room(self, room_id):
+        started = time.monotonic()
+        job = None
+        result = 'idle'
         try:
             job = await self._claim(room_id)
             if job is None:
                 return
+            result = 'processed'
             if job['status'] == 'final':
                 self._send_final(room_id, job)
                 return
+            if self.controls and not await self.controls.reserve(room_id, job):
+                result = 'controlled'
+                await self._controlled_finish(room_id, job)
+                return
+            generation = asyncio.create_task(self._generate(room_id, job))
+            watcher = asyncio.create_task(self._watch_control(room_id, job, generation)) if self.controls else None
             heartbeat = asyncio.create_task(self._heartbeat(room_id, job))
             try:
                 try:
                     # Include key lookup and context loading in the deadline.
                     async with asyncio.timeout(self.settings.generation_timeout):
-                        await self._generate(room_id, job)
+                        await generation
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                    result = 'stopped'
+                    await self._controlled_finish(room_id, job)
                 except TimeoutError:
+                    result = 'timeout'
                     await self._fail_job(room_id, job, 'timeout', 'AI 回复超时', True)
             finally:
+                if watcher:
+                    watcher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await watcher
+                generation.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await generation
                 heartbeat.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat
         except asyncio.CancelledError:
+            result = 'interrupted'
             # The durable job stays leased and is reclaimed after expiry.
             raise
         except Exception:
+            result = 'error'
             log.exception('generation in room %s', room_id)
         finally:
+            log.info(json.dumps({'event': 'request_stage', 'instance': 'ai',
+                'operation': 'ai.generate', 'stage': 'ai', 'result': result, 'room_id': room_id,
+                'generation_id': job['id'] if job else '', 'request_id': job.get('trigger_id', '') if job else '',
+                'attempt': job['attempt'] if job else 0,
+                'elapsed_ms': (time.monotonic() - started) * 1000}))
             self.running_rooms.discard(room_id)
 
     @staticmethod
@@ -285,10 +367,16 @@ class Engine:
         buffered = []
         sequence = 0
         last_flush = time.monotonic()
-        def flush():
+        async def flush():
             nonlocal sequence, last_flush
             sequence += 1
             # Snapshots let a reconnect or a new attempt replace partial text.
+            snapshot = ''.join(parts)[:MAX_CONTENT]
+            if self.controls:
+                await self.controls.snapshot(job, snapshot)
+                durable = await self.controls.generation(job['id'])
+                if not durable or durable[0] != 'generating':
+                    raise asyncio.CancelledError
             delta = ''.join(buffered)
             buffered.clear()
             self.send(ai_pb2.AiAction(chunk=ai_pb2.Chunk(
@@ -296,7 +384,7 @@ class Engine:
                 text=delta, snapshot=''.join(parts)[:MAX_CONTENT], attempt=job['attempt'],
                 sequence=sequence, cumulative=True)))
             last_flush = time.monotonic()
-        flush()  # clears the previous attempt even before the first token
+        await flush()  # clears the previous attempt even before the first token
         try:
             provider = self.providers.create(ai.provider)
             async with asyncio.timeout(self.settings.generation_timeout):
@@ -305,8 +393,8 @@ class Engine:
                     parts.append(piece)
                     buffered.append(piece)
                     if time.monotonic() - last_flush >= self.settings.chunk_interval:
-                        flush()
-            flush()
+                        await flush()
+            await flush()
         except KeyRejected:
             await self._fail_job(room_id, job, 'api_key_invalid',
                                  f'{PROVIDER_NAMES[ai.provider]} 拒绝了你的 API key，请在设置里更新', False)
@@ -322,13 +410,52 @@ class Engine:
         if not content:
             await self._fail_job(room_id, job, 'empty_reply', f'{ai.name} 没有给出回复', True)
             return
+        if self.controls and not await self.controls.snapshot(job, content, final=True):
+            await self._controlled_finish(room_id, job)
+            return
         async with self._room(room_id) as state:
             if not self._owns(state, job):
                 return
-            state.active.update(status='final', content=content, member_id=ai.member_id,
+            state.active.update(status='final' , content=content, member_id=ai.member_id,
                                 retry_at=self.clock() + self.settings.retry_base_seconds)
             final = copy.deepcopy(state.active)
         self._send_final(room_id, final)
+
+    async def _controlled_finish(self, room_id, job):
+        durable = await self.controls.generation(job['id'])
+        final = None
+        async with self._room(room_id) as state:
+            if not self._owns(state, job):
+                return
+            state.pending.clear()
+            state.timer_due = None
+            state.target = None
+            if durable and durable[1].strip():
+                state.active.update(status='final', content=durable[1], stopped=bool(durable[2]),
+                    retry_at=self.clock() + self.settings.retry_base_seconds)
+                final = copy.deepcopy(state.active)
+            else:
+                state.active = None
+        if final:
+            self._send_final(room_id, final)
+        else:
+            self._failed(room_id, job, 'stopped', '已停止')
+
+    async def _watch_control(self, room_id, job, generation):
+        while not generation.done():
+            await asyncio.sleep(0.1)
+            try:
+                durable = await self.controls.generation(job['id'])
+                if durable and (durable[2] or durable[0] == 'saved'):
+                    generation.cancel()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Fail closed if the control fence cannot be read. Leave the
+                # durable job recoverable instead of generating unchecked.
+                generation.cancel()
+                raise
 
     def _send_final(self, room_id, job):
         self.send(ai_pb2.AiAction(final=ai_pb2.Final(room_id=room_id,
@@ -348,8 +475,14 @@ class Engine:
                 state.active.update(status='queued', owner='', lease_until=0,
                     retry_at=self.clock() + self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1))
             else:
+                if self.controls:
+                    await self.controls.failed(job)
                 self._finish_failed(state, job)
                 terminal = True
+        log.info(json.dumps({'event': 'request_stage', 'instance': 'ai',
+            'operation': 'ai.generate', 'stage': 'ai_attempt', 'result': code,
+            'generation_id': job['id'], 'request_id': job.get('trigger_id', ''),
+            'attempt': job['attempt'], 'room_id': room_id}))
         if terminal:
             self._failed(room_id, job, code, message)
 

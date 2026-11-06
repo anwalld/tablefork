@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "common/config.h"
+#include "common/trace.h"
 #include "buffering/guarded_transaction.h"
 #include "buffering/request_buffer.h"
 #include "buffering/guarded_redis.h"
@@ -32,7 +33,7 @@ Json::Value messageJson(int64_t roomId,
                         const std::string &memberType,
                         const std::string &clientMsgId,
                         const std::string &content,
-                        int64_t createdAtMs)
+                        int64_t createdAtMs, bool stopped = false)
 {
     Json::Value json;
     json["type"] = "message";
@@ -47,6 +48,7 @@ Json::Value messageJson(int64_t roomId,
         // Lets clients replace the text they were shown while it streamed.
         json["generation_id"] = clientMsgId;
     }
+    if (stopped) json["stopped"] = true;
     json["content"] = content;
     json["created_at"] = Json::Int64(createdAtMs);
     return json;
@@ -61,7 +63,7 @@ Json::Value rowJson(int64_t roomId, const drogon::orm::Row &row)
                        row["member_type"].as<std::string>(),
                        row["client_msg_id"].as<std::string>(),
                        row["content"].as<std::string>(),
-                       row["created_at_ms"].as<int64_t>());
+                       row["created_at_ms"].as<int64_t>(), row["stopped"].as<bool>());
 }
 
 void validate(const std::string &clientMsgId, const std::string &content)
@@ -154,7 +156,9 @@ drogon::Task<StoredMessage> store(Author author,
                                   std::string clientMsgId,
                                   std::string content, RequestContextPtr context = {}, int64_t rateUser = 0)
 {
+    TraceSpan storage(safeTraceId(std::to_string(roomId) + ":" + clientMsgId), author.type == "ai" ? "ai.save" : "ws.send", "message_store");
     validate(clientMsgId, content);
+    bool stopped = false;
     auto tx = co_await newGuardedTransaction(context);
     const auto rooms = co_await tx->execSqlCoro(
         "SELECT last_seq FROM rooms WHERE id = ? FOR UPDATE", roomId);
@@ -170,8 +174,23 @@ drogon::Task<StoredMessage> store(Author author,
     {
         throw ApiError::roomNotFound();
     }
+    if (author.type == "ai")
+    {
+        const auto generation = co_await tx->execSqlCoro(
+            "SELECT content, stopped, member_id FROM ai_generations "
+            "WHERE generation_id = ? AND room_id = ? FOR UPDATE", clientMsgId, roomId);
+        if (!generation.empty())
+        {
+            if (generation[0]["member_id"].as<int64_t>() != author.memberId)
+                throw ApiError::invalidArgument("generation member mismatch");
+            stopped = generation[0]["stopped"].as<bool>();
+            if (stopped) content = generation[0]["content"].as<std::string>();
+            validate(clientMsgId, content);
+            co_await tx->execSqlCoro("UPDATE ai_generations SET status = 'saved' WHERE generation_id = ?", clientMsgId);
+        }
+    }
     const auto existing = co_await tx->execSqlCoro(
-        "SELECT seq, content, created_at_ms FROM messages "
+        "SELECT seq, content, created_at_ms, stopped FROM messages "
         "WHERE room_id = ? AND member_id = ? AND client_msg_id = ?",
         roomId,
         author.memberId,
@@ -181,6 +200,7 @@ drogon::Task<StoredMessage> store(Author author,
         if (existing[0]["content"].as<std::string>() != content)
             throw ApiError(drogon::k409Conflict,"request_conflict","message ID was already used for different content");
         const auto seq = existing[0]["seq"].as<int64_t>();
+        storage.finish("duplicate");
         co_return StoredMessage{
             messageJson(roomId,
                         seq,
@@ -189,7 +209,7 @@ drogon::Task<StoredMessage> store(Author author,
                         author.type,
                         clientMsgId,
                         existing[0]["content"].as<std::string>(),
-                        existing[0]["created_at_ms"].as<int64_t>()),
+                        existing[0]["created_at_ms"].as<int64_t>(), existing[0]["stopped"].as<bool>()),
             roomId,
             seq,
             true};
@@ -202,15 +222,37 @@ drogon::Task<StoredMessage> store(Author author,
                              roomId);
     co_await tx->execSqlCoro(
         "INSERT INTO messages "
-        "(room_id, seq, member_id, client_msg_id, content, created_at_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(room_id, seq, member_id, client_msg_id, content, created_at_ms, stopped) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         roomId,
         seq,
         author.memberId,
         clientMsgId,
         content,
-        createdAtMs);
+        createdAtMs, stopped);
+    const auto targets = co_await tx->execSqlCoro(
+        "SELECT m.id, m.display_name FROM room_members rm JOIN members m ON m.id = rm.member_id "
+        "WHERE rm.room_id = ? AND m.type = 'human' AND m.id <> ?", roomId, author.memberId);
+    for (const auto &target : targets)
+    {
+        const auto token = "@" + target["display_name"].as<std::string>();
+        auto position = content.find(token);
+        while (position != std::string::npos)
+        {
+            const auto end = position + token.size();
+            const auto boundary = [](unsigned char c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; };
+            if ((position == 0 || boundary(content[position - 1])) &&
+                (end == content.size() || boundary(content[end])))
+            {
+                co_await tx->execSqlCoro("INSERT IGNORE INTO message_mentions (room_id, seq, member_id) VALUES (?, ?, ?)",
+                    roomId, seq, target["id"].as<int64_t>());
+                break;
+            }
+            position = content.find(token, position + 1);
+        }
+    }
     co_await commit(std::move(tx));
+    storage.finish();
     co_return StoredMessage{messageJson(roomId,
                                         seq,
                                         author.memberId,
@@ -218,7 +260,7 @@ drogon::Task<StoredMessage> store(Author author,
                                         author.type,
                                         clientMsgId,
                                         content,
-                                        createdAtMs),
+                                        createdAtMs, stopped),
                             roomId,
                             seq,
                             false};
@@ -242,6 +284,7 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
                                                           std::string content)
 {
     auto context = RequestBuffer::instance().backgroundContext();
+    if (context) context->requestId = safeTraceId(std::to_string(roomId) + ":" + generationId);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT display_name FROM members WHERE id = ? AND type = 'ai'", aiMemberId);
     if (rows.empty())
@@ -326,7 +369,7 @@ drogon::Task<Json::Value> MessageService::history(Session session,
     }
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT msg.seq, msg.member_id, msg.client_msg_id, msg.content, "
-        "       msg.created_at_ms, m.display_name, m.type AS member_type "
+        "       msg.created_at_ms, msg.stopped, m.display_name, m.type AS member_type "
         "FROM messages msg JOIN members m ON m.id = msg.member_id "
         "WHERE msg.room_id = ? AND msg.seq BETWEEN ? AND ? ORDER BY msg.seq",
         roomId,
@@ -356,5 +399,29 @@ drogon::Task<> MessageService::dropCache(int64_t roomId, RequestContextPtr conte
         throw unknown();
     }
     catch (const ApiError &) { throw unknown(); }
+}
+drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId,
+    std::string keyword, std::optional<int64_t> sender, std::optional<int64_t> from,
+    std::optional<int64_t> to, std::optional<int64_t> before, int64_t limit)
+{
+    co_await RoomService::requireMember(session.memberId, roomId);
+    const auto length = utf8Length(keyword);
+    if (!length || *length > 200 || (from && to && *from > *to))
+        throw ApiError::invalidArgument("invalid search filter");
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT msg.seq, msg.member_id, msg.client_msg_id, msg.content, msg.stopped, "
+        "msg.created_at_ms, m.display_name, m.type AS member_type "
+        "FROM messages msg JOIN members m ON m.id = msg.member_id "
+        "JOIN room_members rm ON rm.room_id = msg.room_id AND rm.member_id = ? "
+        "WHERE msg.room_id = ? AND (? = '' OR LOCATE(?, msg.content) > 0) "
+        "AND (? = 0 OR msg.member_id = ?) AND msg.created_at_ms >= ? AND msg.created_at_ms <= ? "
+        "AND msg.seq < ? ORDER BY msg.seq DESC LIMIT ?",
+        session.memberId, roomId, keyword, keyword, sender.value_or(0), sender.value_or(0),
+        from.value_or(0), to.value_or(INT64_MAX), before.value_or(INT64_MAX), limit);
+    Json::Value result;
+    result["messages"] = Json::arrayValue;
+    for (const auto &row : rows) result["messages"].append(rowJson(roomId, row));
+    result["next_before"] = rows.empty() ? Json::Value() : Json::Value(Json::Int64(rows[rows.size()-1]["seq"].as<int64_t>()));
+    co_return result;
 }
 }  // namespace chat

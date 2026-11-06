@@ -212,3 +212,7 @@ READY
             test_gateway.py::test_real_ip_rate_limit_across_new_connections
     wait "$rate_peer_pid"
 )
+
+# Independent fixtures do not reconfigure the running fault-test stack.
+tests/buffering/run_queue_tests.sh
+CHAT_CONTROL_UNIT_IMAGE="${UNIT_TEST_IMAGE:-cppaiserver-unit}" tests/chat_controls/run_http_tests.sh

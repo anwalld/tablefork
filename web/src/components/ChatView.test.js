@@ -7,7 +7,7 @@ import { api } from '../lib/api.js'
 const state = vi.hoisted(() => ({ handlers: null, sent: [] }))
 vi.mock('../lib/api.js', () => ({
   ApiError: class extends Error {},
-  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn(), createRoom: vi.fn() },
+  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn(), createRoom: vi.fn(), markRead: vi.fn(), search: vi.fn(), aiState: vi.fn(), pauseAi: vi.fn(), stopAi: vi.fn() },
 }))
 vi.mock('../lib/chat-socket.js', () => ({ ChatSocket: class {
   constructor(handlers) { state.handlers = handlers; this.handlers = handlers; this.rooms = new Set() }
@@ -42,6 +42,11 @@ beforeEach(() => {
   state.sent = []
   vi.useFakeTimers()
   vi.resetAllMocks()
+  api.markRead.mockResolvedValue({})
+  api.aiState.mockResolvedValue({ paused: false, generations: [] })
+  api.pauseAi.mockResolvedValue({})
+  api.stopAi.mockResolvedValue({})
+  api.search.mockResolvedValue({ messages: [], next_before: null })
   api.rooms.mockResolvedValue({ rooms: [removed, other] })
   api.members.mockResolvedValue({ members: [{ id: 1, name: 'alice', type: 'human', role: 'member' }] })
   api.history.mockImplementation(async (id, options) => ({ messages: id === 7 && !options ? [saved] : [], last_seq: 1 }))
@@ -188,4 +193,114 @@ it('explains that a banned invitee must be unbanned first', async () => {
   await view.get('.chat-head form').trigger('submit')
   await flushPromises()
   expect(view.text()).toContain('该用户已被此房间封禁，需要先解封')
+})
+
+
+it('shows unread and mention indicators and includes human mention candidates', async () => {
+  api.rooms.mockResolvedValue({ rooms: [{ ...removed, unread_count: 4, mention_seq: 1 }] })
+  api.members.mockResolvedValue({ members: [
+    { id: 1, name: 'alice', type: 'human', role: 'member' },
+    { id: 2, name: 'bob', type: 'human', role: 'member' },
+  ] })
+  const view = await chat()
+  expect(view.get('[aria-label="未读消息"]').text()).toBe('4')
+  expect(view.text()).toContain('有人@我')
+  await view.get('textarea').setValue('@bo')
+  const textarea = view.get('textarea').element
+  textarea.selectionStart = 3
+  await view.get('textarea').trigger('keyup')
+  expect(view.get('[aria-label="提及成员"]').text()).toContain('@bob')
+})
+
+it('renders a stopped reply from history and lets managers pause AI', async () => {
+  api.members.mockResolvedValue({ members: [{ id: 1, name: 'alice', type: 'human', role: 'owner' }] })
+  api.history.mockImplementation(async (id, options) => ({ messages: id === 7 && !options ? [{ ...saved, stopped: true }] : [] }))
+  const view = await chat()
+  expect(view.text()).toContain('已停止')
+  const button = view.findAll('button').find(b => b.text() === '暂停AI')
+  await button.trigger('click')
+  await flushPromises()
+  expect(api.pauseAi).toHaveBeenCalledWith(7, true)
+})
+
+it('searches through the authenticated API and renders returned matches', async () => {
+  api.search.mockResolvedValue({ messages: [saved], next_before: 1 })
+  const view = await chat()
+  await view.findAll('button').find(b => b.text() === '搜索').trigger('click')
+  await view.get('[aria-label="搜索关键词"]').setValue('匹配')
+  await view.get('.search-panel form').trigger('submit')
+  await flushPromises()
+  expect(api.search).toHaveBeenCalledWith(7, { q: '匹配' })
+  expect(view.get('.search-panel').text()).toContain(saved.content)
+})
+
+
+it('marks only displayed latest messages when visible and does not mark in background', async () => {
+  const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  const view = await chat()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(api.markRead).toHaveBeenCalledWith(7, 1)
+  api.markRead.mockClear()
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+  state.handlers.onMessage({ ...saved, seq: 2, content: 'while hidden' })
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(200)
+  expect(api.markRead).not.toHaveBeenCalled()
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(200)
+  expect(api.markRead).toHaveBeenCalledWith(7, 2)
+  if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility)
+  else delete document.visibilityState
+})
+
+
+it('keeps search results across background room polling', async () => {
+  api.rooms.mockImplementation(async () => ({ rooms: [{ ...removed }, { ...other }] }))
+  api.search.mockResolvedValue({ messages: [saved], next_before: null })
+  const view = await chat()
+  await view.findAll('button').find(b => b.text() === '搜索').trigger('click')
+  await view.get('.search-panel form').trigger('submit')
+  await flushPromises()
+  await poll()
+  expect(view.get('.search-panel').text()).toContain(saved.content)
+})
+
+
+it('refreshes room attention promptly after messages and another page reading', async () => {
+  const view = await chat()
+  const previous = api.rooms.mock.calls.length
+  api.rooms.mockResolvedValue({ rooms: [removed, { ...other, unread_count: 1, mention_seq: 1 }] })
+  state.handlers.onMessage({ ...saved, room_id: 8, seq: 1 })
+  await vi.advanceTimersByTimeAsync(250)
+  await flushPromises()
+  expect(api.rooms.mock.calls.length).toBeGreaterThan(previous)
+  expect(view.get('[aria-label="未读消息"]').text()).toBe('1')
+  api.rooms.mockResolvedValue({ rooms: [removed, other] })
+  state.handlers.onEvent({ type: 'read_updated', room_id: 8 })
+  await vi.advanceTimersByTimeAsync(250)
+  await flushPromises()
+  expect(view.find('[aria-label="未读消息"]').exists()).toBe(false)
+})
+
+
+it('discards late context loading after room membership is revoked', async () => {
+  const target = { ...saved, seq: 3, content: 'late revoked context' }
+  api.search.mockResolvedValue({ messages: [target], next_before: null })
+  const view = await chat()
+  await view.findAll('button').find(b => b.text() === '搜索').trigger('click')
+  await view.get('.search-panel form').trigger('submit')
+  await flushPromises()
+  let resolvePage
+  api.history.mockImplementation(async (id, params) => {
+    if (params?.before === 4) return await new Promise(resolve => { resolvePage = resolve })
+    return { messages: [] }
+  })
+  await view.findAll('.search-panel button').find(b => b.text().includes(target.content)).trigger('click')
+  await flushPromises()
+  state.handlers.onRoomLeft(7, 'kicked')
+  resolvePage({ messages: [target] })
+  await flushPromises()
+  expect(view.findAll('article').some(article => article.text().includes(target.content))).toBe(false)
 })

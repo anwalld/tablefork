@@ -92,6 +92,13 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.query(owner='guess')['error'], 'forbidden')
         self.assertEqual(self.query()['state'], 'waiting')
         self.assertEqual(self.query('lost')['error'], 'result_unknown')
+    def test_claim_reports_actual_queue_wait(self):
+        self.admit()
+        time.sleep(.03)
+        self.resume()
+        claimed = self.claim()
+        self.assertGreaterEqual(claimed['wait_ms'], 20)
+
     def test_fifo_and_multi_backend_claims_are_exclusive(self):
         for i in range(20): self.admit(f'task-{i}')
         self.resume()

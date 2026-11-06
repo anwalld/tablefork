@@ -268,4 +268,30 @@ RoomController::Response RoomController::messages(drogon::HttpRequestPtr req,
         parseRoomId(roomId),
         {intParameter(req, "before"), intParameter(req, "after"), pageLimit(req)}));
 }
+RoomController::Response RoomController::markRead(drogon::HttpRequestPtr req, std::string roomId)
+{
+    std::vector<std::string> args{roomId};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "RoomController::markRead", std::move(args))) co_return queued;
+    auto session = co_await SessionStore::require(req);
+    const auto &body = jsonBody(req);
+    if (!body["seq"].isInt64() || body["seq"].asInt64() < 0) throw ApiError::invalidArgument("seq required");
+    const auto id = parseRoomId(roomId);
+    co_await RoomService::markRead(session, id, body["seq"].asInt64());
+    Json::Value event;
+    event["type"] = "read_updated";
+    event["room_id"] = Json::Int64(id);
+    event["only_member_ids"].append(Json::Int64(session.memberId));
+    co_await RoomHub::instance().publish(id, toJsonString(event), session.request);
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
+
+RoomController::Response RoomController::search(drogon::HttpRequestPtr req, std::string roomId)
+{
+    std::vector<std::string> args{roomId};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "RoomController::search", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    co_return jsonResponse(co_await MessageService::search(session, parseRoomId(roomId),
+        req->getParameter("q"), intParameter(req, "sender"), intParameter(req, "from"),
+        intParameter(req, "to"), intParameter(req, "before"), pageLimit(req)));
+}
 }  // namespace chat

@@ -3,6 +3,7 @@
 #include <drogon/utils/coroutine.h>
 #include "buffering/request_context.h"
 #include "common/util.h"
+#include "common/trace.h"
 
 namespace chat
 {
@@ -15,10 +16,13 @@ class GuardedTransaction
         : tx_(std::move(tx)), context_(std::move(context)) {}
     ~GuardedTransaction() { if (tx_) tx_->rollback(); }
     template <typename... Args>
-    auto execSqlCoro(const std::string &sql, Args &&...args)
+    drogon::Task<drogon::orm::Result> execSqlCoro(std::string sql, Args... args)
     {
         checkRequest(context_);
-        return tx_->execSqlCoro(sql, std::forward<Args>(args)...);
+        TraceSpan trace(context_ ? context_->requestId : "", "transaction", "mysql");
+        auto result = co_await tx_->execSqlCoro(sql, args...);
+        trace.finish();
+        co_return result;
     }
     std::shared_ptr<drogon::orm::Transaction> take()
     {

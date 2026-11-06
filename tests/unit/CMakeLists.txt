@@ -12,6 +12,7 @@ add_executable(chat-unit-tests
     room_worker_pool_test.cc
     run_permit_test.cc
     session_watcher_test.cc
+    trace_test.cc
     util_test.cc)
 target_link_libraries(chat-unit-tests PRIVATE chat-core)
 # Run from the source root, where data/common-passwords.txt lives.

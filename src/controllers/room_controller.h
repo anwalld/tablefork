@@ -23,6 +23,8 @@ class RoomController : public drogon::HttpController<RoomController>
     ADD_METHOD_TO(RoomController::ban, "/api/rooms/{1}/bans/{2}", drogon::Put);
     ADD_METHOD_TO(RoomController::unban, "/api/rooms/{1}/bans/{2}", drogon::Delete);
     ADD_METHOD_TO(RoomController::bans, "/api/rooms/{1}/bans", drogon::Get);
+    ADD_METHOD_TO(RoomController::markRead, "/api/rooms/{1}/read", drogon::Put);
+    ADD_METHOD_TO(RoomController::search, "/api/rooms/{1}/search", drogon::Get);
     METHOD_LIST_END
 
     using Response = drogon::Task<drogon::HttpResponsePtr>;
@@ -30,6 +32,8 @@ class RoomController : public drogon::HttpController<RoomController>
     // Room ids arrive as text so that a malformed one can be reported as a
     // missing room rather than failing in Drogon's parameter conversion.
 
+    Response markRead(drogon::HttpRequestPtr req, std::string roomId);
+    Response search(drogon::HttpRequestPtr req, std::string roomId);
     Response create(drogon::HttpRequestPtr req);
     Response list(drogon::HttpRequestPtr req);
     Response invite(drogon::HttpRequestPtr req, std::string roomId);

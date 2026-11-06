@@ -205,6 +205,11 @@ drogon::Task<Json::Value> RoomService::list(Session session,
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT r.id, r.name, r.last_seq, m.member_id, "
+        "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
+        "(SELECT COUNT(*) FROM messages msg WHERE msg.room_id = r.id "
+        " AND msg.seq > m.read_seq AND msg.member_id <> m.member_id) AS unread_count, "
+        "(SELECT MIN(mm.seq) FROM message_mentions mm WHERE mm.room_id = r.id "
+        " AND mm.member_id = m.member_id AND mm.seq > m.read_seq) AS mention_seq, "
         "       (SELECT COUNT(*) FROM room_members c WHERE c.room_id = r.id) "
         "           AS member_count "
         "FROM rooms r "
@@ -225,11 +230,27 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         room["member_count"] = Json::Int64(row["member_count"].as<int64_t>());
         room["status"] = row["member_id"].isNull() ? "invited" : "joined";
         room["last_seq"] = Json::Int64(row["last_seq"].as<int64_t>());
+        room["read_seq"] = Json::Int64(row["read_seq"].as<int64_t>());
+        room["unread_count"] = Json::Int64(row["unread_count"].as<int64_t>());
+        room["mention_seq"] = row["mention_seq"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["mention_seq"].as<int64_t>()));
         rooms.append(std::move(room));
     }
     Json::Value body;
     body["rooms"] = std::move(rooms);
     co_return body;
+}
+
+drogon::Task<> RoomService::markRead(Session session, int64_t roomId, int64_t seq)
+{
+    if (seq < 0) throw ApiError::invalidArgument("invalid read sequence");
+    auto tx = co_await newGuardedTransaction(session.request);
+    co_await lockRoom(tx, roomId);
+    if (!co_await isMember(tx, roomId, session.memberId)) throw ApiError::roomNotFound();
+    co_await tx->execSqlCoro(
+        "UPDATE room_members rm JOIN rooms r ON r.id = rm.room_id "
+        "SET rm.read_seq = GREATEST(rm.read_seq, LEAST(?, r.last_seq)) "
+        "WHERE rm.room_id = ? AND rm.member_id = ?", seq, roomId, session.memberId);
+    co_await commit(std::move(tx));
 }
 
 drogon::Task<> RoomService::invite(Session session,
@@ -302,9 +323,10 @@ drogon::Task<> RoomService::join(Session session, int64_t roomId)
             throw ApiError::roomNotFound();
         }
         co_await tx->execSqlCoro(
-            "INSERT INTO room_members (room_id, member_id) VALUES (?, ?)",
-            roomId,
-            session.memberId);
+            "INSERT INTO room_members (room_id, member_id, read_seq) "
+            "SELECT id, ?, last_seq FROM rooms WHERE id = ?",
+            session.memberId,
+            roomId);
     }
     co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
     checkRequest(session.request);

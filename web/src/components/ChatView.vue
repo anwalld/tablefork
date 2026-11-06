@@ -5,7 +5,7 @@ import { requestErrorText } from '../lib/request-errors.js'
 import { AiDrafts } from '../lib/ai-drafts.js'
 import { ChatSocket } from '../lib/chat-socket.js'
 import { leave, prepareLeave } from '../lib/leave.js'
-import { insertMention, matchingAis, mentionQuery } from '../lib/mentions.js'
+import { insertMention, matchingMembers, mentionQuery } from '../lib/mentions.js'
 import { RoomStream } from '../lib/room-stream.js'
 import { fetchAllRooms } from '../lib/rooms.js'
 import { exportRoom } from '../lib/transcript.js'
@@ -43,6 +43,135 @@ const requestEvent = shallowRef(null)
 const membersPanel = ref(null)
 const composerEl = ref(null)
 const caret = ref(0)
+const aiState = ref({ paused: false, generations: [] })
+const aiControlBusy = ref(false)
+const canManageAi = computed(() => ['owner', 'admin'].includes(members.value.find(m => m.id === props.user.member_id)?.role))
+function canStopAi(id) {
+  return canManageAi.value || aiState.value.generations.some(g => g.id === id && g.payer_member_id === props.user.member_id)
+}
+async function loadAiState() {
+  const id = activeId.value
+  if (!id || activeRoom.value?.status !== 'joined' || activeRemoval.value) return
+  try {
+    const state = await api.aiState(id)
+    if (activeId.value === id) aiState.value = state
+  } catch { /* Status is retried by the room poll and reconnect. */ }
+}
+async function controlAi(generation = null) {
+  const room = activeId.value
+  if (!room || aiControlBusy.value) return
+  aiControlBusy.value = true
+  try {
+    if (generation) await api.stopAi(room, generation)
+    else await api.pauseAi(room, !aiState.value.paused)
+    if (activeId.value === room) {
+      await loadAiState()
+      await loadRoom(room)
+      if (generation) drafts.close(generation)
+      else if (aiState.value.paused) drafts.clear(room)
+      draftRevision.value++
+    }
+  } catch (error) { notice.value = requestErrorText(error, 'AI控制失败') }
+  finally { aiControlBusy.value = false }
+}
+const searchOpen = ref(false)
+const searchText = ref('')
+const searchSender = ref('')
+const searchFrom = ref('')
+const searchTo = ref('')
+const searchResults = ref([])
+const searchBefore = ref(null)
+const searchBusy = ref(false)
+const contextSeq = ref(null)
+const contextMessages = ref([])
+const readThrough = new Map()
+let readTimer
+let attentionTimer
+function scheduleAttentionRefresh() {
+  if (attentionTimer) return
+  attentionTimer = setTimeout(() => {
+    attentionTimer = null
+    refreshRooms()
+  }, 200)
+}
+
+async function updateRead() {
+  const roomId = activeId.value
+  const el = messagesEl.value
+  if (!roomId || contextSeq.value || document.visibilityState !== 'visible' ||
+      activeRoom.value?.status !== 'joined' || activeRemoval.value || !el ||
+      el.scrollHeight - el.scrollTop - el.clientHeight > 120) return
+  const stream = streams.get(roomId)
+  if (!stream?.messages.length) return
+  const seq = stream.messages.at(-1).seq
+  if (seq > stream.contiguous || seq <= (readThrough.get(roomId) ?? 0)) return
+  readThrough.set(roomId, seq)
+  try {
+    await api.markRead(roomId, seq)
+    const room = rooms.value.find(r => r.id === roomId)
+    if (room && room.last_seq <= seq) { room.unread_count = 0; room.mention_seq = null }
+  } catch {
+    if (readThrough.get(roomId) === seq) readThrough.delete(roomId)
+  }
+}
+function scheduleRead() {
+  clearTimeout(readTimer)
+  readTimer = setTimeout(updateRead, 150)
+}
+
+async function findMessages(more = false) {
+  const roomId = activeId.value
+  if (!roomId || searchBusy.value) return
+  searchBusy.value = true
+  try {
+    const params = { q: searchText.value }
+    if (searchSender.value) params.sender = searchSender.value
+    if (searchFrom.value) params.from = Date.parse(searchFrom.value)
+    if (searchTo.value) params.to = Date.parse(searchTo.value)
+    if (more && searchBefore.value) params.before = searchBefore.value
+    const result = await api.search(roomId, params)
+    if (activeId.value !== roomId) return
+    searchResults.value = more ? [...searchResults.value, ...result.messages] : result.messages
+    searchBefore.value = result.messages.length === 50 ? result.next_before : null
+  } catch (error) { notice.value = requestErrorText(error, '搜索失败') }
+  finally { searchBusy.value = false }
+}
+
+async function locateMessage(roomId, seq, mention = false) {
+  if (removedRooms.has(roomId)) return
+  contextMessages.value = []
+  contextSeq.value = seq
+  activeId.value = roomId
+  try {
+    const [older, newer] = await Promise.all([
+      api.history(roomId, { before: seq + 1, limit: 30 }),
+      api.history(roomId, { after: seq, limit: 30 }),
+    ])
+    if (activeId.value !== roomId || contextSeq.value !== seq || removedRooms.has(roomId)) return
+    contextMessages.value = [...older.messages, ...newer.messages]
+    await nextTick()
+    const target = messagesEl.value?.querySelector(`[data-seq="${seq}"]`)
+    target?.scrollIntoView?.({ block: 'center' })
+    if (mention && target && document.visibilityState === 'visible') {
+      await api.markRead(roomId, seq)
+      await refreshRooms()
+    }
+  } catch (error) { notice.value = requestErrorText(error, '加载消息失败') }
+}
+
+async function openRoom(room) {
+  autoSelectRoom.value = true
+  activeId.value = room.id
+  contextSeq.value = null
+  if (room.status === 'joined') await showLatest()
+}
+async function showLatest() {
+  contextSeq.value = null
+  await loadRoom(activeId.value)
+  await nextTick()
+  if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+  scheduleRead()
+}
 
 // AI replies still being generated, shown below the timeline.
 const drafts = new AiDrafts()
@@ -62,6 +191,7 @@ function removalNotice(room) {
 
 const timeline = computed(() => {
   void revision.value
+  if (contextSeq.value) return contextMessages.value
   const stream = streams.get(activeId.value)
   return stream ? stream.messages : []
 })
@@ -74,7 +204,7 @@ const aiDrafts = computed(() => {
   }))
 })
 
-const suggestions = computed(() => matchingAis(members.value, mentionQuery(draft.value, caret.value)))
+const suggestions = computed(() => matchingMembers(members.value, mentionQuery(draft.value, caret.value)))
 
 const pending = computed(() => {
   const confirmed = new Set(timeline.value.map((m) => m.client_msg_id))
@@ -112,7 +242,10 @@ const socket = new ChatSocket({
     }
   },
   onMessage: (message) => {
-    if (!removedRooms.has(message.room_id)) streamFor(message.room_id).receive(message)
+    if (!removedRooms.has(message.room_id)) {
+      streamFor(message.room_id).receive(message)
+      scheduleAttentionRefresh()
+    }
   },
   onEvent: (frame) => onRoomEvent(frame),
   // Subscribing first and reading history second means nothing can fall
@@ -159,7 +292,12 @@ const socket = new ChatSocket({
 function onRoomEvent(frame) {
   if (removedRooms.has(frame.room_id)) return
   const here = frame.room_id === activeId.value
-  if (frame.type === 'ai_chunk') {
+  if (frame.type === 'read_updated') {
+    scheduleAttentionRefresh()
+  } else if (frame.type === 'ai_state_changed') {
+    if (here) loadAiState()
+  } else if (frame.type === 'ai_chunk') {
+    if (here && !aiState.value.generations.some(g => g.id === frame.generation_id)) loadAiState()
     drafts.chunk(frame)
     draftRevision.value++
   } else if (frame.type === 'ai_failed') {
@@ -252,6 +390,7 @@ async function refreshRooms() {
       activeId.value = null
     }
     if (activeId.value === null && autoSelectRoom.value && list.length > 0) activeId.value = list[0].id
+    scheduleRead()
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) location.reload()
   }
@@ -396,12 +535,19 @@ watch([timeline, pending], async () => {
   const el = messagesEl.value
   const atBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120
   await nextTick()
-  if (atBottom && messagesEl.value) {
+  if (!contextSeq.value && atBottom && messagesEl.value) {
     messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    scheduleRead()
   }
 })
 
-watch(() => [activeId.value, activeRoom.value?.status, activeRemoval.value], loadMembers)
+watch([() => activeId.value, () => activeRoom.value?.status, () => activeRemoval.value], () => {
+  searchResults.value = []
+  searchBefore.value = null
+  aiState.value = { paused: false, generations: [] }
+  loadMembers()
+  loadAiState()
+})
 
 watch(notice, (text) => {
   if (text) setTimeout(() => notice.value === text && (notice.value = ''), 4000)
@@ -409,11 +555,15 @@ watch(notice, (text) => {
 
 let poll
 onMounted(() => {
+  document.addEventListener('visibilitychange', scheduleRead)
   refreshRooms()
-  poll = setInterval(refreshRooms, ROOM_POLL_MS)
+  poll = setInterval(() => { refreshRooms(); loadAiState() }, ROOM_POLL_MS)
 })
 onBeforeUnmount(() => {
   clearInterval(poll)
+  clearTimeout(readTimer)
+  clearTimeout(attentionTimer)
+  document.removeEventListener('visibilitychange', scheduleRead)
   socket.close()
 })
 </script>
@@ -436,9 +586,13 @@ onBeforeUnmount(() => {
           :key="room.id"
           class="room"
           :class="{ active: room.id === activeId }"
-          @click="autoSelectRoom = true; activeId = room.id"
+          @click="openRoom(room)"
         >
           <span class="room-name">{{ room.name }}</span>
+          <span v-if="room.unread_count" class="tag" aria-label="未读消息">{{ room.unread_count > 99 ? '99+' : room.unread_count }}</span>
+          <span v-if="room.mention_seq" class="tag" role="button" tabindex="0"
+            @click.stop="locateMessage(room.id, room.mention_seq, true)"
+            @keydown.enter.stop="locateMessage(room.id, room.mention_seq, true)">有人@我</span>
           <span v-if="removedRooms.has(room.id)" class="tag">{{ removedRooms.get(room.id) === 'banned' ? '已被封禁' : '已被踢出' }}</span>
           <span v-else-if="room.status === 'invited'" class="tag">待加入</span>
           <span v-else class="room-count">{{ room.member_count }} 人</span>
@@ -459,10 +613,29 @@ onBeforeUnmount(() => {
             <button :class="{ active: showMembers }" @click="showMembers = !showMembers">
               成员 {{ members.length }}
             </button>
+            <span v-if="aiState.paused" class="tag">AI已暂停</span>
+            <button v-if="canManageAi" :disabled="aiControlBusy" @click="controlAi()">{{ aiState.paused ? '恢复AI' : '暂停AI' }}</button>
+            <button @click="searchOpen = !searchOpen">搜索</button>
             <button @click="exportActive">导出</button>
             <button class="danger" @click="startLeave">退出房间</button>
           </template>
         </header>
+        <section v-if="searchOpen && activeRoom.status === 'joined'" class="search-panel">
+          <form class="inline-form" @submit.prevent="findMessages()">
+            <input v-model="searchText" aria-label="搜索关键词" placeholder="搜索聊天记录" maxlength="200" />
+            <select v-model="searchSender" aria-label="搜索发送者"><option value="">所有成员</option>
+              <option v-for="m in members" :key="m.id" :value="m.id">{{ m.name }}</option></select>
+            <input v-model="searchFrom" type="datetime-local" aria-label="开始时间" />
+            <input v-model="searchTo" type="datetime-local" aria-label="结束时间" />
+            <button :disabled="searchBusy">搜索</button>
+          </form>
+          <ul><li v-for="message in searchResults" :key="message.seq">
+            <button class="link" @click="locateMessage(activeId, message.seq)">{{ message.member.name }} · {{ message.content }}</button>
+          </li></ul>
+          <button v-if="searchBefore" :disabled="searchBusy" @click="findMessages(true)">更多结果</button>
+        </section>
+        <button v-if="contextSeq" class="link" @click="showLatest">回到最新消息</button>
+
 
         <div v-if="activeRoom.status === 'invited'" class="invite-panel">
           <p>你被邀请加入这个房间。</p>
@@ -471,18 +644,20 @@ onBeforeUnmount(() => {
 
         <template v-else>
           <p v-if="activeRemoval" class="banner" role="status">{{ removalNotice(activeRoom) }}</p>
-          <div ref="messagesEl" class="messages" aria-live="polite">
+          <div ref="messagesEl" @scroll="scheduleRead" class="messages" aria-live="polite">
             <button v-if="canLoadOlder" class="link older" @click="loadOlder">加载更早的消息</button>
             <p v-if="timeline.length === 0 && pending.length === 0" class="empty">还没有消息，说点什么吧。</p>
             <article
               v-for="message in timeline"
               :key="message.seq"
+              :data-seq="message.seq"
               class="message"
               :class="{ mine: isMine(message) }"
             >
               <div class="meta">
                 <span>{{ message.member.name }}</span>
                 <time>{{ formatTime(message.created_at) }}</time>
+                <span v-if="message.stopped">已停止</span>
               </div>
               <p class="bubble">{{ message.content }}</p>
             </article>
@@ -490,6 +665,7 @@ onBeforeUnmount(() => {
               <div class="meta">
                 <span>{{ d.name }}</span>
                 <span>正在输入</span>
+                <button v-if="canStopAi(d.id)" class="link" :disabled="aiControlBusy" @click="controlAi(d.id)">停止生成</button>
               </div>
               <p class="bubble">{{ d.text }}</p>
             </article>
@@ -505,7 +681,7 @@ onBeforeUnmount(() => {
           </div>
 
           <form class="composer" @submit.prevent="send">
-            <ul v-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及 AI">
+            <ul v-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及成员">
               <li v-for="member in suggestions" :key="member.id">
                 <button type="button" class="link" @click="chooseMention(member)">@{{ member.name }}</button>
               </li>
@@ -515,7 +691,7 @@ onBeforeUnmount(() => {
               v-model="draft"
               :disabled="!!activeRemoval"
               rows="2"
-              placeholder="输入消息，Enter 发送，Shift + Enter 换行，@ 提及 AI"
+              placeholder="输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员"
               aria-label="消息内容"
               @keydown="onKeydown"
               @keyup="trackCaret"

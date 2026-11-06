@@ -52,6 +52,10 @@ class MessageService
                                              int64_t roomId,
                                              HistoryQuery query);
 
+    static drogon::Task<Json::Value> search(Session session, int64_t roomId,
+        std::string keyword, std::optional<int64_t> sender, std::optional<int64_t> from,
+        std::optional<int64_t> to, std::optional<int64_t> before, int64_t limit);
+
     // Called after room deletion commits; a failed cleanup is explicitly
     // unknown and may be reconciled with the original business request ID.
     static drogon::Task<> dropCache(int64_t roomId, RequestContextPtr context = {});

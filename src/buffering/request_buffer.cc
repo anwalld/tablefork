@@ -1,4 +1,5 @@
 #include "buffering/request_buffer.h"
+#include "common/trace.h"
 #include <drogon/drogon.h>
 #include <openssl/crypto.h>
 #include <cstdlib>
@@ -153,6 +154,7 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::admit(drogon::HttpRequestPt
     if(capability.empty()) capability=PayloadCrypto::randomToken();
     if(!validToken(capability)) throw ApiError::invalidArgument("invalid queue owner capability");
     auto requestId=req->getHeader("x-request-id");
+    if(requestId.empty()) requestId=req->attributes()->get<std::string>("chat.trace.id");
     if(requestId.empty()) requestId=PayloadCrypto::randomToken();
     if(requestId.size()>128 || !isPrintableText(requestId)) throw ApiError::invalidArgument("invalid request ID");
     auto value=descriptor(req);
@@ -162,7 +164,9 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::admit(drogon::HttpRequestPt
     value["request_id"]=requestId;
     value["fingerprint"]=crypto_->digest("business-parameters",parameters(req)+toJsonString(value["args"])+route);
     value["owner"]=crypto_->digest("owner",capability);
+    TraceSpan admission(safeTraceId(requestId), route, "queue_admission");
     auto admitted=co_await enqueue(value,capability,requestId,req->body().size(),recoverable(req));
+    admission.finish(admitted["direct"].asBool() ? "direct" : admitted.isMember("error") ? "rejected" : "queued");
     if(admitted["direct"].asBool())
     {
         auto context=executionContext(requestId,value["fingerprint"].asString(),value["owner"].asString());
@@ -278,6 +282,9 @@ drogon::Task<> RequestBuffer::tick()
 }
 drogon::Task<> RequestBuffer::execute(Json::Value task,RequestContextPtr context,std::string claim)
 {
+    TraceSpan waiting(safeTraceId(context->requestId), "business", "queue_wait");
+    waiting.finish("claimed", task.get("wait_ms", 0).asDouble());
+    TraceSpan execution(safeTraceId(context->requestId), task["payload"].get("route", "ws.send").asString(), "queue_execution");
     drogon::HttpResponsePtr resp;
     try
     {
@@ -322,6 +329,7 @@ drogon::Task<> RequestBuffer::execute(Json::Value task,RequestContextPtr context
         if(delay>0) co_await drogon::sleepCoro(drogon::app().getLoop(),std::chrono::milliseconds(delay));
     }
 #endif
+    execution.finish(std::to_string(static_cast<int>(resp->statusCode())));
     const auto state=resp->statusCode()>=500 ? "unknown" : resp->statusCode()>=400 ? "failed" : "succeeded";
     co_await queue_->finish(task["id"].asString(),permit_.boot(),std::move(claim),state,serialize(resp));
 }

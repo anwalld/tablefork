@@ -7,6 +7,7 @@
 #include "ai/ai_actions.h"
 #include "ai/ai_gateway.h"
 #include "common/config.h"
+#include "common/trace.h"
 #include "buffering/request_buffer.h"
 #include <cstdlib>
 #include "common/util.h"
@@ -79,11 +80,19 @@ int main()
                            config.redisConnections,
                            false,
                            2.0)
-        // Log routing evidence per instance without cookies or request bodies.
+        .registerPreRoutingAdvice([](const drogon::HttpRequestPtr &req) {
+            auto context = std::make_shared<chat::RequestContext>();
+            context->requestId = chat::safeTraceId(req->getHeader("x-request-id"));
+            req->attributes()->insert("chat.trace.id", context->requestId);
+            req->attributes()->insert("chat.trace.span", std::make_shared<chat::TraceSpan>(
+                context->requestId, req->methodString(), "http"));
+        })
         .registerPostHandlingAdvice([](const drogon::HttpRequestPtr &req,
                                        const drogon::HttpResponsePtr &resp) {
-            LOG_INFO << req->methodString() << " " << req->getPath() << " "
-                     << static_cast<int>(resp->statusCode());
+            const auto id = req->attributes()->get<std::string>("chat.trace.id");
+            if (!id.empty()) resp->addHeader("X-Request-Id", id);
+            const auto span = req->attributes()->get<std::shared_ptr<chat::TraceSpan>>("chat.trace.span");
+            if (span) span->finish(std::to_string(static_cast<int>(resp->statusCode())));
         })
         // Redis clients exist only once the app runs.
         .registerBeginningAdvice([] {
@@ -100,7 +109,7 @@ int main()
                 callback(chat::errorResponse(*error));
                 return;
             }
-            LOG_ERROR << req->getPath() << ": " << e.what();
+            LOG_ERROR << "unhandled request failure";
             const auto error = chat::ApiError::unavailable();
             callback(chat::errorResponse(error));
         })

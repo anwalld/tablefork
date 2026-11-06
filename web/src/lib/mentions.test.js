@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { insertMention, matchingAis, mentionQuery } from './mentions.js'
+import { insertMention, matchingAis, matchingMembers, mentionQuery } from './mentions.js'
 
 const members = [
   { type: 'human', name: 'alice' },
@@ -28,4 +28,11 @@ describe('mentions', () => {
     expect(insertMention('hi @cl', 6, 'Claude')).toEqual({ text: 'hi @Claude ', caret: 11 })
     expect(insertMention('@g rest', 2, 'GPT')).toEqual({ text: '@GPT  rest', caret: 5 })
   })
+})
+
+it('offers human and AI members without changing AI-only matching', () => {
+  const members = [{ id: 1, name: 'alice', type: 'human' }, { id: 2, name: 'Claude', type: 'ai' }]
+  expect(matchingMembers(members, '')).toHaveLength(2)
+  expect(matchingMembers(members, 'al')[0].id).toBe(1)
+  expect(matchingAis(members, '')).toHaveLength(1)
 })

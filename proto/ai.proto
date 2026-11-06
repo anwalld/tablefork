@@ -47,6 +47,8 @@ message MessageSaved {
   string content = 4;
   string generation_id = 5;  // AI messages only
   int64 created_at_ms = 6;
+  bool stopped = 7;
+  string client_msg_id = 8;
 }
 
 message MembersChanged {

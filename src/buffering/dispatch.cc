@@ -1,3 +1,4 @@
+#include "controllers/ai_control_controller.h"
 #include "buffering/request_buffer.h"
 #include "common/util.h"
 #include "controllers/auth_controller.h"
@@ -8,6 +9,12 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
 {
     const auto route=req->attributes()->get<std::string>("chat.buffering.route");
     const auto args=req->attributes()->get<std::vector<std::string>>("chat.buffering.args");
+    if(route=="AiControlController::state" && args.size()==1)
+        co_return co_await AiControlController().state(req, args[0]);
+    if(route=="AiControlController::pause" && args.size()==1)
+        co_return co_await AiControlController().pause(req, args[0]);
+    if(route=="AiControlController::stop" && args.size()==2)
+        co_return co_await AiControlController().stop(req, args[0], args[1]);
     if(route=="AuthController::registerUser" && args.size()==0)
         co_return co_await AuthController().registerUser(req);
     if(route=="AuthController::login" && args.size()==0)
@@ -30,6 +37,10 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
         co_return co_await RoomController().leave(req, args[0]);
     if(route=="RoomController::members" && args.size()==1)
         co_return co_await RoomController().members(req, args[0]);
+    if(route=="RoomController::markRead" && args.size()==1)
+        co_return co_await RoomController().markRead(req, args[0]);
+    if(route=="RoomController::search" && args.size()==1)
+        co_return co_await RoomController().search(req, args[0]);
     if(route=="RoomController::messages" && args.size()==1)
         co_return co_await RoomController().messages(req, args[0]);
     if(route=="RoomController::transferOwner" && args.size()==1)
