@@ -57,7 +57,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == ["1", "2", "3", "4", "5", "6"]
+    assert [version for version, _ in rows] == ["1", "2", "3", "4", "5", "6", "7"]
     assert all(success for _, success in rows)
 
 
@@ -74,7 +74,7 @@ def test_preset_ai_members_exist(db):
     with db.cursor() as cursor:
         cursor.execute(
             "SELECT p.slug, p.provider, m.type, m.user_id FROM ai_profiles p "
-            "JOIN members m ON m.id = p.member_id ORDER BY p.slug"
+            "JOIN members m ON m.id = p.member_id WHERE p.is_legacy=TRUE ORDER BY p.slug"
         )
         rows = cursor.fetchall()
     assert [(slug, provider) for slug, provider, _, _ in rows] == [

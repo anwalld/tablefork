@@ -10,8 +10,21 @@ def store_key(client, provider, key="fake-key-1234"):
     return client.request("PUT", f"/api/keys/{provider}", json={"key": key})
 
 
+def role_for(client, model):
+    roles = getattr(client, '_private_ai_roles', {})
+    if model not in roles:
+        names = {'claude':'Claude','gpt':'GPT','gemini':'Gemini','deepseek':'DeepSeek'}
+        result = client.post('/api/ai/roles', json={'model_slug':model,'name':names.get(model,model)})
+        if result.status_code != 201:
+            return None
+        roles[model] = result.json()
+        client._private_ai_roles = roles
+    return roles[model]
+
+
 def add_ai(client, room_id, slug):
-    return client.post(f"/api/rooms/{room_id}/ai-members", json={"slug": slug})
+    role = role_for(client, slug)
+    return client.post(f"/api/rooms/{room_id}/ai-members", json={'member_id':role['id'],'persona':''} if role else {'slug':slug,'persona':''})
 
 
 def members(client, room_id):
@@ -19,7 +32,7 @@ def members(client, room_id):
 
 
 def ai_slugs(client, room_id):
-    return sorted(m["slug"] for m in members(client, room_id) if m["type"] == "ai")
+    return sorted(m["model_slug"] for m in members(client, room_id) if m["type"] == "ai")
 
 
 def appoint(owner, room_id, user):

@@ -43,6 +43,26 @@ drogon::Task<> requestDone(int64_t roomId,
 }
 }  // namespace
 
+AiController::Response AiController::models(drogon::HttpRequestPtr req)
+{
+    if(auto queued=co_await RequestBuffer::instance().admit(req,"AiController::models")) co_return queued;
+    co_return jsonResponse(co_await AiService::models(co_await SessionStore::require(req)));
+}
+AiController::Response AiController::createRole(drogon::HttpRequestPtr req)
+{
+    if(auto queued=co_await RequestBuffer::instance().admit(req,"AiController::createRole")) co_return queued;
+    const auto session=co_await SessionStore::require(req);const auto input=jsonBody(req);
+    co_return jsonResponse(co_await AiService::createRole(session,stringField(input,"model_slug"),stringField(input,"name")),drogon::k201Created);
+}
+AiController::Response AiController::editPersona(drogon::HttpRequestPtr req,std::string roomId,std::string memberId)
+{
+    std::vector<std::string> args{roomId,memberId};
+    if(auto queued=co_await RequestBuffer::instance().admit(req,"AiController::editPersona",std::move(args))) co_return queued;
+    const auto session=co_await SessionStore::require(req);const auto input=jsonBody(req);
+    if(!input["persona_version"].isInt64()) throw ApiError::invalidArgument("persona_version required");
+    co_return jsonResponse(co_await AiService::editPersona(session,parseRoomId(roomId),parseRoomId(memberId),stringField(input,"persona"),input["persona_version"].asInt64()));
+}
+
 AiController::Response AiController::catalog(drogon::HttpRequestPtr req)
 {
     if (auto queued = co_await RequestBuffer::instance().admit(req, "AiController::catalog")) co_return queued;
@@ -57,8 +77,12 @@ AiController::Response AiController::request(drogon::HttpRequestPtr req, std::st
     if (auto queued = co_await RequestBuffer::instance().admit(req, "AiController::request", std::move(bufferArgs))) co_return queued;
     const auto session = co_await SessionStore::require(req);
     const auto id = parseRoomId(roomId);
-    const auto slug = stringField(jsonBody(req), "slug");
-    const auto outcome = co_await AiService::request(session, id, slug);
+    const auto input=jsonBody(req);
+    if(input.isMember("member_id") && (!input["member_id"].isInt64() || input["member_id"].asInt64()<=0))
+        throw ApiError::invalidArgument("positive member_id required");
+    const auto slug=input.isMember("member_id") ? std::to_string(input["member_id"].asInt64()) : stringField(input,"slug");
+    const auto persona=input.isMember("persona")?stringField(input,"persona"):"";
+    const auto outcome = co_await AiService::request(session,id,slug,persona);
     if (session.request && session.request->replayed)
     {
         co_await reconcileResult(id, session.request);
@@ -74,7 +98,8 @@ AiController::Response AiController::request(drogon::HttpRequestPtr req, std::st
     {
         Json::Value event;
         event["type"] = "ai_request";
-        event["slug"] = slug;
+        event["slug"] = "role_"+std::to_string(outcome.aiMemberId);
+        event["member_id"] = Json::Int64(outcome.aiMemberId);
         event["requested_by"] = Json::Int64(session.memberId);
         for (const auto reviewer : outcome.reviewers)
         {

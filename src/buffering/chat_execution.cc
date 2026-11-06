@@ -15,7 +15,7 @@ drogon::Task<Json::Value> RequestBuffer::sendChat(Json::Value value,RequestConte
     if(!session) throw ApiError::unauthenticated();
     session->request=context;
     auto message=co_await MessageService::save(*session,value["room_id"].asInt64(),
-        value["client_msg_id"].asString(),value["content"].asString());
+        value["client_msg_id"].asString(),value["content"].asString(),value["mention_ids"]);
     Json::Value ack;
     ack["type"]="ack"; ack["room_id"]=value["room_id"]; ack["client_msg_id"]=value["client_msg_id"];
     ack["seq"]=Json::Int64(message.seq); ack["created_at"]=message.json["created_at"]; ack["duplicate"]=message.duplicate;

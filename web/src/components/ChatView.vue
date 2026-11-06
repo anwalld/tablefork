@@ -32,6 +32,7 @@ const notice = ref('')
 const newRoomName = ref('')
 const inviteName = ref('')
 const draft = ref('')
+const selectedMentions = ref([])
 const messagesEl = ref(null)
 const leaving = shallowRef(null)
 const leaveBusy = ref(false)
@@ -298,6 +299,8 @@ function onRoomEvent(frame) {
     if (here) loadAiState()
   } else if (frame.type === 'ai_chunk') {
     if (here && !aiState.value.generations.some(g => g.id === frame.generation_id)) loadAiState()
+    const member = here ? members.value.find(m => m.id === frame.member_id) : null
+    if (member?.admission_id && frame.admission_id && member.admission_id !== frame.admission_id) return
     drafts.chunk(frame)
     draftRevision.value++
   } else if (frame.type === 'ai_failed') {
@@ -323,7 +326,13 @@ async function loadMembers() {
   }
   try {
     const result = await api.members(room.id)
-    if (activeId.value === room.id && !removedRooms.has(room.id)) members.value = result.members
+    if (activeId.value === room.id && !removedRooms.has(room.id)) {
+      members.value = result.members
+      for (const partial of drafts.forRoom(room.id)) {
+        if (!result.members.some(m => m.id === partial.memberId && (!partial.admissionId || !m.admission_id || partial.admissionId === m.admission_id))) drafts.close(partial.id)
+      }
+      draftRevision.value++
+    }
   } catch {
     if (activeId.value === room.id) members.value = []
   }
@@ -331,11 +340,13 @@ async function loadMembers() {
 
 function trackCaret(event) {
   caret.value = event.target.selectionStart ?? draft.value.length
+  selectedMentions.value = selectedMentions.value.filter(m => draft.value.slice(m.start, m.end) === `@${m.name}`)
 }
 
 async function chooseMention(member) {
   const result = insertMention(draft.value, caret.value, member.name)
   draft.value = result.text
+  if (member.type === 'ai') selectedMentions.value.push({ id: member.id, name: member.name, start: result.caret - member.name.length - 2, end: result.caret - 1 })
   caret.value = result.caret
   await nextTick()
   composerEl.value?.setSelectionRange(result.caret, result.caret)
@@ -458,10 +469,17 @@ function send() {
     notice.value = '消息最多 4000 个字符'
     return
   }
+  const ambiguous = members.value.filter(m => m.type === 'ai').some(m =>
+    members.value.filter(other => other.type === 'ai' && other.name.toLowerCase() === m.name.toLowerCase()).length > 1 &&
+    content.toLowerCase().includes(`@${m.name.toLowerCase()}`) &&
+    !selectedMentions.value.some(selected => selected.name === m.name))
+  if (ambiguous) { notice.value = '有同名AI，请从@候选中选择具体角色'; return }
   const clientMsgId = crypto.randomUUID()
   const roomId = activeId.value
-  outbox.set(roomId, [...(outbox.get(roomId) ?? []), { clientMsgId, content, failed: false, throttled: false }])
-  socket.send(roomId, clientMsgId, content)
+  const mentionIds = [...new Set(selectedMentions.value.filter(m => content.includes(`@${m.name}`)).map(m => m.id))]
+  outbox.set(roomId, [...(outbox.get(roomId) ?? []), { clientMsgId, content, mentionIds, failed: false, throttled: false }])
+  socket.send(roomId, clientMsgId, content, mentionIds)
+  selectedMentions.value = []
   draft.value = ''
 }
 
@@ -469,7 +487,7 @@ function retry(entry) {
   if (activeRemoval.value) return
   entry.failed = false
   entry.throttled = false
-  socket.send(activeId.value, entry.clientMsgId, entry.content)
+  socket.send(activeId.value, entry.clientMsgId, entry.content, entry.mentionIds ?? [])
 }
 
 function onKeydown(event) {
@@ -683,7 +701,7 @@ onBeforeUnmount(() => {
           <form class="composer" @submit.prevent="send">
             <ul v-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及成员">
               <li v-for="member in suggestions" :key="member.id">
-                <button type="button" class="link" @click="chooseMention(member)">@{{ member.name }}</button>
+                <button type="button" class="link" @click="chooseMention(member)">@{{ member.name }}{{ member.type === 'ai' ? ` · ${member.creator_name ?? '旧版预置AI'}` : '' }}</button>
               </li>
             </ul>
             <textarea

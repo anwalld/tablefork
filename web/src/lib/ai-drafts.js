@@ -17,7 +17,7 @@ export class AiDrafts {
     const sequence = frame.sequence ?? 0
     if (current && (attempt < current.attempt ||
         (attempt === current.attempt && sequence <= current.sequence))) return
-    this.byId.set(id, { id, roomId, memberId, text: frame.snapshot ?? text, attempt, sequence })
+    this.byId.set(id, { id, roomId, memberId, text: frame.snapshot ?? text, attempt, sequence, ...(frame.admission_id ? { admissionId: frame.admission_id } : {}) })
   }
 
   clear(roomId) {

@@ -133,7 +133,7 @@ async def serve() -> None:
     )
     agents = load_agents(settings.agents_file)
     async with pool.acquire() as connection, connection.cursor() as cursor:
-        await cursor.execute("SELECT slug, provider FROM ai_profiles")
+        await cursor.execute("SELECT model_slug, provider FROM ai_model_types")
         check_against_database(agents, dict(await cursor.fetchall()))
 
     keys = KeyStore(pool, KeyCipher(settings.encryption_key))

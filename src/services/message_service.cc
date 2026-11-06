@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <drogon/drogon.h>
 #include <sstream>
+#include <set>
 
 #include "common/config.h"
 #include "common/trace.h"
@@ -154,7 +155,7 @@ struct Author
 drogon::Task<StoredMessage> store(Author author,
                                   int64_t roomId,
                                   std::string clientMsgId,
-                                  std::string content, RequestContextPtr context = {}, int64_t rateUser = 0)
+                                  std::string content, RequestContextPtr context = {}, int64_t rateUser = 0, Json::Value mentionIds = Json::nullValue, std::string admissionId = "")
 {
     TraceSpan storage(safeTraceId(std::to_string(roomId) + ":" + clientMsgId), author.type == "ai" ? "ai.save" : "ws.send", "message_store");
     validate(clientMsgId, content);
@@ -176,18 +177,31 @@ drogon::Task<StoredMessage> store(Author author,
     }
     if (author.type == "ai")
     {
+        const auto profile=co_await tx->execSqlCoro("SELECT p.is_legacy,HEX(a.admission_id) AS admission FROM ai_profiles p LEFT JOIN room_ai_personas a ON a.member_id=p.member_id AND a.room_id=? WHERE p.member_id=?",roomId,author.memberId);
+        if(profile.empty() || (!profile[0]["is_legacy"].as<bool>() &&
+            (admissionId.empty() || profile[0]["admission"].isNull() || profile[0]["admission"].as<std::string>()!=admissionId)))
+            throw ApiError::invalidArgument("AI admission is stale");
         const auto generation = co_await tx->execSqlCoro(
-            "SELECT content, stopped, member_id FROM ai_generations "
+            "SELECT content,stopped,member_id,HEX(admission_id) AS admission FROM ai_generations "
             "WHERE generation_id = ? AND room_id = ? FOR UPDATE", clientMsgId, roomId);
         if (!generation.empty())
         {
             if (generation[0]["member_id"].as<int64_t>() != author.memberId)
                 throw ApiError::invalidArgument("generation member mismatch");
+            if(!profile[0]["is_legacy"].as<bool>() && (generation[0]["admission"].isNull() || generation[0]["admission"].as<std::string>()!=admissionId))
+                throw ApiError::invalidArgument("generation admission mismatch");
             stopped = generation[0]["stopped"].as<bool>();
             if (stopped) content = generation[0]["content"].as<std::string>();
             validate(clientMsgId, content);
             co_await tx->execSqlCoro("UPDATE ai_generations SET status = 'saved' WHERE generation_id = ?", clientMsgId);
         }
+        else if(!profile[0]["is_legacy"].as<bool>()) throw ApiError::invalidArgument("unregistered AI generation");
+    }
+    if(!mentionIds.isNull() && (!mentionIds.isArray() || mentionIds.size()>64)) throw ApiError::invalidArgument("invalid mentions");
+    std::set<int64_t> selected;
+    for(const auto &target:mentionIds) {
+        if(!target.isInt64() || target.asInt64()<=0) throw ApiError::invalidArgument("invalid mention target");
+        selected.insert(target.asInt64());
     }
     const auto existing = co_await tx->execSqlCoro(
         "SELECT seq, content, created_at_ms, stopped FROM messages "
@@ -200,6 +214,12 @@ drogon::Task<StoredMessage> store(Author author,
         if (existing[0]["content"].as<std::string>() != content)
             throw ApiError(drogon::k409Conflict,"request_conflict","message ID was already used for different content");
         const auto seq = existing[0]["seq"].as<int64_t>();
+        if(author.type=="human") {
+            const auto savedMentions=co_await tx->execSqlCoro("SELECT mm.member_id FROM message_mentions mm JOIN members m ON m.id=mm.member_id WHERE mm.room_id=? AND mm.seq=? AND m.type='ai'",roomId,seq);
+            std::set<int64_t> prior;
+            for(const auto &mention:savedMentions) prior.insert(mention["member_id"].as<int64_t>());
+            if(prior!=selected) throw ApiError(drogon::k409Conflict,"request_conflict","message mention targets changed");
+        }
         storage.finish("duplicate");
         co_return StoredMessage{
             messageJson(roomId,
@@ -213,6 +233,15 @@ drogon::Task<StoredMessage> store(Author author,
             roomId,
             seq,
             true};
+    }
+    // An accepted message retains its original receipt after a mentioned AI
+    // leaves. Current membership is checked only before storing new messages.
+    for (const auto target : selected)
+    {
+        const auto current = co_await tx->execSqlCoro(
+            "SELECT m.id FROM room_members rm JOIN members m ON m.id=rm.member_id "
+            "WHERE rm.room_id=? AND m.id=? AND m.type='ai'", roomId, target);
+        if (current.empty()) throw ApiError::invalidArgument("AI mention target left the room");
     }
     if (rateUser) co_await MessageRateLimiter::admit(rateUser, context);
     const auto seq = rooms[0]["last_seq"].as<int64_t>() + 1;
@@ -230,6 +259,10 @@ drogon::Task<StoredMessage> store(Author author,
         clientMsgId,
         content,
         createdAtMs, stopped);
+    for(const auto &target:mentionIds) {
+        if(!target.isInt64() || target.asInt64()<=0) throw ApiError::invalidArgument("invalid mention target");
+        co_await tx->execSqlCoro("INSERT IGNORE INTO message_mentions (room_id,seq,member_id) SELECT ?,?,m.id FROM room_members rm JOIN members m ON m.id=rm.member_id WHERE rm.room_id=? AND m.id=? AND m.type='ai'",roomId,seq,roomId,target.asInt64());
+    }
     const auto targets = co_await tx->execSqlCoro(
         "SELECT m.id, m.display_name FROM room_members rm JOIN members m ON m.id = rm.member_id "
         "WHERE rm.room_id = ? AND m.type = 'human' AND m.id <> ?", roomId, author.memberId);
@@ -270,18 +303,18 @@ drogon::Task<StoredMessage> store(Author author,
 drogon::Task<StoredMessage> MessageService::save(const Session &session,
                                                  int64_t roomId,
                                                  std::string clientMsgId,
-                                                 std::string content)
+                                                 std::string content, Json::Value mentionIds)
 {
     co_return co_await store(Author{session.memberId, session.username, "human"},
                              roomId,
                              std::move(clientMsgId),
-                             std::move(content), session.request, session.userId);
+                             std::move(content), session.request, session.userId, std::move(mentionIds));
 }
 
 drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
                                                           int64_t roomId,
                                                           std::string generationId,
-                                                          std::string content)
+                                                          std::string content, std::string admissionId)
 {
     auto context = RequestBuffer::instance().backgroundContext();
     if (context) context->requestId = safeTraceId(std::to_string(roomId) + ":" + generationId);
@@ -300,7 +333,7 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
         Author{aiMemberId, rows[0]["display_name"].as<std::string>(), "ai"},
         roomId,
         std::move(generationId),
-        std::move(content), std::move(context));
+        std::move(content), std::move(context),0,Json::nullValue,std::move(admissionId));
 }
 
 drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestContextPtr context)

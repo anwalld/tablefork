@@ -53,6 +53,18 @@ function makeSocket() {
 }
 
 describe('ChatSocket', () => {
+  it('keeps the selected AI member IDs across a disconnected retry', async () => {
+    const { socket } = makeSocket()
+    latest().open()
+    socket.send(7, 'selected-role', '@Claude A hello', [502])
+    expect(latest().sent.at(-1).mention_ids).toEqual([502])
+    latest().drop()
+    await vi.advanceTimersByTimeAsync(1000)
+    latest().open()
+    expect(latest().sent.find(f => f.type === 'send').mention_ids).toEqual([502])
+    socket.close()
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
     FakeWebSocket.all = []

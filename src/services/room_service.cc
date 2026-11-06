@@ -1,3 +1,4 @@
+#include "services/ai_service.h"
 #include "services/room_service.h"
 
 #include <algorithm>
@@ -374,6 +375,7 @@ drogon::Task<bool> RoomService::leave(Session session,
     }
     else
     {
+        co_await AiService::removeOwned(tx,roomId,session.userId);
         co_await tx->execSqlCoro(
             "DELETE FROM room_members WHERE room_id = ? AND member_id = ?",
             roomId,
@@ -389,10 +391,11 @@ drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
 {
     co_await requireMember(session.memberId, roomId);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT m.id, m.type, m.display_name, rm.role, p.slug, p.provider "
+        "SELECT m.id,m.type,m.display_name,rm.role,p.slug,p.provider,p.model_slug,p.creator_user_id,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
         "JOIN members m ON m.id = rm.member_id "
-        "LEFT JOIN ai_profiles p ON p.member_id = m.id "
+        "LEFT JOIN ai_profiles p ON p.member_id=m.id LEFT JOIN users u ON u.id=p.creator_user_id "
+        "LEFT JOIN room_ai_personas a ON a.room_id=rm.room_id AND a.member_id=m.id "
         "WHERE rm.room_id = ? ORDER BY rm.joined_at, m.id",
         roomId);
     Json::Value members(Json::arrayValue);
@@ -407,6 +410,14 @@ drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
         {
             member["slug"] = row["slug"].as<std::string>();
             member["provider"] = row["provider"].as<std::string>();
+            member["model_slug"]=row["model_slug"].as<std::string>();
+            if(!row["admission"].isNull()) member["admission_id"]=row["admission"].as<std::string>();
+            member["is_legacy"]=row["is_legacy"].as<bool>();
+            member["creator_user_id"]=row["creator_user_id"].isNull()?Json::Value():Json::Value(Json::Int64(row["creator_user_id"].as<int64_t>()));
+            member["creator_name"]=row["username"].isNull()?"":row["username"].as<std::string>();
+            if(!row["persona_version"].isNull()) member["persona_version"]=Json::Int64(row["persona_version"].as<int64_t>());
+            if(!row["creator_user_id"].isNull() && row["creator_user_id"].as<int64_t>()==session.userId)
+                member["persona"]=row["persona"].isNull()?"":row["persona"].as<std::string>();
         }
         members.append(std::move(member));
     }
@@ -491,6 +502,7 @@ drogon::Task<int64_t> RoomService::kick(Session session, int64_t roomId, std::st
     }
     co_await lockRoom(tx, roomId);
     const auto target = co_await managedHuman(tx, session, roomId, username, true);
+    co_await AiService::removeOwned(tx,roomId,target.userId);
     co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
     co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target.memberId)));
     checkRequest(session.request);
@@ -514,7 +526,8 @@ drogon::Task<int64_t> RoomService::ban(Session session, int64_t roomId, std::str
     co_await tx->execSqlCoro("DELETE FROM room_invites WHERE room_id = ? AND user_id = ?", roomId, target.userId);
     if (target.inRoom)
     {
-        co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
+        co_await AiService::removeOwned(tx,roomId,target.userId);
+    co_await tx->execSqlCoro("DELETE FROM room_members WHERE room_id = ? AND member_id = ?", roomId, target.memberId);
     }
     co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::Int64(target.inRoom ? target.memberId : 0)));
     checkRequest(session.request);
