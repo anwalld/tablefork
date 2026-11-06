@@ -11,3 +11,12 @@
 交付后核对分支和工作区。清理已合并且干净的旧分支及已完成临时工作区，记录原提交。保留仍在使用、有未提交改动或尚未合并的分支，指定其用途。
 
 完整测试运行时维持单一隔离Compose项目。临时夹具使用docker compose run --no-deps，避免按其他环境重建依赖并打断回归。
+
+提交时在消息末尾为实际参与的 AI 添加共同作者署名，保留开发者本人的作者身份。Codex 与 Claude Code 共同参与时使用：
+
+```text
+Co-authored-by: Codex <codex@openai.com>
+Co-authored-by: Claude Code <noreply@anthropic.com>
+```
+
+合并提交也保留对应署名，使 GitHub 能在提交详情中关联共同作者；README 的 Contributors 作为项目协作说明。
