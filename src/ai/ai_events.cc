@@ -11,10 +11,11 @@ namespace
 drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT m.id, m.type, m.user_id, m.display_name, p.slug, p.provider "
+        "SELECT m.id,m.type,m.user_id,m.display_name,p.slug,p.provider,p.model_slug,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
         "JOIN members m ON m.id = rm.member_id "
-        "LEFT JOIN ai_profiles p ON p.member_id = m.id "
+        "LEFT JOIN ai_profiles p ON p.member_id=m.id LEFT JOIN users u ON u.id=p.creator_user_id "
+        "LEFT JOIN room_ai_personas a ON a.room_id=rm.room_id AND a.member_id=m.id "
         "WHERE rm.room_id = ? ORDER BY rm.joined_at, m.id",
         roomId);
     snapshot->set_room_id(roomId);
@@ -33,6 +34,14 @@ drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
             ai->set_slug(row["slug"].as<std::string>());
             ai->set_provider(row["provider"].as<std::string>());
             ai->set_name(row["display_name"].as<std::string>());
+            ai->set_model_slug(row["model_slug"].as<std::string>());
+            ai->set_is_legacy(row["is_legacy"].as<bool>());
+            if(!row["username"].isNull()) ai->set_creator_name(row["username"].as<std::string>());
+            if(!row["admission"].isNull()) {
+                ai->set_admission_id(row["admission"].as<std::string>());
+                ai->set_persona(row["persona"].as<std::string>());
+                ai->set_persona_version(row["persona_version"].as<uint64_t>());
+            }
         }
     }
 }
@@ -77,6 +86,8 @@ drogon::Task<> reportMessage(StoredMessage message, RequestContextPtr context)
                 }
             }
         }
+        const auto mentions=co_await drogon::app().getDbClient()->execSqlCoro("SELECT mm.member_id FROM message_mentions mm JOIN members m ON m.id=mm.member_id WHERE mm.room_id=? AND mm.seq=? AND m.type='ai' ORDER BY mm.member_id",message.roomId,message.seq);
+        for(const auto &mention:mentions) saved->add_mention_ids(mention["member_id"].as<int64_t>());
         saved->set_seq(message.seq);
         saved->set_content(json["content"].asString());
         saved->set_stopped(json["stopped"].asBool());

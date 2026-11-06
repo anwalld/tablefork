@@ -26,11 +26,13 @@ def room_state(redis, room_id):
     return json.loads(raw) if raw else None
 
 
-def queue_final(redis, room_id, member_id, generation_id, content):
+def queue_final(redis, room_id, member_id, generation_id, content, admission_id=None):
     state = wait_for(lambda: room_state(redis, room_id))
     assert state.get('active') is None
+    ai = next((a for a in state.get('ais', []) if a[0] == member_id), None)
+    admission_id = admission_id or (ai[5] if ai and len(ai)>5 else '')
     state['active'] = {
-        'id': generation_id, 'slug': 'claude', 'member_id': member_id,
+        'id': generation_id, 'slug': ai[1] if ai else f'role_{member_id}', 'member_id': member_id, 'admission_id': admission_id,
         'payer': [0, 0], 'kind': 'reply', 'epoch': state['epoch'], 'hop': 1, 'slot': 0,
         'attempt': 1, 'status': 'final', 'owner': 'delivery-test',
         'lease_until': 0, 'retry_at': 0, 'content': content,
@@ -64,10 +66,11 @@ def test_final_after_ai_removed_is_rejected_and_task_finishes(make_user, make_ro
     add_ai(owner, room_id, 'claude')
     ai = next(m for m in members(owner, room_id) if m['type'] == 'ai')
     wait_for(lambda: room_state(redis, room_id))
-    assert owner.request('DELETE', f'/api/rooms/{room_id}/ai-members/claude').status_code == 200
+    old_admission=wait_for(lambda: room_state(redis,room_id))['ais'][0][5]
+    assert owner.request('DELETE', f"/api/rooms/{room_id}/ai-members/{ai['id']}").status_code == 200
     wait_for(lambda: not room_state(redis, room_id)['ais'])
     generation_id = uuid.uuid4().hex
-    queue_final(redis, room_id, ai['id'], generation_id, 'late reply')
+    queue_final(redis, room_id, ai['id'], generation_id, 'late reply', old_admission)
     wait_for(lambda: room_state(redis, room_id).get('active') is None)
     history = owner.get(f'/api/rooms/{room_id}/messages').json()['messages']
     assert all(m.get('generation_id') != generation_id for m in history)

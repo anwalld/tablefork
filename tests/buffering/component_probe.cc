@@ -5,6 +5,8 @@
 #include "buffering/shared_queue.h"
 #include "buffering/request_memo.h"
 #include "services/room_service.h"
+#include "services/ai_service.h"
+#include "ai/ai_actions.h"
 #include "services/message_service.h"
 
 using namespace chat;
@@ -83,6 +85,105 @@ drogon::Task<> probe()
     expect(cached.asInteger()==0,"late distribution repopulated a deleted room cache");
     std::cout<<"PASS: delayed distribution cannot repopulate a deleted room cache\n";
 
+    session.request=context("private-role-a");
+    const auto character=co_await AiService::createRole(session,"claude","Same name");
+    session.request=context("private-role-a");
+    const auto repeatedRole=co_await AiService::createRole(session,"claude","Same name");
+    expect(character==repeatedRole,"private role request was not idempotent");
+    session.request=context("private-role-b");
+    const auto secondRole=co_await AiService::createRole(session,"claude","Same name");
+    expect(character["id"]!=secondRole["id"],"same model/name collapsed character identities");
+    co_await db->execSqlCoro("INSERT INTO user_api_keys (user_id,provider,ciphertext,nonce,last4) VALUES (?,'anthropic','unused',UNHEX(REPEAT('00',12)),'test')",session.userId);
+    session.request=context("private-room");
+    const auto privateRoom=co_await RoomService::create(session,"private room");
+    const auto privateRoomId=privateRoom["id"].asInt64();
+    const auto characterId=character["id"].asInt64();
+    session.request=context("private-admit-old");
+    co_await AiService::request(session,privateRoomId,std::to_string(characterId),"old persona");
+    auto admissions=co_await db->execSqlCoro("SELECT HEX(admission_id) AS admission FROM room_ai_personas WHERE room_id=? AND member_id=?",privateRoomId,characterId);
+    const auto oldAdmission=admissions[0]["admission"].as<std::string>();
+    co_await db->execSqlCoro("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot) VALUES ('old-admission',?,?,?,'old output',UNHEX(?),1,'old persona')",privateRoomId,characterId,session.memberId,oldAdmission);
+    session.request=context("private-remove");
+    co_await AiService::remove(session,privateRoomId,std::to_string(characterId));
+    session.request=context("private-admit-new");
+    co_await AiService::request(session,privateRoomId,std::to_string(characterId),"new persona");
+    admissions=co_await db->execSqlCoro("SELECT HEX(admission_id) AS admission FROM room_ai_personas WHERE room_id=? AND member_id=?",privateRoomId,characterId);
+    const auto newAdmission=admissions[0]["admission"].as<std::string>();
+    expect(oldAdmission!=newAdmission,"readmission reused the old generation fence");
+    bool staleRejected=false;
+    try { co_await MessageService::saveAiMessage(characterId,privateRoomId,"old-admission","old output",oldAdmission); }
+    catch(const ApiError &e) { staleRejected=e.code()=="invalid_argument"; }
+    expect(staleRejected,"old admission result was accepted after rejoin");
+    co_await db->execSqlCoro("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot) VALUES ('new-admission',?,?,?,'new output',UNHEX(?),1,'new persona')",privateRoomId,characterId,session.memberId,newAdmission);
+    const auto validFinal=co_await MessageService::saveAiMessage(characterId,privateRoomId,"new-admission","new output",newAdmission);
+    const auto duplicateFinal=co_await MessageService::saveAiMessage(characterId,privateRoomId,"new-admission","new output",newAdmission);
+    expect(!validFinal.duplicate && duplicateFinal.duplicate,"private final was not stored exactly once");
+    rows=co_await db->execSqlCoro("SELECT COUNT(*) AS n FROM messages WHERE room_id=?",privateRoomId);
+    expect(rows[0]["n"].as<int>()==1,"stale private generation polluted history");
+    std::cout<<"PASS: private role identity/idempotency and old-admission final rejection after rejoin\n";
+    std::atomic<int> subscriberReady{0},oldActions{0},currentChunk{0},currentFailed{0},burstChunks{0};
+    const auto channel="room:"+std::to_string(privateRoomId);
+    auto subscriber=drogon::app().getRedisClient()->newSubscriber();
+    subscriber->subscribe(channel,[&](const std::string &,const std::string &payload) {
+        if(payload=="persona-probe-ready") ++subscriberReady;
+        if(payload.find("negative-chunk-proof")!=std::string::npos || payload.find("negative-failed-proof")!=std::string::npos || payload.find("old-admission")!=std::string::npos) ++oldActions;
+        if(payload.find("positive-chunk-proof")!=std::string::npos) ++currentChunk;
+        if(payload.find("positive-failed-proof")!=std::string::npos) ++currentFailed;
+        if(payload.find("burst-chunk-proof")!=std::string::npos) ++burstChunks;
+    });
+    for(int i=0;i<100 && !subscriberReady.load();++i) {
+        co_await drogon::app().getRedisClient()->execCommandCoro("PUBLISH %s %s",channel.c_str(),"persona-probe-ready");
+        co_await drogon::sleepCoro(drogon::app().getLoop(),0.01);
+    }
+    expect(subscriberReady.load()>0,"action probe subscriber did not become ready");
+    for(const auto &id:{std::string("negative-chunk-proof"),std::string("positive-chunk-proof")}) {
+        const auto admission=id=="negative-chunk-proof"?oldAdmission:newAdmission;
+        co_await db->execSqlCoro("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot) VALUES (?,?,?,?,'',UNHEX(?),1,'probe')",id,privateRoomId,characterId,session.memberId,admission);
+        chat::ai::AiAction action;
+        auto *chunk=action.mutable_chunk();chunk->set_room_id(privateRoomId);chunk->set_ai_member_id(characterId);
+        chunk->set_generation_id(id);chunk->set_admission_id(admission);chunk->set_text("probe");
+        handleAiAction(std::move(action));
+    }
+    chat::ai::AiAction staleFinal;
+    auto *final = staleFinal.mutable_final();
+    final->set_room_id(privateRoomId);
+    final->set_ai_member_id(characterId);
+    final->set_generation_id("old-admission");
+    final->set_admission_id(oldAdmission);
+    final->set_content("old output");
+    handleAiAction(std::move(staleFinal));
+    for(const auto &id:{std::string("negative-failed-proof"),std::string("positive-failed-proof")}) {
+        chat::ai::AiAction action;
+        auto *failed=action.mutable_failed();failed->set_room_id(privateRoomId);failed->set_ai_member_id(characterId);
+        failed->set_generation_id(id);failed->set_admission_id(id=="negative-failed-proof"?oldAdmission:newAdmission);
+        failed->set_notify_member_id(session.memberId);failed->set_code("probe");
+        handleAiAction(std::move(action));
+    }
+    for(int i=0;i<200 && (!currentChunk.load() || !currentFailed.load());++i)
+        co_await drogon::sleepCoro(drogon::app().getLoop(),0.01);
+    co_await drogon::sleepCoro(drogon::app().getLoop(),0.5);
+    expect(currentChunk.load()==1 && currentFailed.load()==1,"current-admission actions were not delivered");
+    expect(oldActions.load()==0,"old-admission Chunk/Failed was broadcast after rejoin");
+    // More concurrent readers than SQL connections must still finish. Each
+    // action keeps its membership checks on the transaction connection.
+    for (int i = 0; i < 32; ++i)
+    {
+        chat::ai::AiAction action;
+        auto *chunk = action.mutable_chunk();
+        chunk->set_room_id(privateRoomId);
+        chunk->set_ai_member_id(characterId);
+        chunk->set_generation_id("burst-chunk-proof");
+        chunk->set_admission_id(newAdmission);
+        chunk->set_text("probe");
+        handleAiAction(std::move(action));
+    }
+    for (int i = 0; i < 300 && burstChunks.load() < 32; ++i)
+        co_await drogon::sleepCoro(drogon::app().getLoop(), 0.01);
+    expect(burstChunks.load() == 32, "concurrent chunks exhausted the SQL connection pool");
+    subscriber->unsubscribe(channel);
+    std::cout<<"PASS: real Chunk/Failed handlers publish current admission and reject retired admission\n";
+
+
     SharedQueue queue(drogon::app().getRedisClient("queue"),PayloadCrypto(std::string(64,'a')),"probe",SharedQueue::Options{});
     co_await queue.initialize();
     Json::Value descriptor;
@@ -99,13 +200,36 @@ drogon::Task<> probe()
     Json::Value result;
     result["status"]=200; result["cookies"].append("session-test-only");
     co_await queue.finish(task["id"].asString(),"worker","claim-token","succeeded",result);
-    auto final=co_await queue.query(task["id"].asString(),std::string(64,'c'));
-    expect(final["result"]==result,"C++ encrypted final result corrupted");
+    auto finished=co_await queue.query(task["id"].asString(),std::string(64,'c'));
+    expect(finished["result"]==result,"C++ encrypted final result corrupted");
     std::cout<<"PASS: C++ Redis adapter, crypto, dedup, owner and final result\n";
 }
 } // namespace
-int main()
+int main(int argc, char **argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "paused-ai-chunk")
+    {
+        setenv("BUFFER_REQUESTS_ENABLED", "1", 1);
+        setenv("BUFFER_CONTROL_TOKEN", std::string(32, 'a').c_str(), 1);
+        setenv("QUEUE_ENCRYPTION_KEY", std::string(64, 'a').c_str(), 1);
+        // A fresh process has no running permit. A late stream fragment must
+        // be rejected without terminating the event loop or requiring SQL.
+        auto &app = drogon::app();
+        app.registerBeginningAdvice([&] {
+            chat::ai::AiAction action;
+            auto *chunk = action.mutable_chunk();
+            chunk->set_room_id(1);
+            chunk->set_ai_member_id(1);
+            chunk->set_generation_id("paused-chunk-probe");
+            handleAiAction(std::move(action));
+            app.getLoop()->runAfter(0.1, [&] {
+                std::cout << "PASS: paused AI chunk leaves process alive\n";
+                app.quit();
+            });
+        });
+        app.run();
+        return 0;
+    }
     std::atomic<int> result{1};
     auto &app=drogon::app();
     app.createDbClient("mysql","mysql",3306,"chat","chat",std::getenv("MYSQL_PASSWORD"),16,"","default",false,"utf8mb4",10);

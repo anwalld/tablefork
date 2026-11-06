@@ -57,6 +57,9 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
         co_return co_await RoomController().unban(req, args[0], args[1]);
     if(route=="RoomController::bans" && args.size()==1)
         co_return co_await RoomController().bans(req, args[0]);
+    if(route=="AiController::models" && args.empty()) co_return co_await AiController().models(req);
+    if(route=="AiController::createRole" && args.empty()) co_return co_await AiController().createRole(req);
+    if(route=="AiController::editPersona" && args.size()==2) co_return co_await AiController().editPersona(req,args[0],args[1]);
     if(route=="AiController::catalog" && args.size()==0)
         co_return co_await AiController().catalog(req);
     if(route=="AiController::request" && args.size()==1)

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "services/session_store.h"
+#include "buffering/guarded_transaction.h"
 
 namespace chat
 {
@@ -18,6 +19,11 @@ class AiService
   public:
     // The preset AIs, each marked with whether the caller has its key.
     static drogon::Task<Json::Value> catalog(Session session);
+    static drogon::Task<Json::Value> models(Session session);
+    static drogon::Task<Json::Value> createRole(Session session, std::string model, std::string name);
+    static drogon::Task<Json::Value> editPersona(Session session, int64_t roomId, int64_t memberId,
+                                               std::string persona, int64_t version);
+    static drogon::Task<> removeOwned(const GuardedTransactionPtr &tx, int64_t roomId, int64_t userId);
 
     struct RequestOutcome
     {
@@ -29,7 +35,7 @@ class AiService
     // Adds the AI at once for owners and admins, otherwise files a request.
     static drogon::Task<RequestOutcome> request(Session session,
                                                 int64_t roomId,
-                                                std::string slug);
+                                                std::string slug, std::string persona = "");
 
     static drogon::Task<Json::Value> pendingRequests(Session session, int64_t roomId);
 

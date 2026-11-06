@@ -24,8 +24,9 @@ for sql in migrations/V*.sql; do
     docker exec -i "$name-mysql" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -h127.0.0.1 -uchat chat' < "$sql"
 done
 ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name-redis")
-mkdir -p /private/tmp/cppai-buffering-component-build
+build_dir=${COMPONENT_BUILD_DIR:-/private/tmp/cppai-buffering-component-build}
+mkdir -p "$build_dir"
 docker run --rm --network "$name" --entrypoint sh \
     -e "MYSQL_PASSWORD=$password" -e "QUEUE_TEST_IP=$ip" \
-    -v "$PWD:/work" -v /private/tmp/cppai-buffering-component-build:/build -w /work \
-    cppaiserver-unit -c 'cmake -S . -B /build -DCMAKE_BUILD_TYPE=Debug -DCHAT_BUILD_TESTS=ON && cmake --build /build -j4 && ctest --test-dir /build --output-on-failure && /build/tests/unit/buffering-component-probe'
+    -v "$PWD:/work" -v "$build_dir:/build" -w /work \
+    "${UNIT_TEST_IMAGE:-cppaiserver-unit}" -c 'cmake -S . -B /build -DCMAKE_BUILD_TYPE=Debug -DCHAT_BUILD_TESTS=ON && cmake --build /build -j4 && ctest --test-dir /build --output-on-failure && /build/tests/unit/buffering-component-probe'

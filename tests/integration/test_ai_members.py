@@ -1,11 +1,11 @@
-from ai_helpers import add_ai, ai_slugs, appoint, members, store_key
+from ai_helpers import add_ai, ai_slugs, appoint, members, store_key, role_for
 from conftest import error_code
 
 
 def test_catalog_marks_my_keys(make_user):
     user = make_user()
     store_key(user, "anthropic")
-    agents = {a["slug"]: a for a in user.get("/api/ai-agents").json()["agents"]}
+    agents = {a["model_slug"]: a for a in user.get("/api/ai/models").json()["models"]}
     assert set(agents) == {"deepseek", "gpt", "claude", "gemini"}
     assert agents["claude"]["has_key"] is True
     assert agents["claude"]["provider"] == "anthropic"
@@ -25,7 +25,7 @@ def test_owner_adds_ai_at_once(make_user, make_room, make_socket):
     assert add_ai(owner, room_id, "claude").json() == {"status": "joined"}
     socket.expect("members_changed")
     claude = next(m for m in members(owner, room_id) if m["type"] == "ai")
-    assert claude["slug"] == "claude" and claude["provider"] == "anthropic"
+    assert claude["id"] == role_for(owner,"claude")["id"] and claude["model_slug"] == "claude" and claude["provider"] == "anthropic"
     assert claude["role"] == "member"
 
 
@@ -50,13 +50,13 @@ def test_member_request_waits_for_approval(make_user, make_room, make_socket):
 
     assert add_ai(guest, room_id, "gpt").json() == {"status": "pending"}
     notice = owner_socket.expect("ai_request")
-    assert notice["slug"] == "gpt"
+    assert notice["slug"] == role_for(guest,"gpt")["slug"]
     assert "only_member_ids" not in notice
     assert ai_slugs(owner, room_id) == []
     pending = owner.get(f"/api/rooms/{room_id}/ai-requests").json()["requests"]
-    assert [(r["slug"], r["requested_by"]["name"]) for r in pending] == [("gpt", guest.username)]
+    assert [(r["slug"], r["requested_by"]["name"]) for r in pending] == [(role_for(guest,"gpt")["slug"], guest.username)]
 
-    assert owner.post(f"/api/rooms/{room_id}/ai-requests/gpt/approve").status_code == 200
+    assert owner.post(f"/api/rooms/{room_id}/ai-requests/{role_for(guest, 'gpt')['id']}/approve").status_code == 200
     done = guest_socket.expect("ai_request_done")
     assert done["approved"] is True
     assert ai_slugs(owner, room_id) == ["gpt"]
@@ -81,7 +81,7 @@ def test_reject(make_user, make_room, make_socket):
     guest_socket.subscribe(room_id)
     store_key(guest, "openai")
     add_ai(guest, room_id, "gpt")
-    assert owner.post(f"/api/rooms/{room_id}/ai-requests/gpt/reject").status_code == 200
+    assert owner.post(f"/api/rooms/{room_id}/ai-requests/{role_for(guest, 'gpt')['id']}/reject").status_code == 200
     assert guest_socket.expect("ai_request_done")["approved"] is False
     assert ai_slugs(owner, room_id) == []
 
@@ -92,7 +92,7 @@ def test_duplicate_requests_are_one(make_user, make_room):
     store_key(a, "openai")
     store_key(b, "openai")
     add_ai(a, room_id, "gpt")
-    add_ai(b, room_id, "gpt")
+    add_ai(a, room_id, "gpt")
     assert len(owner.get(f"/api/rooms/{room_id}/ai-requests").json()["requests"]) == 1
 
 
@@ -102,8 +102,8 @@ def test_admin_approves_and_second_review_finds_nothing(make_user, make_room):
     appoint(owner, room_id, admin)
     store_key(guest, "openai")
     add_ai(guest, room_id, "gpt")
-    assert admin.post(f"/api/rooms/{room_id}/ai-requests/gpt/approve").status_code == 200
-    second = owner.post(f"/api/rooms/{room_id}/ai-requests/gpt/approve")
+    assert admin.post(f"/api/rooms/{room_id}/ai-requests/{role_for(guest, 'gpt')['id']}/approve").status_code == 200
+    second = owner.post(f"/api/rooms/{room_id}/ai-requests/{role_for(guest, 'gpt')['id']}/approve")
     assert second.status_code == 404
     assert error_code(second) == "request_not_found"
 
@@ -115,8 +115,8 @@ def test_ordinary_member_cannot_review(make_user, make_room):
     add_ai(a, room_id, "gpt")
     for response in (
         b.get(f"/api/rooms/{room_id}/ai-requests"),
-        b.post(f"/api/rooms/{room_id}/ai-requests/gpt/approve"),
-        b.post(f"/api/rooms/{room_id}/ai-requests/gpt/reject"),
+        b.post(f"/api/rooms/{room_id}/ai-requests/{role_for(a, 'gpt')['id']}/approve"),
+        b.post(f"/api/rooms/{room_id}/ai-requests/{role_for(a, 'gpt')['id']}/reject"),
     ):
         assert response.status_code == 403
         assert error_code(response) == "forbidden"
@@ -157,11 +157,11 @@ def test_remove_ai(make_user, make_room, make_socket):
         if message["member"]["type"] == "ai":
             reply_seq = message["seq"]
 
-    response = guest.request("DELETE", f"/api/rooms/{room_id}/ai-members/claude")
+    response = guest.request("DELETE", f"/api/rooms/{room_id}/ai-members/{role_for(owner, 'claude')['id']}")
     assert response.status_code == 403
     assert ai_slugs(owner, room_id) == ["claude"]
 
-    assert admin.request("DELETE", f"/api/rooms/{room_id}/ai-members/claude").status_code == 200
+    assert admin.request("DELETE", f"/api/rooms/{room_id}/ai-members/{role_for(owner, 'claude')['id']}").status_code == 200
     assert ai_slugs(owner, room_id) == []
     history = owner.get(f"/api/rooms/{room_id}/messages").json()["messages"]
     assert any(m["seq"] == reply_seq and m["member"]["name"] == "Claude" for m in history)

@@ -304,3 +304,19 @@ it('discards late context loading after room membership is revoked', async () =>
   await flushPromises()
   expect(view.findAll('article').some(article => article.text().includes(target.content))).toBe(false)
 })
+
+it('ignores an old admission chunk after the same AI member rejoined', async () => {
+  api.members.mockResolvedValue({ members: [
+    { id: 1, name: 'alice', type: 'human', role: 'owner' },
+    { id: 501, name: 'Claude A', type: 'ai', role: 'member', admission_id: 'NEW' },
+  ] })
+  const view = await chat()
+  state.handlers.onEvent({ type: 'ai_chunk', room_id: 7, member_id: 501,
+    generation_id: 'old-draft', admission_id: 'OLD', snapshot: 'retired admission must stay hidden' })
+  await flushPromises()
+  expect(view.text()).not.toContain('retired admission must stay hidden')
+  state.handlers.onEvent({ type: 'ai_chunk', room_id: 7, member_id: 501,
+    generation_id: 'new-draft', admission_id: 'NEW', snapshot: 'current admission is visible' })
+  await flushPromises()
+  expect(view.text()).toContain('current admission is visible')
+})

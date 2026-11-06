@@ -71,8 +71,11 @@ export const api = {
     request('DELETE', `/api/rooms/${roomId}/bans/${encodeURIComponent(username)}`),
   listBans: (roomId) => request('GET', `/api/rooms/${roomId}/bans`),
 
-  aiAgents: () => request('GET', '/api/ai-agents'),
-  requestAi: (roomId, slug) => request('POST', `/api/rooms/${roomId}/ai-members`, { slug }),
+  aiAgents: () => request('GET', '/api/ai/roles'),
+  aiModels: () => request('GET', '/api/ai/models'),
+  createAiRole: (model_slug, name) => request('POST', '/api/ai/roles', { model_slug, name }),
+  editAiPersona: (roomId, memberId, persona, persona_version) => request('PUT', `/api/rooms/${roomId}/ais/${memberId}/persona`, { persona, persona_version }),
+  requestAi: (roomId, member, persona = '') => request('POST', `/api/rooms/${roomId}/ai-members`, typeof member === 'number' ? { member_id: member, persona } : { slug: member, persona }),
   removeAi: (roomId, slug) => request('DELETE', `/api/rooms/${roomId}/ai-members/${slug}`),
   aiRequests: (roomId) => request('GET', `/api/rooms/${roomId}/ai-requests`),
   approveAi: (roomId, slug) => request('POST', `/api/rooms/${roomId}/ai-requests/${slug}/approve`),

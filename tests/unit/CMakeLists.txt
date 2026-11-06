@@ -22,3 +22,6 @@ add_test(NAME chat-unit-tests COMMAND chat-unit-tests
 # Explicitly invoked against disposable MySQL/Redis, never part of ctest.
 add_executable(buffering-component-probe ../buffering/component_probe.cc)
 target_link_libraries(buffering-component-probe PRIVATE chat-core)
+
+add_test(NAME paused-ai-chunk
+         COMMAND buffering-component-probe paused-ai-chunk)

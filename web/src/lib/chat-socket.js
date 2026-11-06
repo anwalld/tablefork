@@ -114,10 +114,10 @@ export class ChatSocket {
     this.write({ type: 'unsubscribe', room_id: roomId })
   }
 
-  send(roomId, clientMsgId, content) {
+  send(roomId, clientMsgId, content, mentionIds = []) {
     if (this.closed || this.pending.has(clientMsgId)) return
     const entry = {
-      roomId, clientMsgId, content, attempts: 0, timer: null, notBefore: 0, queueAttempt: randomId(),
+      roomId, clientMsgId, content, mentionIds, attempts: 0, timer: null, notBefore: 0, queueAttempt: randomId(),
       expiresAt: Date.now() + SEND_DEADLINE_MS,
     }
     this.pending.set(clientMsgId, entry)
@@ -144,6 +144,7 @@ export class ChatSocket {
       room_id: entry.roomId,
       client_msg_id: entry.clientMsgId,
       content: entry.content,
+      ...(entry.mentionIds?.length ? { mention_ids: entry.mentionIds } : {}),
       queue_owner: queueOwner(),
       queue_attempt: entry.queueAttempt,
     })

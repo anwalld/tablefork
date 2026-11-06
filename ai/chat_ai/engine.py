@@ -111,7 +111,7 @@ class Engine:
                                              else hashlib.sha256(raw_trace.encode()).hexdigest())
                     _apply_snapshot(state, value.room)
                     payer = rules.Human(value.sender.member_id, value.sender.user_id)
-                    decision = rules.on_human_message(state, payer, value.content, available, self.rng)
+                    decision = rules.on_human_message(state, payer, value.content, available, self.rng, value.mention_ids)
                     state.timer_due = self._next_timer(state)
                     self._enqueue(state, decision, {
                         'name': value.sender.name or '用户', 'content': value.content,
@@ -148,7 +148,7 @@ class Engine:
                 'payer': [request.payer.member_id, request.payer.user_id],
                 'kind': request.kind, 'hop': request.hop, 'epoch': state.epoch,
                 'slot': state.proactive_mask.bit_count(), 'attempt': 0,
-                'member_id': state.ai(request.slug).member_id, 'trigger': trigger,
+                'member_id': state.ai(request.slug).member_id, 'admission_id':state.ai(request.slug).admission_id, 'trigger': trigger,
                 'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
                 'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
             })
@@ -260,6 +260,12 @@ class Engine:
                 else:
                     # The claim is the start boundary. A human message that
                     # arrives later does not cancel this already-started reply.
+                    if 'persona_snapshot' not in active:
+                        character = state.ai(active['slug'])
+                        if character:
+                            model = self.agents.get(character.model_slug or character.slug)
+                            active['persona_snapshot'] = model.persona if character.is_legacy and model else character.persona
+                            active['persona_version'] = character.persona_version or 1
                     active['attempt'] += 1
                     active['status'] = 'generating'
                     active['owner'] = uuid.uuid4().hex
@@ -285,6 +291,13 @@ class Engine:
                 result = 'controlled'
                 await self._controlled_finish(room_id, job)
                 return
+            if self.controls:
+                async with self._room(room_id) as state:
+                    if not self._owns(state, job):
+                        return
+                    for field in ('admission_id', 'persona_version', 'persona_snapshot'):
+                        if field in job:
+                            state.active[field] = job[field]
             generation = asyncio.create_task(self._generate(room_id, job))
             watcher = asyncio.create_task(self._watch_control(room_id, job, generation)) if self.controls else None
             heartbeat = asyncio.create_task(self._heartbeat(room_id, job))
@@ -343,8 +356,8 @@ class Engine:
     async def _generate(self, room_id, job):
         state = await self._load(room_id)
         ai = state.ai(job['slug'])
-        agent = self.agents.get(job['slug'])
-        if ai is None or agent is None:
+        agent = self.agents.get(ai.model_slug or ai.slug) if ai else None
+        if ai is None or agent is None or (not ai.is_legacy and ai.admission_id != job.get('admission_id', ai.admission_id)):
             await self._fail_job(room_id, job, 'ai_removed', 'AI 已离开房间', False)
             return
         key = await self.keys.get(job['payer'][1], ai.provider)
@@ -354,6 +367,9 @@ class Engine:
             return
         entries = await recent_messages(self.cache, self.pool, room_id, self.settings.context_messages)
         messages = to_chat(entries, ai.member_id, self.settings.context_messages, self.settings.context_chars)
+        if 'persona_snapshot' not in job:
+            job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
+        system = job['persona_snapshot'] if ai.is_legacy else f'你是 {ai.name}，聊天室中的独立AI角色，created by {ai.creator_name}。只以自己的身份说话。\n' + job['persona_snapshot']
         if job['kind'] in ('proactive', 'goodbye'):
             prompt = GOODBYE_PROMPT if job['kind'] == 'goodbye' else PROACTIVE_PROMPT
             messages.append(ChatMessage('user', prompt))
@@ -382,13 +398,13 @@ class Engine:
             self.send(ai_pb2.AiAction(chunk=ai_pb2.Chunk(
                 room_id=room_id, generation_id=job['id'], ai_member_id=ai.member_id,
                 text=delta, snapshot=''.join(parts)[:MAX_CONTENT], attempt=job['attempt'],
-                sequence=sequence, cumulative=True)))
+                sequence=sequence, cumulative=True, admission_id=job.get("admission_id", ""))))
             last_flush = time.monotonic()
         await flush()  # clears the previous attempt even before the first token
         try:
             provider = self.providers.create(ai.provider)
             async with asyncio.timeout(self.settings.generation_timeout):
-                async for piece in provider.stream(model=agent.model, system=agent.persona,
+                async for piece in provider.stream(model=agent.model, system=system,
                         messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens):
                     parts.append(piece)
                     buffered.append(piece)
@@ -427,6 +443,11 @@ class Engine:
         async with self._room(room_id) as state:
             if not self._owns(state, job):
                 return
+            character = state.ai(job['slug'])
+            removed = character is None or (not character.is_legacy and character.admission_id != job.get('admission_id', character.admission_id))
+            if removed:
+                state.active = None
+                return
             state.pending.clear()
             state.timer_due = None
             state.target = None
@@ -459,7 +480,7 @@ class Engine:
 
     def _send_final(self, room_id, job):
         self.send(ai_pb2.AiAction(final=ai_pb2.Final(room_id=room_id,
-            generation_id=job['id'], ai_member_id=job['member_id'], content=job['content'])))
+            generation_id=job['id'], ai_member_id=job['member_id'], content=job['content'],admission_id=job.get('admission_id',''))))
 
     def _finish_failed(self, state, job):
         state.active = None
@@ -499,7 +520,7 @@ class Engine:
     def _failed(self, room_id, job, code, message):
         self.send(ai_pb2.AiAction(failed=ai_pb2.Failed(room_id=room_id,
             generation_id=job['id'], ai_member_id=job.get('member_id', 0),
-            notify_member_id=job['payer'][0], code=code, message=message)))
+            notify_member_id=job['payer'][0], code=code, message=message,admission_id=job.get("admission_id",""))))
 
     async def _load(self, room_id):
         raw = await self.cache.get(f'ai:room:{room_id}')
@@ -538,7 +559,8 @@ class Engine:
 
 def _apply_snapshot(state, snapshot):
     state.humans = [rules.Human(h.member_id, h.user_id) for h in snapshot.humans]
-    state.ais = [rules.RoomAi(a.member_id, a.slug, a.provider, a.name) for a in snapshot.ais]
+    state.ais = [rules.RoomAi(a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy or not a.model_slug) for a in snapshot.ais]
+    state.pending = [j for j in state.pending if any(a.member_id==j.get('member_id') and a.admission_id==j.get('admission_id',a.admission_id) for a in state.ais)]
     if state.target is not None and (len(state.humans) != 1 or state.ai(state.target) is None):
         state.target = None
         state.timer_due = None

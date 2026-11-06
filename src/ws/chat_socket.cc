@@ -88,6 +88,7 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
                     value["room_id"]=Json::Int64(roomId);
                     value["client_msg_id"]=stringField(request,"client_msg_id");
                     value["content"]=stringField(request,"content");
+                    value["mention_ids"]=request["mention_ids"];
                     value["request_id"]=std::to_string(roomId)+":"+value["client_msg_id"].asString();
                     value["fingerprint"]=std::string(64,'0');
                     value["owner"]="ws";
@@ -118,7 +119,7 @@ void handleSend(const drogon::WebSocketConnectionPtr &connection,
                 const auto session=co_await SessionStore::find(context->token);
                 if(!session) throw ApiError::unauthenticated();
                 const auto message=co_await MessageService::save(*session,roomId,
-                    stringField(request,"client_msg_id"),stringField(request,"content"));
+                    stringField(request,"client_msg_id"),stringField(request,"content"),request["mention_ids"]);
                 Json::Value ack;
                 ack["type"]="ack"; ack["room_id"]=Json::Int64(roomId);
                 ack["client_msg_id"]=request["client_msg_id"]; ack["seq"]=Json::Int64(message.seq);

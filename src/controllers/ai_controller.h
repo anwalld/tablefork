@@ -9,6 +9,10 @@ class AiController : public drogon::HttpController<AiController>
 {
   public:
     METHOD_LIST_BEGIN
+    ADD_METHOD_TO(AiController::models, "/api/ai/models", drogon::Get);
+    ADD_METHOD_TO(AiController::catalog, "/api/ai/roles", drogon::Get);
+    ADD_METHOD_TO(AiController::createRole, "/api/ai/roles", drogon::Post);
+    ADD_METHOD_TO(AiController::editPersona, "/api/rooms/{1}/ais/{2}/persona", drogon::Put);
     ADD_METHOD_TO(AiController::catalog, "/api/ai-agents", drogon::Get);
     ADD_METHOD_TO(AiController::request, "/api/rooms/{1}/ai-members", drogon::Post);
     ADD_METHOD_TO(AiController::remove, "/api/rooms/{1}/ai-members/{2}", drogon::Delete);
@@ -23,6 +27,9 @@ class AiController : public drogon::HttpController<AiController>
     using Response = drogon::Task<drogon::HttpResponsePtr>;
 
     Response catalog(drogon::HttpRequestPtr req);
+    Response models(drogon::HttpRequestPtr req);
+    Response createRole(drogon::HttpRequestPtr req);
+    Response editPersona(drogon::HttpRequestPtr req,std::string roomId,std::string memberId);
     Response request(drogon::HttpRequestPtr req, std::string roomId);
     Response remove(drogon::HttpRequestPtr req, std::string roomId, std::string slug);
     Response pending(drogon::HttpRequestPtr req, std::string roomId);

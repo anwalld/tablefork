@@ -5,6 +5,7 @@ The probabilities follow openspec/specs/ai-replies.
 """
 
 import random
+import re
 from dataclasses import dataclass, field
 
 
@@ -20,6 +21,12 @@ class RoomAi:
     slug: str
     provider: str
     name: str
+    model_slug: str = ""
+    admission_id: str = ""
+    persona: str = ""
+    persona_version: int = 0
+    creator_name: str = ""
+    is_legacy: bool = True
 
 
 @dataclass
@@ -48,7 +55,7 @@ class RoomState:
     def to_json(self) -> dict:
         return {
             "humans": [[h.member_id, h.user_id] for h in self.humans],
-            "ais": [[a.member_id, a.slug, a.provider, a.name] for a in self.ais],
+            "ais": [[a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy] for a in self.ais],
             "target": self.target,
             "proactive_mask": self.proactive_mask,
             "timer_due": self.timer_due, "pending": self.pending,
@@ -99,8 +106,9 @@ def mentions(content: str, ais: list[RoomAi]) -> list[str]:
     lowered = content.lower()
     found = []
     for ai in ais:
-        position = lowered.find("@" + ai.name.lower())
-        if position >= 0:
+        match = re.search(r'(?<!\S)@'+re.escape(ai.name.lower())+r'(?=\s|$|[.,，。！？!?])', lowered)
+        position = match.start() if match else -1
+        if position >= 0 and sum(a.name.lower()==ai.name.lower() for a in ais)==1:
             found.append((position, ai.slug))
     return [slug for _, slug in sorted(found)]
 
@@ -121,6 +129,7 @@ def on_human_message(
     content: str,
     keys: set[str],
     rng: random.Random,
+    mention_ids=None,
 ) -> Decision:
     """Updates state for a human's message and decides who replies.
 
@@ -129,7 +138,21 @@ def on_human_message(
     state.epoch += 1
     state.proactive_mask = 0
     decision = Decision()
-    mentioned = mentions(content, state.ais)
+    ambiguous = any(sum(other.name.lower()==ai.name.lower() for other in state.ais)>1
+                    and re.search(r'(?<!\S)@'+re.escape(ai.name.lower())+r'(?=\s|$|[.,，。！？!?])',content.lower())
+                    for ai in state.ais)
+    if ambiguous and not mention_ids:
+        state.target = None
+        state.timer_due = None
+        return decision
+    if mention_ids:
+        mentioned = list(dict.fromkeys(a.slug for member in mention_ids for a in state.ais if a.member_id==member))
+        if not mentioned:
+            state.target = None
+            state.timer_due = None
+            return decision
+    else:
+        mentioned = mentions(content,state.ais)
 
     if len(state.humans) != 1:
         state.target = None

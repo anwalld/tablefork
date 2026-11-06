@@ -1,5 +1,6 @@
 #include "controllers/ai_control_controller.h"
 #include <drogon/drogon.h>
+#include <optional>
 #include "ai/ai_events.h"
 #include "buffering/request_buffer.h"
 #include "buffering/request_memo.h"
@@ -28,20 +29,38 @@ drogon::Task<std::string> lockActor(const GuardedTransactionPtr &tx, int64_t roo
 drogon::Task<> deliverStopped(int64_t room, RequestContextPtr context)
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT generation_id, member_id, content FROM ai_generations "
+        "SELECT generation_id,member_id,content,HEX(admission_id) AS admission FROM ai_generations "
         "WHERE room_id = ? AND status = 'stopped'", room);
     for (const auto &row : rows)
     {
         checkRequest(context);
         const auto generation = row["generation_id"].as<std::string>();
         const auto content = row["content"].as<std::string>();
-        if (!content.empty())
+        // Python skips whitespace-only snapshots; store nothing for them either.
+        bool discard = content.find_first_not_of(" \t\r\n") == std::string::npos;
+        if (!discard)
         {
-            auto message = co_await MessageService::saveAiMessage(row["member_id"].as<int64_t>(), room, generation, content);
-            if (!message.duplicate) co_await MessageService::distribute(message, context);
-            co_await reportMessage(message, context);
+            std::optional<StoredMessage> message;
+            try
+            {
+                message = co_await MessageService::saveAiMessage(row["member_id"].as<int64_t>(), room, generation, content,
+                    row["admission"].isNull() ? "" : row["admission"].as<std::string>());
+            }
+            catch (const ApiError &e)
+            {
+                // The AI left or was re-admitted, so this snapshot can never be
+                // stored. Retire it rather than make every later stop or pause
+                // in the room fail on it.
+                if (e.code() != "room_not_found" && e.code() != "invalid_argument") throw;
+                discard = true;
+            }
+            if (message)
+            {
+                if (!message->duplicate) co_await MessageService::distribute(*message, context);
+                co_await reportMessage(*message, context);
+            }
         }
-        if (content.empty())
+        if (discard)
         {
             auto tx = co_await newGuardedTransaction(context);
             co_await tx->execSqlCoro("UPDATE ai_generations SET status = 'saved' WHERE generation_id = ? AND status = 'stopped'", generation);

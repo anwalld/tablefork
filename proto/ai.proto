@@ -23,6 +23,12 @@ message AiMember {
   string slug = 2;
   string provider = 3;
   string name = 4;
+  string model_slug = 5;
+  string admission_id = 6;
+  string persona = 7;
+  uint64 persona_version = 8;
+  string creator_name = 9;
+  bool is_legacy = 10;
 }
 
 // Who is in a room at the time of the event.
@@ -49,6 +55,7 @@ message MessageSaved {
   int64 created_at_ms = 6;
   bool stopped = 7;
   string client_msg_id = 8;
+  repeated int64 mention_ids = 9;
 }
 
 message MembersChanged {
@@ -91,6 +98,7 @@ message Chunk {
   uint32 sequence = 6;
   bool cumulative = 7;
   string snapshot = 8;
+  string admission_id = 9;
 }
 
 // A finished reply, to be stored and delivered as an ordinary message.
@@ -99,6 +107,7 @@ message Final {
   string generation_id = 2;
   int64 ai_member_id = 3;
   string content = 4;
+  string admission_id = 5;
 }
 
 // A generation that will not finish. The room drops its partial text; only
@@ -110,6 +119,7 @@ message Failed {
   int64 notify_member_id = 4;
   string code = 5;
   string message = 6;
+  string admission_id = 7;
 }
 
 // A message for one user only, such as a missing API key.

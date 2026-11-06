@@ -4,6 +4,7 @@
 
 #include "common/util.h"
 #include "buffering/request_memo.h"
+#include "buffering/payload_crypto.h"
 
 namespace chat
 {
@@ -20,18 +21,22 @@ struct Profile
 {
     int64_t memberId;
     std::string provider;
+    int64_t creator;
+    bool legacy;
 };
 
 drogon::Task<Profile> profile(const TransactionPtr &tx, const std::string &slug)
 {
     const auto rows = co_await tx->execSqlCoro(
-        "SELECT member_id, provider FROM ai_profiles WHERE slug = ?", slug);
+        "SELECT member_id, provider, creator_user_id, is_legacy FROM ai_profiles WHERE slug = ? OR CAST(member_id AS CHAR) = ?", slug, slug);
     if (rows.empty())
     {
         throw aiNotFound();
     }
     co_return Profile{rows[0]["member_id"].as<int64_t>(),
-                      rows[0]["provider"].as<std::string>()};
+                      rows[0]["provider"].as<std::string>(),
+                      rows[0]["creator_user_id"].isNull() ? 0 : rows[0]["creator_user_id"].as<int64_t>(),
+                      rows[0]["is_legacy"].as<bool>()};
 }
 
 // Locks the room row, like every membership change, and returns the
@@ -97,33 +102,99 @@ AiService::RequestOutcome requestOutcome(const Json::Value &value)
 }
 } // namespace
 
+drogon::Task<Json::Value> AiService::models(Session session)
+{
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT t.model_slug,t.display_name,t.provider,k.user_id IS NOT NULL AS has_key "
+        "FROM ai_model_types t LEFT JOIN user_api_keys k ON k.user_id=? AND k.provider=t.provider ORDER BY t.model_slug", session.userId);
+    Json::Value body; body["models"] = Json::arrayValue;
+    for (const auto &row : rows) {
+        Json::Value item;
+        item["model_slug"]=row["model_slug"].as<std::string>();
+        item["name"]=row["display_name"].as<std::string>();
+        item["provider"]=row["provider"].as<std::string>();
+        item["has_key"]=row["has_key"].as<bool>();
+        body["models"].append(item);
+    }
+    co_return body;
+}
+
 drogon::Task<Json::Value> AiService::catalog(Session session)
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT p.slug, m.display_name, p.provider, k.user_id IS NOT NULL AS has_key "
-        "FROM ai_profiles p JOIN members m ON m.id = p.member_id "
-        "LEFT JOIN user_api_keys k ON k.user_id = ? AND k.provider = p.provider "
-        "ORDER BY m.id",
-        session.userId);
-    Json::Value agents(Json::arrayValue);
-    for (const auto &row : rows)
-    {
-        Json::Value agent;
-        agent["slug"] = row["slug"].as<std::string>();
-        agent["name"] = row["display_name"].as<std::string>();
-        agent["provider"] = row["provider"].as<std::string>();
-        agent["has_key"] = row["has_key"].as<int64_t>() != 0;
-        agents.append(std::move(agent));
+        "SELECT p.member_id,p.slug,p.model_slug,m.display_name,p.provider,p.creator_user_id,u.username,k.user_id IS NOT NULL AS has_key "
+        "FROM ai_profiles p JOIN members m ON m.id=p.member_id JOIN users u ON u.id=p.creator_user_id "
+        "LEFT JOIN user_api_keys k ON k.user_id=? AND k.provider=p.provider "
+        "WHERE p.creator_user_id=? AND p.is_legacy=FALSE ORDER BY m.id", session.userId, session.userId);
+    Json::Value body; body["agents"]=Json::arrayValue;
+    for (const auto &row:rows) {
+        Json::Value item;
+        item["id"]=Json::Int64(row["member_id"].as<int64_t>());
+        item["slug"]=row["slug"].as<std::string>();
+        item["model_slug"]=row["model_slug"].as<std::string>();
+        item["name"]=row["display_name"].as<std::string>();
+        item["provider"]=row["provider"].as<std::string>();
+        item["creator_user_id"]=Json::Int64(row["creator_user_id"].as<int64_t>());
+        item["creator_name"]=row["username"].as<std::string>();
+        item["has_key"]=row["has_key"].as<bool>();
+        body["agents"].append(item);
     }
-    Json::Value body;
-    body["agents"] = std::move(agents);
     co_return body;
+}
+
+drogon::Task<Json::Value> AiService::createRole(Session session, std::string model, std::string name)
+{
+    const auto length=utf8Length(name);
+    if (!length || *length==0 || *length>64 || name.find_first_not_of(" ")==std::string::npos || !isPrintableText(name))
+        throw ApiError::invalidArgument("name must be 1 to 64 printable characters");
+    auto tx=co_await newGuardedTransaction(session.request);
+    const auto actor="user:"+std::to_string(session.userId);
+    if (auto prior=co_await RequestMemo::begin(tx,session.request,actor,"ai.createRole")) co_return *prior;
+    const auto types=co_await tx->execSqlCoro("SELECT provider FROM ai_model_types WHERE model_slug=?",model);
+    if (types.empty()) throw ApiError::invalidArgument("unknown model type");
+    const auto inserted=co_await tx->execSqlCoro("INSERT INTO members (type,display_name) VALUES ('ai',?)",name);
+    const auto member=static_cast<int64_t>(inserted.insertId());
+    const auto slug="role_"+std::to_string(member);
+    co_await tx->execSqlCoro("INSERT INTO ai_profiles (member_id,slug,provider,model_slug,creator_user_id,is_legacy) VALUES (?,?,?,?,?,FALSE)",
+        member,slug,types[0]["provider"].as<std::string>(),model,session.userId);
+    Json::Value result;
+    result["id"]=Json::Int64(member); result["slug"]=slug; result["name"]=name;
+    result["model_slug"]=model; result["creator_user_id"]=Json::Int64(session.userId);
+    result["creator_name"]=session.username;
+    co_await RequestMemo::finish(tx,session.request,actor,result);
+    co_await commit(std::move(tx)); co_return result;
+}
+
+drogon::Task<Json::Value> AiService::editPersona(Session session,int64_t roomId,int64_t memberId,std::string persona,int64_t version)
+{
+    if (persona.size()>16384 || !utf8Length(persona) || version<1)
+        throw ApiError::invalidArgument("invalid persona or version");
+    auto tx=co_await newGuardedTransaction(session.request);
+    const auto actor="user:"+std::to_string(session.userId);
+    if(auto prior=co_await RequestMemo::begin(tx,session.request,actor,"ai.persona")) co_return *prior;
+    co_await lockedRole(tx,roomId,session.memberId);
+    const auto ai=co_await profile(tx,std::to_string(memberId));
+    if(ai.legacy || ai.creator!=session.userId) throw ApiError::forbidden();
+    const auto changed=co_await tx->execSqlCoro(
+        "UPDATE room_ai_personas SET persona=?,persona_version=persona_version+1 WHERE room_id=? AND member_id=? AND persona_version=?",
+        persona,roomId,memberId,version);
+    if(changed.affectedRows()==0) throw ApiError(drogon::k409Conflict,"persona_conflict","persona changed or AI left the room");
+    Json::Value result;result["persona_version"]=Json::Int64(version+1);
+    co_await RequestMemo::finish(tx,session.request,actor,result);co_await commit(std::move(tx));co_return result;
+}
+
+drogon::Task<> AiService::removeOwned(const GuardedTransactionPtr &tx,int64_t roomId,int64_t userId)
+{
+    co_await tx->execSqlCoro("DELETE r FROM ai_member_requests r JOIN ai_profiles p ON p.member_id=r.member_id WHERE r.room_id=? AND p.creator_user_id=?",roomId,userId);
+    co_await tx->execSqlCoro("DELETE rm FROM room_members rm JOIN ai_profiles p ON p.member_id=rm.member_id WHERE rm.room_id=? AND p.creator_user_id=?",roomId,userId);
+    co_await tx->execSqlCoro("UPDATE ai_generations g JOIN ai_profiles p ON p.member_id=g.member_id SET g.content='',g.stopped=TRUE,g.status='saved' WHERE g.room_id=? AND p.creator_user_id=? AND g.status<>'saved'",roomId,userId);
 }
 
 drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
                                                            int64_t roomId,
-                                                           std::string slug)
+                                                           std::string slug, std::string persona)
 {
+    if(persona.size()>16384 || !utf8Length(persona)) throw ApiError::invalidArgument("invalid persona");
     auto tx = co_await newGuardedTransaction(session.request);
     const auto actor = "user:" + std::to_string(session.userId);
     if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.request"))
@@ -132,6 +203,7 @@ drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
     }
     const auto role = co_await lockedRole(tx, roomId, session.memberId);
     const auto ai = co_await profile(tx, slug);
+    if(ai.legacy || ai.creator!=session.userId) throw aiNotFound();
     const auto key = co_await tx->execSqlCoro(
         "SELECT 1 FROM user_api_keys WHERE user_id = ? AND provider = ?",
         session.userId,
@@ -154,20 +226,16 @@ drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
             "INSERT INTO room_members (room_id, member_id) VALUES (?, ?)",
             roomId,
             ai.memberId);
-        co_await tx->execSqlCoro(
-            "DELETE FROM ai_member_requests WHERE room_id = ? AND member_id = ?",
-            roomId,
-            ai.memberId);
+        co_await tx->execSqlCoro("INSERT INTO room_ai_personas (room_id,member_id,admission_id,persona) VALUES (?,?,UNHEX(?),?)",roomId,ai.memberId,PayloadCrypto::randomToken().substr(0,32),persona);
+        co_await tx->execSqlCoro("DELETE FROM ai_member_requests WHERE room_id=? AND member_id=?",roomId,ai.memberId);
     }
     else
     {
         outcome.joined = false;
-        co_await tx->execSqlCoro(
-            "INSERT IGNORE INTO ai_member_requests (room_id, member_id, requested_by) "
-            "VALUES (?, ?, ?)",
-            roomId,
-            ai.memberId,
-            session.memberId);
+        const auto pending=co_await tx->execSqlCoro("SELECT persona FROM ai_member_requests WHERE room_id=? AND member_id=?",roomId,ai.memberId);
+        if(!pending.empty() && pending[0]["persona"].as<std::string>()!=persona)
+            throw ApiError(drogon::k409Conflict,"request_conflict","pending persona differs");
+        co_await tx->execSqlCoro("INSERT IGNORE INTO ai_member_requests (room_id,member_id,requested_by,persona) VALUES (?,?,?,?)",roomId,ai.memberId,session.memberId,persona);
         const auto reviewers = co_await tx->execSqlCoro(
             "SELECT member_id FROM room_members "
             "WHERE room_id = ? AND role IN ('owner', 'admin')",
@@ -198,7 +266,7 @@ drogon::Task<Json::Value> AiService::pendingRequests(Session session, int64_t ro
         throw ApiError::forbidden();
     }
     const auto rows = co_await db->execSqlCoro(
-        "SELECT p.slug, ai.display_name AS ai_name, r.requested_by, "
+        "SELECT p.member_id,p.model_slug,p.is_legacy,p.slug, ai.display_name AS ai_name, r.requested_by, "
         "       requester.display_name AS requester_name, "
         "       UNIX_TIMESTAMP(r.created_at) * 1000 AS created_at_ms "
         "FROM ai_member_requests r "
@@ -211,6 +279,8 @@ drogon::Task<Json::Value> AiService::pendingRequests(Session session, int64_t ro
     for (const auto &row : rows)
     {
         Json::Value request;
+        request["id"] = Json::Int64(row["member_id"].as<int64_t>());
+        request["is_legacy"] = row["is_legacy"].as<bool>();
         request["slug"] = row["slug"].as<std::string>();
         request["name"] = row["ai_name"].as<std::string>();
         request["requested_by"]["id"] = Json::Int64(row["requested_by"].as<int64_t>());
@@ -241,7 +311,7 @@ drogon::Task<AiService::Review> AiService::review(Session session,
     }
     const auto ai = co_await profile(tx, slug);
     const auto request = co_await tx->execSqlCoro(
-        "SELECT requested_by FROM ai_member_requests WHERE room_id = ? AND member_id = ?",
+        "SELECT r.requested_by,r.persona,m.user_id FROM ai_member_requests r JOIN members m ON m.id=r.requested_by WHERE r.room_id = ? AND r.member_id = ?",
         roomId,
         ai.memberId);
     if (request.empty())
@@ -254,10 +324,15 @@ drogon::Task<AiService::Review> AiService::review(Session session,
         ai.memberId);
     if (approve)
     {
+        if(ai.legacy) throw ApiError(drogon::k409Conflict,"legacy_ai","legacy AI cannot be invited");
+        const auto creatorPresent=co_await inRoom(tx,roomId,request[0]["requested_by"].as<int64_t>());
+        if(request[0]["user_id"].as<int64_t>()!=ai.creator || !creatorPresent)
+            throw ApiError(drogon::k409Conflict,"request_expired","creator left the room");
         co_await tx->execSqlCoro(
             "INSERT IGNORE INTO room_members (room_id, member_id) VALUES (?, ?)",
             roomId,
             ai.memberId);
+        co_await tx->execSqlCoro("INSERT INTO room_ai_personas (room_id,member_id,admission_id,persona) VALUES (?,?,UNHEX(?),?)",roomId,ai.memberId,PayloadCrypto::randomToken().substr(0,32),request[0]["persona"].as<std::string>());
     }
     Json::Value value;
     value["member"] = Json::Int64(ai.memberId);
@@ -283,10 +358,13 @@ drogon::Task<std::optional<int64_t>> AiService::remove(Session session,
         throw ApiError::forbidden();
     }
     const auto ai = co_await profile(tx, slug);
+    const auto present=co_await inRoom(tx,roomId,ai.memberId);
+    if(!present && !ai.legacy && ai.creator!=session.userId) throw aiNotFound();
     const auto removed = co_await tx->execSqlCoro(
         "DELETE FROM room_members WHERE room_id = ? AND member_id = ?",
         roomId,
         ai.memberId);
+    co_await tx->execSqlCoro("UPDATE ai_generations SET content='',stopped=TRUE,status='saved' WHERE room_id=? AND member_id=? AND status<>'saved'",roomId,ai.memberId);
     co_await RequestMemo::finish(tx, session.request, actor,
         removed.affectedRows() ? Json::Value(Json::Int64(ai.memberId)) : Json::Value());
     co_await commit(std::move(tx));
