@@ -1,8 +1,19 @@
-# 基于 C++ 的分布式 AI 实时通信系统
+# 基于 C++ 的实时高可用 AI 通讯系统
 
 文档入口见[项目文档索引](docs/README.md)。
 
-面向多人群聊的实时通信系统，支持多实例接入、跨实例消息推送、故障恢复与多模型 AI 成员。房间里可以有多名用户和多个 AI。AI 角色由用户自己创建，底层可选 DeepSeek、GPT、Claude、Gemini 四类模型，每个房间单独设置人设；AI 的调用费用由触发回复的用户用自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
+面向多人群聊的实时通信系统：多实例接入、跨实例推送、Redis 主从自动切换、切换期间请求暂存，房间里还可以有多个由用户自己创建的 AI 成员。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
+
+## 功能概览
+
+- **实时群聊**：WebSocket 推送、按 `seq` 有序、断线补齐、离线重试去重；未读数、“有人@我”、关键词/发送者/时间搜索（中文走 ngram 全文索引）。
+- **房间管理**：邀请、群主转让、管理员、踢出与封禁。
+- **账号安全**：密码强度与常见密码检查、按地址和按用户名双重限流、受信任设备、安全问题找回密码。
+- **AI 成员**：用户在 DeepSeek、GPT、Claude、Gemini 四类模型上创建私有角色，每个房间单独设置人设；谁触发谁付费（用户自己的 API key，加密保存）；流式输出、停止与房间暂停、失败重试和中断恢复。
+- **高可用**：L4 网关 + 双 L7 + 双应用实例，Redis 1 主 1 从 + 3 Sentinel 自动选举，HAProxy 只转发到当前主节点；切主期间业务请求进入共享暂存桶，恢复后限速执行，客户端凭排队编号查询最终结果。
+- **可观测**：结构化阶段日志，HTTP/WS/队列/SQL/Redis/AI 用请求编号关联。
+
+## 架构
 
 ```mermaid
 flowchart TD
@@ -68,7 +79,7 @@ HTTP 入口 `http://localhost:8080` 仅做 301 跳转，不处理登录或 WebSo
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
-修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V7__add_message_reactions.sql`（当前最新为 V7）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V12__add_message_reactions.sql`（当前最新为 V11）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
 
 查看迁移状态，或在修正后清理失败记录：
 
@@ -90,7 +101,24 @@ docker compose down -v
 
 修改已有环境的 `MYSQL_PASSWORD` 或 `MYSQL_ROOT_PASSWORD` 时，只改 `.env` 不够，MySQL 的密码保存在数据卷里，要同时用 `ALTER USER` 修改。`AI_MYSQL_PASSWORD` 例外：`db-users` 服务每次启动都会用 root 把 `ai` 账号的密码同步成 `.env` 里的值。
 
-## 会话与受信任设备
+## 账号与安全
+
+注册时密码至少 10 个字符，不能与用户名相同，也不能是常见密码。常见密码列表在 `data/common-passwords.txt`，取自 [SecLists](https://github.com/danielmiessler/SecLists) 的 `Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt`（MIT 许可），只保留长度至少 10 的条目并转为小写。
+
+注册时可以设置一个安全问题和答案，忘记密码时在登录页点“忘记密码”，输入用户名取回问题，答对后设置新密码。答案像密码一样只保存慢哈希；比较时忽略首尾空格（含全角空格）且不区分英文大小写。重置成功会结束这个用户在所有设备上的会话。没有设置安全问题的旧账号无法自助找回。答错同样计入该用户名的登录失败次数（见下文），问题查询和重置接口也计入 Nginx 的认证限流。
+
+| 方法 | 路径 | 请求 | 响应 |
+|---|---|---|---|
+| POST | `/api/auth/password-recovery/question` | `{"username"}` | `200 {"question"}`，用户不存在或未设置时为空字符串 |
+| POST | `/api/auth/password-recovery/reset` | `{"username","answer","password","password_confirm"}` | `200 {}`；答错为 `401 invalid_answer`，两次密码不一致为 `400 password_mismatch` |
+
+登录、注册和找回密码由 Nginx 按客户端地址限流（共用一个额度），默认每分钟 10 次，可以突发 10 次，超出返回 429 和 `rate_limited`，并带上 `retry_after` 和 `Retry-After` 头，告诉客户端要等几秒。通过 `.env` 的 `AUTH_RATE`、`AUTH_BURST` 和 `AUTH_RETRY_AFTER` 调整，改 `AUTH_RATE` 时把 `AUTH_RETRY_AFTER` 设为 60 除以每分钟次数。
+
+应用还按用户名延迟登录，与客户端地址无关：每个用户名有 5 次免费尝试，之后要等 1、2、4 秒……最多 60 秒才能再试，期间返回 429 和 `too_many_attempts`，带 `retry_after`，不校验密码。登录成功会清零，15 分钟没有新尝试也会清零，不会锁号。登录成功的浏览器会收到 `chat_device` Cookie（180 天），之后这台浏览器单独计数，别人猜这个用户名不会拖慢它。这些数值都在 `.env` 的 `LOGIN_*` 和 `DEVICE_TTL_DAYS` 里。
+
+每个用户每 10 秒最多发 30 条消息，所有连接和房间合计，超出的消息返回 `rate_limited` 和 `retry_after`，不会保存，之后可以用同一个 `client_msg_id` 重发。数值在 `.env` 的 `MESSAGE_RATE_*` 里。
+
+### 会话与受信任设备
 
 - 会话默认 7 天（`SESSION_TTL_SECONDS`）。登出或会话过期后，已打开页面的 WebSocket 会以关闭码 `4401` 断开，前端回到登录页：登出时立即断开，过期时在 `SESSION_CHECK_SECONDS`（默认 30 秒）内断开。
 - 每个用户最多有一台受信任的手机和一台受信任的电脑（按浏览器的 User-Agent 判断，平板算手机）。某类的第一台设备登录后直接受信任；之后另一台同类设备最近 30 天发的消息超过原设备的 1.5 倍时，它在登录或续期时替换原设备。
@@ -150,6 +178,18 @@ DeepSeek 默认使用 `deepseek-flash`，并在调用时显式关闭思考模式
 
 房间列表显示未读数和“有人@我”，房间内可按关键词、发送者和时间搜索。群主和管理员可以暂停或恢复房间里的 AI，触发者本人也可以停止自己引发的回复，已输出的部分会保存为带“已停止”标记的消息。接口、并发语义和结构化日志见[聊天阅读、搜索与 AI 控制](docs/chat-controls.md)。
 
+### AI 回复恢复
+
+房间事件的状态和待生成任务原子保存后才确认，C++ 会重发超时未确认的事件。AI 服务中断后，Redis 中的未完成任务在租约到期后自动恢复，重新生成可能再次产生服务商费用。缺 key 或 key 被拒绝时直接提示用户更新。
+
+`AI_GENERATION_MAX_ATTEMPTS` 控制每条回复的总尝试次数（默认 3），`AI_RETRY_BASE_SECONDS` 控制退避基数（默认 1 秒），`AI_WORK_LEASE_SECONDS` 控制任务租约（默认 10 秒，运行中自动续期）。完整结果会重投直到 C++ 确认保存，重复投递按 `generation_id` 去重。
+
+冷场任务开始前会检查用户是否已重新发言。已开始的冷场回复可以完成，后来的用户消息随后正常回复。主动发言用三个成功位记录，只在消息保存成功后置位，三位全为 1 时结束。
+
+浏览器从实时推送和历史查询得到正式消息时都会清除对应草稿。流式片段携带尝试编号和累计文本，重试及重连后能替换旧草稿。`scripts/test.sh` 包含 Python 单元测试与生成中重启 AI 服务的故障测试。
+
+本机运行完整故障测试时应保持 Docker Desktop 的时钟连续。脚本在 macOS 测试进程存活期间用 `caffeinate` 防止空闲休眠；测试准备会等 Sentinel 退出 TILT，实际主节点故障后的恢复仍按 30 秒验收。暂停虚拟机或强制系统休眠仍会影响计时。
+
 ### 不用真实 key 在本地试
 
 设置 `AI_FAKE_PROVIDERS=1` 后，所有服务商都换成一个假模型：以 `fake-` 开头的 key 都能通过验证，回复内容是“AI 名字: 最后一条消息”。测试和 CI 都用这种方式，不会调用真实的服务商。
@@ -162,6 +202,37 @@ AI_FAKE_PROVIDERS=1 AI_IDLE_SECONDS=20 docker compose up -d --build --wait
 
 公开部署时，把 `ALLOWED_ORIGINS` 改成实际域名，并在 HTTPS 下设置 `COOKIE_SECURE=1`。
 
+## Redis 自动故障切换
+
+应用和 AI 统一连接 `redis-proxy:6379`（HAProxy），它只转发到回答 `role:master` 的节点。`redis-1`/`redis-2` 是两个数据节点，初次启动由 redis-1 任主；3 个 Sentinel 以 quorum 2 监控，默认 3 秒判定下线，再自动提升从节点。Sentinel 的配置分别保存在具名卷中，重启沿用选举后的状态。
+
+手动演示（以下假定当前主节点为 redis-1，先查询确认）：
+
+```bash
+docker compose exec redis-2 redis-cli -h sentinel-1 -p 26379 SENTINEL get-master-addr-by-name chat
+docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
+docker compose stop redis-1
+```
+
+等待数秒，再运行查询。代理应连接 redis-2，应用和 AI 不需重启：
+
+```bash
+docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
+curl --cacert data/certs/ca.crt https://localhost:8443/health
+docker compose start redis-1
+docker compose exec redis-1 redis-cli INFO replication
+```
+
+原主节点会由 Sentinel 降为从节点，最终显示 `role:slave` 和 `master_link_status:up`。若查询显示 redis-2 已是主节点，演示时对调两个节点，不能再次停止已经是从节点的 redis-1 来证明主故障恢复。
+
+启用业务暂存后，暂停期间请求先返回排队编号，由独立内存Redis共享保存；恢复后每实例按50次/秒、8并发初值处理，客户端查询最终业务结果。入队不等于成功，聊天ACK仍在MySQL提交后。共享桶不可用会明确报可重试错误，丢失的任务结果可能是unknown，不能盲重放。主动切主使用`docker compose exec redis-proxy sh /redis-proxy.sh switch`，缺暂停确认就取消。配置、内存边界、查询凭证和恢复矩阵见[请求暂存与恢复](docs/request-buffering.md)。
+
+Redis 异步复制仍可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
+
+共享桶版本升级前补齐独立密钥并备份现有配置、证书和数据。网络IPAM有变化时，需要维护窗口：先准备镜像，停止写入并备份，再用`docker compose down`（不加`-v`）重建网络，最后`docker compose up -d --wait`并核对迁移、数据、许可和业务结果。保留现有MySQL、Redis和Sentinel命名卷，不自动删除旧卷或承诺会话一定失效；固定地址约束见[请求暂存专题](docs/request-buffering.md)。
+
+`SENTINEL_DOWN_AFTER_MS` 控制判定下线的时长。测试脚本会在 AI 故障阶段之后执行 Redis 主节点停止、恢复验证、旧主节点重新加入，并用测试专用复制屏障保存跨阶段夹具；产品不承诺 Redis 写入强一致。
+
 ## 运行测试
 
 ```bash
@@ -169,14 +240,6 @@ scripts/test.sh
 ```
 
 脚本先在容器内运行单元测试，再启动完整环境并运行 `tests/integration` 下的集成测试。传给脚本的参数会交给 pytest，例如 `scripts/test.sh -k rooms`。
-
-注册时密码至少 10 个字符，不能与用户名相同，也不能是常见密码。常见密码列表在 `data/common-passwords.txt`，取自 [SecLists](https://github.com/danielmiessler/SecLists) 的 `Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt`（MIT 许可），只保留长度至少 10 的条目并转为小写。
-
-登录和注册由 Nginx 按客户端地址限流，默认每分钟 10 次，可以突发 10 次，超出返回 429 和 `rate_limited`，并带上 `retry_after` 和 `Retry-After` 头，告诉客户端要等几秒。通过 `.env` 的 `AUTH_RATE`、`AUTH_BURST` 和 `AUTH_RETRY_AFTER` 调整，改 `AUTH_RATE` 时把 `AUTH_RETRY_AFTER` 设为 60 除以每分钟次数。
-
-应用还按用户名延迟登录，与客户端地址无关：每个用户名有 5 次免费尝试，之后要等 1、2、4 秒……最多 60 秒才能再试，期间返回 429 和 `too_many_attempts`，带 `retry_after`，不校验密码。登录成功会清零，15 分钟没有新尝试也会清零，不会锁号。登录成功的浏览器会收到 `chat_device` Cookie（180 天），之后这台浏览器单独计数，别人猜这个用户名不会拖慢它。这些数值都在 `.env` 的 `LOGIN_*` 和 `DEVICE_TTL_DAYS` 里。
-
-每个用户每 10 秒最多发 30 条消息，所有连接和房间合计，超出的消息返回 `rate_limited` 和 `retry_after`，不会保存，之后可以用同一个 `client_msg_id` 重发。数值在 `.env` 的 `MESSAGE_RATE_*` 里。
 
 测试会频繁注册、登录和发消息，所以脚本分几步：
 
@@ -213,51 +276,6 @@ docker compose --profile test run --rm tests python cleanup_test_data.py --apply
 - 默认匹配测试生成的用户名：`u` 加 12 位十六进制，或 `用户u` 加 5 位十六进制。
 - 其他前缀用 `--prefix` 加入（可重复），`--exclude` 排除前缀，默认排除 `realtest_`。
 - 成员全是待删用户的房间整间删除；共享房间里只删待删用户的消息和成员关系，待删用户是群主时，群主转给最早加入的其他人类成员。
-
-## CLion 开发
-
-日常开发在容器内构建，和部署使用同一份依赖。
-
-1. 构建开发镜像：
-
-   ```bash
-   docker build --target dev -t cppaiserver-dev .
-   ```
-
-2. 打开 Settings > Build, Execution, Deployment > Toolchains，新建 Docker 工具链，Image 选择 `cppaiserver-dev:latest`。
-3. 在 Settings > Build, Execution, Deployment > CMake 中把工具链切换为刚建的 Docker 工具链。
-4. 用 `docker compose up -d mysql redis-1 redis-2 sentinel-1 sentinel-2 sentinel-3 redis-proxy queue-redis` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
-
-## Redis 自动故障切换
-
-应用和 AI 统一连接 `redis-proxy:6379`（HAProxy），它只转发到回答 `role:master` 的节点。`redis-1`/`redis-2` 是两个数据节点，初次启动由 redis-1 任主；3 个 Sentinel 以 quorum 2 监控，默认 3 秒判定下线，再自动提升从节点。Sentinel 的配置分别保存在具名卷中，重启沿用选举后的状态。
-
-手动演示（以下假定当前主节点为 redis-1，先查询确认）：
-
-```bash
-docker compose exec redis-2 redis-cli -h sentinel-1 -p 26379 SENTINEL get-master-addr-by-name chat
-docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
-docker compose stop redis-1
-```
-
-等待数秒，再运行查询。代理应连接 redis-2，应用和 AI 不需重启：
-
-```bash
-docker compose exec redis-2 redis-cli -h redis-proxy INFO replication
-curl --cacert data/certs/ca.crt https://localhost:8443/health
-docker compose start redis-1
-docker compose exec redis-1 redis-cli INFO replication
-```
-
-原主节点会由 Sentinel 降为从节点，最终显示 `role:slave` 和 `master_link_status:up`。若查询显示 redis-2 已是主节点，演示时对调两个节点，不能再次停止已经是从节点的 redis-1 来证明主故障恢复。
-
-启用业务暂存后，暂停期间请求先返回排队编号，由独立内存Redis共享保存；恢复后每实例按50次/秒、8并发初值处理，客户端查询最终业务结果。入队不等于成功，聊天ACK仍在MySQL提交后。共享桶不可用会明确报可重试错误，丢失的任务结果可能是unknown，不能盲重放。主动切主使用`docker compose exec redis-proxy sh /redis-proxy.sh switch`，缺暂停确认就取消。配置、内存边界、查询凭证和恢复矩阵见[请求暂存与恢复](docs/request-buffering.md)。
-
-Redis 异步复制仍可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
-
-共享桶版本升级前补齐独立密钥并备份现有配置、证书和数据。网络IPAM有变化时，需要维护窗口：先准备镜像，停止写入并备份，再用`docker compose down`（不加`-v`）重建网络，最后`docker compose up -d --wait`并核对迁移、数据、许可和业务结果。保留现有MySQL、Redis和Sentinel命名卷，不自动删除旧卷或承诺会话一定失效；固定地址约束见[请求暂存专题](docs/request-buffering.md)。
-
-`SENTINEL_DOWN_AFTER_MS` 控制判定下线的时长。测试脚本会在 AI 故障阶段之后执行 Redis 主节点停止、恢复验证、旧主节点重新加入，并用测试专用复制屏障保存跨阶段夹具；产品不承诺 Redis 写入强一致。
 
 ## 压测
 
@@ -296,6 +314,20 @@ docker compose up -d --wait
 - `WORKER_QUEUE_LIMIT=1024`：单个 worker 约每秒处理 500 条，排满时最多积压约 2 秒。超过后返回可重试错误。
 - `HOT_CACHE_SIZE=200`：足够覆盖两页最大分页，这个值按分页大小确定，没有压测。
 
+## CLion 开发
+
+日常开发在容器内构建，和部署使用同一份依赖。
+
+1. 构建开发镜像：
+
+   ```bash
+   docker build --target dev -t cppaiserver-dev .
+   ```
+
+2. 打开 Settings > Build, Execution, Deployment > Toolchains，新建 Docker 工具链，Image 选择 `cppaiserver-dev:latest`。
+3. 在 Settings > Build, Execution, Deployment > CMake 中把工具链切换为刚建的 Docker 工具链。
+4. 用 `docker compose up -d mysql redis-1 redis-2 sentinel-1 sentinel-2 sentinel-3 redis-proxy queue-redis` 启动依赖。运行配置的容器参数加上 `--network cppaiserver_default`，环境变量设置 `MYSQL_PASSWORD` 和 `REDIS_PASSWORD`，取值和 `.env` 相同。
+
 ## 目录
 
 | 路径 | 内容 |
@@ -315,19 +347,6 @@ docker compose up -d --wait
 镜像构建时会给 Drogon 1.9.13 打上 `docker/drogon-mysql-disconnect.patch`。未打补丁时，MySQL 不可达会让应用在 `MysqlConnection::disconnect()` 中段错误退出。
 
 还会打上 `docker/drogon-redis-disconnect.patch`。Drogon 1.9.13 跨线程发送 Redis 命令时，排队的任务只持有连接的裸指针；如果连接在这期间断开，hiredis 会先释放上下文，排队的发送随后访问已释放的内存，表现为 Redis 故障切换窗口里后端偶发 `It is forbidden to run loop on threads other than event-loop thread` 后退出，或 `malloc(): ... corrupted`。补丁让排队任务持有连接的所有权，并让断开后的发送、订阅直接以 `Connection is broken` 失败。
-
-
-### AI 回复恢复
-
-房间事件的状态和待生成任务原子保存后才确认，C++ 会重发超时未确认的事件。AI 服务中断后，Redis 中的未完成任务在租约到期后自动恢复，重新生成可能再次产生服务商费用。缺 key 或 key 被拒绝时直接提示用户更新。
-
-`AI_GENERATION_MAX_ATTEMPTS` 控制每条回复的总尝试次数（默认 3），`AI_RETRY_BASE_SECONDS` 控制退避基数（默认 1 秒），`AI_WORK_LEASE_SECONDS` 控制任务租约（默认 10 秒，运行中自动续期）。完整结果会重投直到 C++ 确认保存，重复投递按 `generation_id` 去重。
-
-冷场任务开始前会检查用户是否已重新发言。已开始的冷场回复可以完成，后来的用户消息随后正常回复。主动发言用三个成功位记录，只在消息保存成功后置位，三位全为 1 时结束。
-
-浏览器从实时推送和历史查询得到正式消息时都会清除对应草稿。流式片段携带尝试编号和累计文本，重试及重连后能替换旧草稿。`scripts/test.sh` 包含 Python 单元测试与生成中重启 AI 服务的故障测试。
-
-本机运行完整故障测试时应保持 Docker Desktop 的时钟连续。脚本在 macOS 测试进程存活期间用 `caffeinate` 防止空闲休眠；测试准备会等 Sentinel 退出 TILT，实际主节点故障后的恢复仍按 30 秒验收。暂停虚拟机或强制系统休眠仍会影响计时。
 
 ## Contributors
 

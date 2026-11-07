@@ -131,7 +131,7 @@ onBeforeUnmount(() => stopCountdown())
         </label>
         <label>
           安全答案
-          <input v-model="securityAnswer" autocomplete="off" required />
+          <input v-model="securityAnswer" autocomplete="off" placeholder="找回时不区分大小写，首尾空格忽略" required />
         </label>
         <p class="hint">安全问题用于忘记密码时找回，答案会加密保存，不会明文展示。</p>
       </template>

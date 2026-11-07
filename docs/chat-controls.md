@@ -10,7 +10,7 @@ PUT /api/rooms/{id}/read接受整数seq。服务端按房间锁串行、单调�
 
 ## 搜索
 
-GET /api/rooms/{id}/search支持q（最多200字符的字面子串，%和_不作通配符，按数据库排序规则不区分大小写）、sender（成员ID）、from/to（Unix毫秒）、before（seq游标）及limit（1—100）。结果按seq倒序，next_before用于下一页。每次查询重新约束房间成员权限。结果定位复用messages接口的before/after分页。
+GET /api/rooms/{id}/search支持q（最多200字符的字面子串，%和_不作通配符，区分大小写（消息正文列为utf8mb4_bin））、sender（成员ID）、from/to（Unix毫秒）、before（seq游标）及limit（1—100）。结果按seq倒序，next_before用于下一页。每次查询重新约束房间成员权限。结果定位复用messages接口的before/after分页。
 
 V10建立ngram全文索引和专用空停用词表。基本汉字U+4E00至U+9FFF组成、至少两个字符的关键词使用完整短语候选，最终仍通过LOCATE与相同发送者、时间和seq条件复核。其他输入沿用字面查询。运行时确认ngram_token_size为2且停用词表为空；配置不符、索引缺失或查询失败时执行准确回退。停用词表应保持为空，修改分词配置后应在维护窗口重建索引并重新验证召回。
 
