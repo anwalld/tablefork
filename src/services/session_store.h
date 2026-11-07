@@ -44,6 +44,9 @@ class SessionStore
                                                       const std::string &token,
                                                       bool everywhere);
 
+    // Ends and announces every session of a user, keyed by their id alone.
+    static drogon::Task<> endAllForUser(int64_t userId, RequestContextPtr context = {});
+
     // Restarts the session's lifetime without changing its token. False when
     // the session has already ended.
     static drogon::Task<bool> extend(const Session &session, const std::string &token);

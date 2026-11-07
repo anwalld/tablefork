@@ -30,7 +30,11 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::registerUser(
     if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::registerUser")) co_return queued;
     const auto &body = jsonBody(req);
     co_await UserService::registerUser(stringField(body, "username"),
-                                       stringField(body, "password"), requestContext(req));
+                                       stringField(body, "password"),
+                                       stringField(body, "security_question"),
+                                       stringField(body, "security_answer"),
+                                       stringField(body, "password_confirm"),
+                                       requestContext(req));
     co_return jsonResponse(Json::objectValue, drogon::k201Created);
 }
 
@@ -127,5 +131,35 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::refresh(
     auto resp = jsonResponse(body);
     SessionStore::setCookie(resp, token);
     co_return resp;
+}
+
+drogon::Task<drogon::HttpResponsePtr> AuthController::passwordRecoveryQuestion(
+    drogon::HttpRequestPtr req)
+{
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::passwordRecoveryQuestion")) co_return queued;
+    const auto &body = jsonBody(req);
+    const auto question = co_await UserService::securityQuestion(stringField(body, "username"));
+    Json::Value result;
+    result["question"] = question.value_or("");
+    co_return jsonResponse(result);
+}
+
+drogon::Task<drogon::HttpResponsePtr> AuthController::passwordRecoveryReset(
+    drogon::HttpRequestPtr req)
+{
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AuthController::passwordRecoveryReset")) co_return queued;
+    const auto &body = jsonBody(req);
+    const auto username = stringField(body, "username");
+    const auto context = requestContext(req);
+    // Answer attempts share the username's login-failure counter, so guessing
+    // someone's answer is throttled exactly like guessing their password.
+    co_await LoginLimiter::admit(LoginLimiter::nameKey(username), context);
+    co_await UserService::resetPassword(username,
+                                        stringField(body, "answer"),
+                                        stringField(body, "password"),
+                                        stringField(body, "password_confirm"),
+                                        context);
+    co_await LoginLimiter::clear(LoginLimiter::nameKey(username), context);
+    co_return jsonResponse(Json::objectValue);
 }
 }  // namespace chat

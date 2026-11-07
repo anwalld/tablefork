@@ -13,6 +13,8 @@ class AuthController : public drogon::HttpController<AuthController>
     ADD_METHOD_TO(AuthController::logout, "/api/auth/logout", drogon::Post);
     ADD_METHOD_TO(AuthController::me, "/api/auth/me", drogon::Get);
     ADD_METHOD_TO(AuthController::refresh, "/api/auth/refresh", drogon::Post);
+    ADD_METHOD_TO(AuthController::passwordRecoveryQuestion, "/api/auth/password-recovery/question", drogon::Post);
+    ADD_METHOD_TO(AuthController::passwordRecoveryReset, "/api/auth/password-recovery/reset", drogon::Post);
     METHOD_LIST_END
 
     drogon::Task<drogon::HttpResponsePtr> registerUser(drogon::HttpRequestPtr req);
@@ -22,5 +24,10 @@ class AuthController : public drogon::HttpController<AuthController>
     // Restarts the current session's lifetime, for browsers holding the
     // user's device token.
     drogon::Task<drogon::HttpResponsePtr> refresh(drogon::HttpRequestPtr req);
+    // Returns the security question so the user can answer it. Missing and
+    // unknown accounts report an empty question, revealing nothing.
+    drogon::Task<drogon::HttpResponsePtr> passwordRecoveryQuestion(drogon::HttpRequestPtr req);
+    // Verifies the security answer and installs a new password.
+    drogon::Task<drogon::HttpResponsePtr> passwordRecoveryReset(drogon::HttpRequestPtr req);
 };
 }  // namespace chat

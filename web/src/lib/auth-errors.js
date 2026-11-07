@@ -3,7 +3,9 @@ import { requestErrorText } from './request-errors.js'
 
 const messages = {
   invalid_credentials: '用户名或密码错误',
+  invalid_answer: '用户名或安全问题答案错误',
   username_taken: '用户名已被占用',
+  password_mismatch: '两次输入的密码不一致',
   invalid_argument: '用户名需 3 到 32 个字符，密码至少 10 个字符',
   // Only reached when a limit error carries no retry_after.
   too_many_attempts: '尝试次数过多，请稍后再试',
