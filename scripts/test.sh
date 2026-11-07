@@ -31,8 +31,17 @@ restore_stack() {
 }
 trap restore_stack EXIT
 
-docker build --target unit -t "${UNIT_TEST_IMAGE:-cppaiserver-unit}" .
-docker build -f ai/Dockerfile --target test -t "${AI_UNIT_TEST_IMAGE:-cppaiserver-ai-test}" .
+# In CI (GitHub Actions) buildx caches the heavy deps/Drogon and AI layers, so
+# repeated runs skip rebuilding them. Local runs leave GHA_CACHE unset and type
+# the plain `docker build` unchanged.
+if [[ "${GHA_CACHE:-0}" == "1" ]]; then
+    docker_build() { docker buildx build --load --cache-from=type=gha,scope=ci-cppaiserver --cache-to=type=gha,scope=ci-cppaiserver,mode=max "$@"; }
+else
+    docker_build() { docker build "$@"; }
+fi
+
+docker_build --target unit -t "${UNIT_TEST_IMAGE:-cppaiserver-unit}" .
+docker_build -f ai/Dockerfile --target test -t "${AI_UNIT_TEST_IMAGE:-cppaiserver-ai-test}" .
 docker compose --profile test build tests
 docker compose build sentinel-1
 python3 scripts/test_sentinel.py --image "${SENTINEL_TEST_IMAGE:-cppaiserver-sentinel:7.4.5-self-guard}"
