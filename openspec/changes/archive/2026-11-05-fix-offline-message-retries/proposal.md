@@ -24,4 +24,3 @@
 ## Impact
 
 仅 web/src/lib/chat-socket.js、对应测试与本 change 文档；不新增依赖。页面内存待发列表不保证刷新/关闭后恢复，不实现后端协调闸门或临时队列。
-独立分支 codex/fix-offline-message-retries，基于 PR #10 提交 36239e3；不混入该 PR 的后台交接提交。

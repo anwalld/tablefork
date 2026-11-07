@@ -1,6 +1,6 @@
 # 基于 C++ 的分布式 AI 实时通信系统
 
-文档入口：[索引](docs/README.md) · [当前交接与部署](docs/handoff.md) · [后续计划](docs/roadmap.md)。
+文档入口见[项目文档索引](docs/README.md)。
 
 面向多人群聊的实时通信系统，支持多实例接入、跨实例消息推送、故障恢复与多模型 AI 成员。房间里可以有多名用户和多个 AI。AI 角色由用户自己创建，底层可选 DeepSeek、GPT、Claude、Gemini 四类模型，每个房间单独设置人设；AI 的调用费用由触发回复的用户用自己的 API key 承担。行为规格在 `openspec/specs/`，各阶段的设计在 `openspec/changes/archive/`。
 
@@ -255,7 +255,7 @@ docker compose exec redis-1 redis-cli INFO replication
 
 Redis 异步复制仍可能丢失最后一小段会话、限流或 AI 状态。聊天消息已保存于 MySQL，历史可补齐。Pub/Sub 在断开期间不保留推送，客户端通过 seq 缺口或重连补齐。此部署是 Sentinel 单主，不支持直接换成 Redis Cluster：受信任设备的 Lua key 设计需要届时单独修改。
 
-共享桶版本升级前补齐独立密钥并备份现有配置、证书和数据。网络IPAM有变化时，需要维护窗口：先准备镜像，停止写入并备份，再用`docker compose down`（不加`-v`）重建网络，最后`docker compose up -d --wait`并核对迁移、数据、许可和业务结果。保留现有MySQL、Redis和Sentinel命名卷，不自动删除旧卷或承诺会话一定失效；[请求暂存专题](docs/request-buffering.md)说明固定地址约束，[当前交接](docs/handoff.md)记录最近部署结果及备份位置。
+共享桶版本升级前补齐独立密钥并备份现有配置、证书和数据。网络IPAM有变化时，需要维护窗口：先准备镜像，停止写入并备份，再用`docker compose down`（不加`-v`）重建网络，最后`docker compose up -d --wait`并核对迁移、数据、许可和业务结果。保留现有MySQL、Redis和Sentinel命名卷，不自动删除旧卷或承诺会话一定失效；固定地址约束见[请求暂存专题](docs/request-buffering.md)。
 
 `SENTINEL_DOWN_AFTER_MS` 控制判定下线的时长。测试脚本会在 AI 故障阶段之后执行 Redis 主节点停止、恢复验证、旧主节点重新加入，并用测试专用复制屏障保存跨阶段夹具；产品不承诺 Redis 写入强一致。
 
@@ -300,7 +300,7 @@ docker compose up -d --wait
 
 | 路径 | 内容 |
 |---|---|
-| `docs/` | 当前交接、后续计划、专题和历史索引 |
+| `docs/` | 架构、接口、配置与测试说明 |
 | `src/` | C++ 后端 |
 | `web/` | Vue 前端 |
 | `ai/` | Python AI 服务：触发规则、模型适配器、key 加密 |

@@ -24,4 +24,4 @@
 
 ## Impact
 
-C++业务入口/任务服务/运行许可、MySQL事务去重、WS发送、前端API/任务查询、独立Redis和代理协调脚本、Docker配置与故障回归。源决定为docs/history/exploration-2026-11-05.md及原项目集中探索记录；最新聊天与一次性任务指令优先。独立分支codex/shared-request-buffering，基于adcd294，不混入PR#10。
+C++业务入口/任务服务/运行许可、MySQL事务去重、WS发送、前端API/任务查询、独立Redis和代理协调脚本、Docker配置与故障回归。

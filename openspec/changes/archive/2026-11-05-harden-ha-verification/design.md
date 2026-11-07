@@ -47,7 +47,7 @@ https://github.com/openssl/openssl/issues/7967
 
 ## Migration Plan
 
-构建测试镜像和 Sentinel 补丁镜像；docker compose up -d --build --wait 使用原 Sentinel 数据卷，启动时只清除历史自身条目。先跑 TLS/取消/证书及隔离 Sentinel 定向测试，再跑完整 scripts/test.sh。最后执行 strict change validate、diff check 和 verify，写 handoff，再提交 PR 并跟踪 CI。回滚可恢复本轮测试文件和原 Sentinel 镜像配置，但原镜像仍有自引用缺陷；不删除数据卷、证书或 .env。
+构建测试镜像和 Sentinel 补丁镜像；docker compose up -d --build --wait 使用原 Sentinel 数据卷，启动时只清除历史自身条目。先跑 TLS/取消/证书及隔离 Sentinel 定向测试，再跑完整 scripts/test.sh。最后执行 strict change validate、diff check 和 verify，记录验证结果。回滚可恢复本轮测试文件和原 Sentinel 镜像配置，但原镜像仍有自引用缺陷；不删除数据卷、证书或 .env。
 
 ## D4. Sentinel 自引用根因与最小补丁（用户追加）
 
