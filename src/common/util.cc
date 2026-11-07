@@ -163,6 +163,12 @@ std::string stringField(const Json::Value &body, const char *name)
     return value.asString();
 }
 
+std::string optionalStringField(const Json::Value &body, const char *name)
+{
+    const auto &value = body[name];
+    return value.isString() ? value.asString() : "";
+}
+
 std::optional<int64_t> intParameter(const drogon::HttpRequestPtr &req,
                                     const std::string &name)
 {

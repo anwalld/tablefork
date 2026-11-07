@@ -31,9 +31,9 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::registerUser(
     const auto &body = jsonBody(req);
     co_await UserService::registerUser(stringField(body, "username"),
                                        stringField(body, "password"),
-                                       stringField(body, "security_question"),
-                                       stringField(body, "security_answer"),
-                                       stringField(body, "password_confirm"),
+                                       optionalStringField(body, "security_question"),
+                                       optionalStringField(body, "security_answer"),
+                                       optionalStringField(body, "password_confirm"),
                                        requestContext(req));
     co_return jsonResponse(Json::objectValue, drogon::k201Created);
 }
@@ -157,7 +157,7 @@ drogon::Task<drogon::HttpResponsePtr> AuthController::passwordRecoveryReset(
     co_await UserService::resetPassword(username,
                                         stringField(body, "answer"),
                                         stringField(body, "password"),
-                                        stringField(body, "password_confirm"),
+                                        optionalStringField(body, "password_confirm"),
                                         context);
     co_await LoginLimiter::clear(LoginLimiter::nameKey(username), context);
     co_return jsonResponse(Json::objectValue);
