@@ -41,6 +41,8 @@ const Json::Value &jsonBody(const drogon::HttpRequestPtr &req);
 
 // Reads a string field, reporting a missing one as invalid_argument.
 std::string stringField(const Json::Value &body, const char *name);
+// Reads an optional string field, returning "" when absent or not a string.
+std::string optionalStringField(const Json::Value &body, const char *name);
 
 // Reads an optional integer query parameter.
 std::optional<int64_t> intParameter(const drogon::HttpRequestPtr &req,

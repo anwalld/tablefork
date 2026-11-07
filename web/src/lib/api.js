@@ -41,12 +41,21 @@ async function request(method, path, body) {
 
 export const api = {
   me: () => request('GET', '/api/auth/me'),
-  register: (username, password) =>
-    request('POST', '/api/auth/register', { username, password }),
+  register: (username, password, extra = {}) =>
+    request('POST', '/api/auth/register', { username, password, ...extra }),
   login: (username, password) =>
     request('POST', '/api/auth/login', { username, password }),
   logout: () => request('POST', '/api/auth/logout'),
   refresh: () => request('POST', '/api/auth/refresh'),
+  passwordRecoveryQuestion: (username) =>
+    request('POST', '/api/auth/password-recovery/question', { username }),
+  passwordRecoveryReset: (username, answer, password, passwordConfirm) =>
+    request('POST', '/api/auth/password-recovery/reset', {
+      username,
+      answer,
+      password,
+      password_confirm: passwordConfirm,
+    }),
 
   rooms: (limit, offset) => request('GET', `/api/rooms?limit=${limit}&offset=${offset}`),
   createRoom: (name) => request('POST', '/api/rooms', { name }),

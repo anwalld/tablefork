@@ -180,6 +180,28 @@ drogon::Task<std::vector<std::string>> SessionStore::end(const Session &session,
     co_return ended;
 }
 
+drogon::Task<> SessionStore::endAllForUser(int64_t userId, RequestContextPtr context)
+{
+    try
+    {
+        auto redis = guardedRedis(context);
+        const auto users = userKey(userId);
+        const auto members = co_await redis->execCommandCoro("SMEMBERS %s", users.c_str());
+        for (const auto &member : members.asArray())
+        {
+            const auto key = member.asString();
+            co_await redis->execCommandCoro("DEL %s", key.c_str());
+            co_await redis->execCommandCoro("PUBLISH %s %s", kEndedChannel, key.c_str());
+        }
+        co_await redis->execCommandCoro("DEL %s", users.c_str());
+    }
+    catch (const drogon::nosql::RedisException &e)
+    {
+        LOG_ERROR << "session endAllForUser: " << e.what();
+        throw ApiError::unavailable();
+    }
+}
+
 drogon::Task<bool> SessionStore::extend(const Session &session, const std::string &token)
 {
     try
