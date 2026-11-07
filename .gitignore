@@ -25,3 +25,28 @@ data/certs/
 
 # macOS metadata
 .DS_Store
+
+# Local AI collaboration records
+/AGENTS.md
+/docs/handoff.md
+/docs/follow-up-plan.md
+/docs/roadmap.md
+/docs/development-workflow.md
+/docs/history/
+openspec/changes/**/handoff*.md
+openspec/changes/**/handoff*.json
+openspec/changes/**/resume-debug.md
+openspec/changes/**/claude-debug-*.md
+openspec/changes/**/failure-investigation.md
+openspec/changes/**/phase-1-report.md
+openspec/changes/**/verification-report.md
+openspec/changes/**/implementation-notes.md
+openspec/changes/**/archive-completion.md
+openspec/changes/**/branch-cleanup.md
+openspec/changes/**/review-report.md
+openspec/changes/**/reconcile-audit.md
+openspec/changes/**/ci-evidence.json
+openspec/changes/**/debug-working-source-sha256.json
+openspec/changes/**/verification-source-sha256.json
+openspec/changes/**/verified*.sha256
+openspec/changes/**/follow-up-request-buffering.md

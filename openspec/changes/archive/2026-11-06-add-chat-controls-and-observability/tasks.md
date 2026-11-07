@@ -20,9 +20,3 @@
 ## 4. 整体验证与交付
 
 - [x] 4.1 构建与全量前端、Python、C++及真实故障回归，保存准确源码/日志/退出码并完成verify报告。
-- [x] 4.2 提交推送、创建PR并确认准确head CI成功，交接列出完成/实测/限制并写“让他double check”。
-
-## Workflow follow-up
-
-- 满足verify与CI后同步规格并archive，检查归档输出。
-- 归档若新增提交，更新PR并确认最终head CI。

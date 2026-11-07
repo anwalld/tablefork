@@ -1,6 +1,6 @@
 # 私人AI角色与房间人设
 
-状态：已随[PR #15](https://github.com/anwalld/CppAiWebServer/pull/15)合并进main（合并提交`5f33431`），change已归档为[2026-11-07-add-private-ai-personas](../openspec/changes/archive/2026-11-07-add-private-ai-personas/)，主规格见`openspec/specs/ai-personas`。原服务尚未部署。
+产品行为要求见`openspec/specs/ai-personas`，接口与数据结构说明如下。
 
 ## 设计更改对照表
 
@@ -56,7 +56,6 @@ gRPC快照增加model_slug、creator_name、房间人设版本与入群编号，
 ## 验证与运维
 
 - V7只增加结构，V1—V6不改。AI账号仅增加模型目录与房间人设SELECT权限，继续不能读取用户表或人类成员user_id。
-- 升级需C++、Python及前端配套；出现私人角色后，不可直接回退只认四个预置AI的旧应用。原服务升级需另行授权与备份。
+- 升级需C++、Python及前端配套；出现私人角色后，不可直接回退只认四个预置AI的旧应用。升级前应备份数据库和配置。
 - `python3 tests/ai_personas/run_schema_tests.py`运行一次性MySQL/Flyway新库与升级测试；需要本机相应镜像，默认不拉取未知软件。
 - `UNIT_TEST_IMAGE=... COMPONENT_BUILD_DIR=... tests/buffering/run_component_tests.sh`运行真实C++/MySQL/Redis服务探针，包含重邀旧Final、Chunk和Failed的正负验证。
-- 完整回归和浏览器均使用独立`cppai-personas`栈及fake provider，具体日志、退出码、源码哈希和限制见交接。未增加真实模型费用测试。

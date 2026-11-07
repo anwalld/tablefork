@@ -54,14 +54,3 @@
 
 - [x] 6.1 在一份全新的 checkout 上（删除 `data/certs/` 和所有卷），执行 `scripts/test.sh`，全部阶段通过。验证：退出码为 0，并且日志检查没有发现 API key 的标记。
 - [x] 6.2 推送分支后 CI 通过。验证：GitHub Actions 的这次运行为绿色，没有新的弃用警告。
-
-## Workflow follow-up
-
-以下四项是 verify 留下的遗留问题，前三项详见 design 的 Risks，第四项见 verification-report 的 S2，不计入本 change 的任务进度，建议归档后另开一个 change 处理：
-
-- 在 Redis 切换窗口内直接断言登录和发消息：要么在有限时间内成功，要么返回 `retryable` 错误，不能挂起。
-- 调查 websockets 13.1 同步客户端在 TLS 1.3 下间歇握手超时的原因，查清后去掉 `conftest.py` 同步夹具的 TLS 1.2 限制。
-- 修复 `RoomHub::reconcile` 的“再跑一轮”窄竞态：清除 `reconciling_` 后再检查一次 `reconcileAgain_`。
-- 检查 `src/ws/chat_socket.cc` 拒绝 WebSocket 握手（401）时的响应：nginx 报告 Content-Length 与实际长度不符。修正后补一个用失效 cookie 连接 `/ws` 的回归测试（见 verification-report 的 S2）。
-
-- CI 通过后合并 PR，然后执行 `/opsx:archive`，把 `edge-gateway`、`high-availability` 两个新规格和 `chat-rooms`、`user-auth` 的修改同步进主规格。

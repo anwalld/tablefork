@@ -46,7 +46,3 @@
 - [x] 8.1 `scripts/test.sh` 按 D8 分两轮运行（宽松限额跑全部测试，默认值跑限流测试），本地全部通过
 - [x] 8.2 从 `.env.example` 在空数据卷上全新启动，验证 Flyway、注册、登录、发消息正常
 - [x] 8.3 推送到 GitHub 后 CI 通过（需要你先创建远端仓库；没有远端时记为未完成并说明）
-
-## Workflow follow-up
-
-- 实施完成后运行 `/opsx:verify`，再提交并 `/opsx:archive`。

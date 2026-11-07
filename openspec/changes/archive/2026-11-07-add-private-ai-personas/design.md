@@ -4,13 +4,11 @@
 
 基线PR #13：`ai_profiles(member_id,slug UNIQUE,provider)`只有四个公共AI；`members.display_name`保存名字，模型和默认人设在`ai/agents.toml`。`AiService`、Python规则及Redis状态依赖slug，gRPC没有房间人设或入群代次。PR #13新增`ai_generations`持久控制快照、停止/暂停、结构化提及及共享桶业务分派。
 
-阶段一已完成正式OpenSpec和数据库结构并停止汇报，见phase-1-report.md。用户随后授权继续完整apply、verify与交接；以下完整目标现在纳入实施，不自动归档、部署或合并。
-
 ## Goals / Non-Goals
 
 **Goals:** 将模型类型、私人角色、房间配置拆开；保留旧成员/消息；为角色隔离、人设固定版本、退出代次隔离和原控制机制提供数据基础。
 
-**Non-Goals:** 不升级原服务、不发送真实模型请求。阶段一只交付结构的限制已由用户追加授权解除。完整change不包含公共角色市场、角色转让、全局默认人设编辑、用户删除账户或角色删除/改名功能。
+**Non-Goals:** 完整change不包含公共角色市场、角色转让、全局默认人设编辑、用户删除账户或角色删除/改名功能。
 
 ## Decisions
 
@@ -79,4 +77,4 @@
 
 ## 设计更改对照表
 
-实际采用的逐条对照、接口与运维约束见[角色功能文档](../../../../docs/private-ai-personas.md)；前两项的结构对照与历史实测见[阶段一报告](phase-1-report.md)。表区分原来与现在，不能以已确认设计代替已实现或实测。
+实际采用的逐条对照、接口与运维约束见[角色功能文档](../../../../docs/private-ai-personas.md)。
