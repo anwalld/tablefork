@@ -8,17 +8,80 @@
 
 当前验证范围为单机 Docker 环境的多实例部署与故障恢复；项目更名不扩大已有验证结论。
 
-## 当前结论
+## 当前交接（2026-11-07，Claude Code → 下一位接手者）
 
-2026-11-07由Claude Code接手并更新。功能基线为已合并的PR #15。
+**让他double check。** 本节替代此前的“当前结论”。2026-11-06、11-07 两天由 Claude Code 接手 Codex 的交接，复核两次都由同一执行者完成，不代表独立审计。
 
-- [PR #15](https://github.com/anwalld/CppAiWebServer/pull/15)（私人AI角色与房间人设）已正常合并，合并提交`5f33431504a067f3bd385957e1ece65568e6e027`。PR准确head `0950fd9`的分支CI成功；合并提交的main CI见该提交的Actions记录，本文件不预先宣称结果。
-- 合并前在准确源码上本机完整运行`scripts/test.sh`退出0：常规集成276 passed/27 skipped，AI、Redis受控和自动切换、app/web故障阶段及最后严格9项通过，共享桶恢复9.792秒、102条确认各一次，旧主重加入51次采样零代理连接；Python 88项、前端114项实测通过。详见[调试记录](../openspec/changes/archive/2026-11-07-add-private-ai-personas/claude-debug-2026-11-07.md)。
-- 已完成并归档：HTTPS/多实例/Sentinel/房间管理、HA加固、离线重试与共享桶（PR #12），结构化日志、未读/@提醒、AI停止/暂停、搜索（PR #13），私人AI角色与房间人设（PR #15）。活动change为空。
-- 同批文档整理：本文件、[文档索引](README.md)、[后续计划](roadmap.md)和`docs/history/`随修复文档PR进入版本控制，并修正了AI账号授权、迁移示例、README中的旧版邀请流程等过时内容。
-- **未部署**：原服务`https://localhost:8443`最近一次有证据的部署仍是PR #12的`a1bfbc0`，PR #13、#15均未上线。部署需要用户单独授权，步骤见[后续计划](roadmap.md)第8节。
+### 一句话状态
 
-**让他double check**：Codex调试时的堆损坏和2026-11-07 main CI `712572a`的后端退出，已定位为Drogon 1.9.13 Redis连接断开时的释放后使用，由`docker/drogon-redis-disconnect.patch`修复。压力探针在补丁版中60秒内拦下3241次发往已断开连接的发送；未打补丁的发布版碰巧没崩，所以没有拿到补丁前必现、补丁后消失的直接对比，以修复PR的完整CI和后续运行为准。
+功能全部合并进 main（截至 PR #15）。**main 当前 CI 是红的**：`712572a` 在 Redis 故障切换时后端偶发崩溃。修复在 [PR #17](https://github.com/anwalld/CppAiWebServer/pull/17)，分支 CI 已通过，**还没合并**，在等用户确认。原服务**没有部署**，仍是 PR #12。
+
+### 提交与 CI 准确状态
+
+| 对象 | 提交 | CI | 状态 |
+| --- | --- | --- | --- |
+| [PR #15](https://github.com/anwalld/CppAiWebServer/pull/15) 私人AI角色与房间人设 | head `0950fd9`，合并 `5f33431` | 分支 [42255568447](https://github.com/anwalld/CppAiWebServer/actions/runs/42255568447) 成功；main [42263663594](https://github.com/anwalld/CppAiWebServer/actions/runs/42263663594) 成功 | 已合并 |
+| [PR #16](https://github.com/anwalld/CppAiWebServer/pull/16) 归档 personas、文档整合 | head `2bb8817`，合并 `712572a` | 分支 [42264305171](https://github.com/anwalld/CppAiWebServer/actions/runs/42264305171) 成功；**main [42268223848](https://github.com/anwalld/CppAiWebServer/actions/runs/42268223848) 失败** | 已合并；失败与本 PR 的文档改动无关，见下面的 bug |
+| [PR #17](https://github.com/anwalld/CppAiWebServer/pull/17) Drogon Redis 断连补丁 | 分支 `claude/drogon-redis-disconnect-fix` | 分支 [42274473079](https://github.com/anwalld/CppAiWebServer/actions/runs/42274473079)（`734dbf6`）成功 | **待合并**；本交接文档的提交会再触发一次分支 CI |
+
+### 做了什么
+
+1. **复核 PR #13 并修两个 bug**（代码已随 PR #15 进入 main）
+   - AI 片段、失败、提示的异步入口没有异常边界，异常逃出 `drogon::async_run` 会导致进程终止；已加保护。
+   - AI 被移出后残留的“已停止”快照存不进去，导致该房间之后每次停止或暂停都返回 404；改为直接结束为 `saved` 并清除草稿，纯空白快照同样处理。
+2. **接手私人AI角色调试**（Codex 留下：未提交，ASAN 回归 1 项失败，堆损坏和登录超时没有定位）
+   - Chunk/Failed 原先在 Redis 推送期间一直持有房间行锁和 MySQL 连接，改为一次只读校验后再推送。
+   - 修复组件探针的编译错误，删除临时登录诊断日志。
+   - 在准确源码上完整跑 `scripts/test.sh`，退出 0。随后提交并建 PR #15，CI 通过后合并。
+   - 详细记录：[调试记录](../openspec/changes/archive/2026-11-07-add-private-ai-personas/claude-debug-2026-11-07.md)。
+3. **归档与文档**（PR #16）
+   - 归档 `add-private-ai-personas`，同步 ai-members、ai-replies 两份主规格，新增 ai-personas 主规格；14 份主规格校验全部通过。
+   - 把主工作区里另一位执行者没提交的文档整理并入版本控制：索引、本文件、roadmap、history，并修正过时的状态。
+   - README 改为私人角色的邀请流程；AI 账号授权、迁移示例同步更新；Codex 共同作者邮箱统一为 `codex@openai.com`。
+4. **清理**
+   - 停掉三套隔离测试栈：`cppai-personas`、`cppai-chat-controls`、`cppai-buffering-static`，连同数据卷一起删除。原服务 `cppaiserver` 没动。
+   - 只在本机存在的文件先备份到 `~/.local/share/cppai-backups/worktree-cleanup-20261107`（目录权限 700）。
+5. **定位并修复 main CI 崩溃**（PR #17），见下一节。
+
+### 本次发现的 bug：Drogon Redis 连接断开后的释放后使用
+
+- **现象**：main CI `712572a` 的 `test_failover.py::test_business_requests_during_redis_failover` 失败。app-2 日志打出 `FATAL It is forbidden to run loop on threads other than event-loop thread - EventLoop.cc:269`，随后 trantor `abortNotInLoopThread()` 调用 `exit(1)`，WebSocket 没有关闭帧就断开。同样的代码在 `5f33431` 上通过，所以是偶发的。
+- **根因**：Drogon 1.9.13 的 `RedisConnection::sendvCommand`/`sendFormattedCommand`/`sendSubscribe`/`sendUnsubscribe` 跨线程时，用 `queueInLoop([this, ...])` 排队，只捕获裸指针。连接断开时，`handleDisconnect` 移除 channel、清空 `ev.data`，hiredis 在断开回调返回后释放 `redisAsyncContext`。断开之后才执行的排队发送，仍用这个悬空的 `redisContext_` 调用 `redisAsyncFormattedCommand`，属于释放后使用。结果可能是 trantor 线程断言后 `exit(1)`（这次），也可能是 Codex 调试时 app-2 的 `malloc(): unsorted double linked list corrupted`；`exit` 在其他线程运行期间析构全局对象，也会放大成堆损坏。
+- **修复**：`docker/drogon-redis-disconnect.patch`，在 `Dockerfile` 里和已有的 MySQL 补丁一起应用：
+  - 排队 lambda 改为捕获 `shared_from_this()`。
+  - `handleDisconnect` 结束时把 `redisContext_` 置空。
+  - `sendCommandInLoop` 遇到已结束的连接时，直接回调 `Connection is broken`；订阅、取消订阅和 `disconnect` 遇到已结束的连接时跳过。
+- **证据**：
+  - 打补丁后 Drogon 编译通过，ctest 2/2 通过；PR #17 完整 CI 通过。
+  - 压力探针（64 个协程从 8 个应用线程持续发命令，同时每 20ms `CLIENT KILL`）：补丁版 60 秒内拦下 3241 次发往已断开连接的发送。
+  - **缺口**：未打补丁的发布版在同样条件下碰巧没崩，所以没有拿到“补丁前必现、补丁后消失”的直接复现。要更强的证据，需要用 ASAN 编译 hiredis 和 Drogon 后再跑探针。
+- **同一原因的连带现象**：发往已断开连接的命令，回调会进入一个永远不会处理的队列，只能等 2 秒超时；这很可能就是 Codex 记录的登录偶发超过 5 秒。打补丁后这类发送会立刻失败，但登录超时本身没有复现验证过。
+
+### 现在的问题
+
+1. **main 的 CI 是红的**，PR #17 合并后才会恢复。合并后要核对新 merge SHA 的 main CI。
+2. **原服务没有部署**：`https://localhost:8443` 仍是 PR #12 的 `a1bfbc0`；PR #13、#15、#17 都没上线，V6、V7 迁移也没在原服务的数据库上执行过。
+3. **三个已合并的临时工作区和分支还在**：`/private/tmp/cppai-chat-controls`、`/private/tmp/cppai-shared-request-buffering`、`/private/tmp/cppai-private-ai-personas`，以及本地和远端的同名分支 `codex/chat-controls-and-observability`、`codex/shared-request-buffering`、`codex/private-ai-personas`；另外还有已合并的 `claude/project-update-handover-24e3c2`。删除命令被权限拦下，需要用户授权或自己删。
+4. **主工作区** `/Users/mima0000/CLionProjects/CppAiServer`：本地 main 停在 `9dae3ff`，还留着另一位执行者 24 个未提交的文档改动。这些内容已经由 PR #16 并入 main，但按约定没有 reset 或覆盖。用户确认后可以丢弃这些改动，再把本地 main 快进到 origin/main。
+5. **PR #15 的提交**里 Codex 的署名邮箱是 `noreply@openai.com`（按当时的 AGENTS.md），GitHub 可能不会把它关联到 codex 账号。合并提交和之后的提交都已统一为 `codex@openai.com`；按约定不改写历史。
+6. `claude/project-framework-overview-22187f` 工作区属于另一个 Claude 会话，没有动。
+
+### 接下来要做什么（按顺序）
+
+1. **合并 PR #17**（需要用户确认），然后核对 main CI 是否恢复成功。
+2. **部署到原服务**（需要用户单独授权），参照下面 PR #12 的升级记录：
+   - 受保护备份：.env、一致性 SQL、证书、Redis/Sentinel 状态。
+   - 先构建镜像，停写入，执行 V6、V7 迁移，逐表核对计数，`db-users` 应用新授权。
+   - 冒烟验收：登录、消息、私人AI的创建和邀请，用 fake provider 或不调用付费模型。
+   - 保留旧镜像便于回退，不运行 `down -v`。
+3. **清理**上面第 3、4 项列出的工作区、分支和主工作区（需要用户点头）。
+4. **以后再做**：见[后续计划](roadmap.md)第 8 节，包括 Redis 补丁的后续观察、停止控制的数据库轮询压力、生成失败的独立状态、搜索全文索引和既有遗留。
+
+### 环境与约定
+
+- 测试和故障演练只在隔离 Compose 项目里做，临时夹具用 `docker compose run --no-deps`。
+- 不要提交 `.env`、`data/certs` 或本机日志。提交消息末尾按 [分支与CI流程](development-workflow.md) 加 Claude Code 和 Codex 两条 Co-authored-by，邮箱以该文档为准。
+- 合并、部署、删除分支或工作区，都需要用户对当次操作的明确授权，前一批的授权不延续。
 
 ## PR #12既有部署与验证记录
 
