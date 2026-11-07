@@ -2,7 +2,19 @@ diff --git a/nosql_lib/redis/src/RedisConnection.cc b/nosql_lib/redis/src/RedisC
 index fcfe8f1..fe6f3cf 100644
 --- a/nosql_lib/redis/src/RedisConnection.cc
 +++ b/nosql_lib/redis/src/RedisConnection.cc
-@@ -262,6 +262,8 @@ void RedisConnection::handleDisconnect()
+@@ -242,6 +242,11 @@ void RedisConnection::handleDisconnect()
+ {
+     LOG_TRACE << "handleDisconnect";
+     loop_->assertInLoopThread();
++    // A disconnect callback can drop the client's final owning reference.
++    // Keep this connection and its Channel alive through the current event
++    // dispatch. queueInLoop runs after the active Channel batch completes.
++    loop_->queueInLoop([self = shared_from_this()] {});
++
+     while ((!resultCallbacks_.empty()) && (!exceptionCallbacks_.empty()))
+     {
+         if (exceptionCallbacks_.front())
+@@ -262,6 +267,8 @@ void RedisConnection::handleDisconnect()
      redisContext_->ev.delRead = nullptr;
      redisContext_->ev.cleanup = nullptr;
      redisContext_->ev.data = nullptr;
@@ -11,7 +23,7 @@ index fcfe8f1..fe6f3cf 100644
  }
  
  void RedisConnection::addWrite(void *userData)
-@@ -318,6 +320,18 @@ void RedisConnection::sendCommandInLoop(
+@@ -318,6 +325,18 @@ void RedisConnection::sendCommandInLoop(
      RedisResultCallback &&resultCallback,
      RedisExceptionCallback &&exceptionCallback)
  {
@@ -30,7 +42,7 @@ index fcfe8f1..fe6f3cf 100644
      resultCallbacks_.emplace(std::move(resultCallback));
      exceptionCallbacks_.emplace(std::move(exceptionCallback));
  
-@@ -370,7 +384,11 @@ void RedisConnection::disconnect()
+@@ -370,7 +389,11 @@ void RedisConnection::disconnect()
  {
      auto thisPtr = shared_from_this();
      loop_->queueInLoop(
@@ -43,7 +55,7 @@ index fcfe8f1..fe6f3cf 100644
  }
  
  void RedisConnection::sendSubscribe(
-@@ -382,7 +400,9 @@ void RedisConnection::sendSubscribe(
+@@ -382,7 +405,9 @@ void RedisConnection::sendSubscribe(
      }
      else
      {
@@ -54,7 +66,7 @@ index fcfe8f1..fe6f3cf 100644
      }
  }
  
-@@ -395,16 +415,18 @@ void RedisConnection::sendUnsubscribe(
+@@ -395,16 +420,18 @@ void RedisConnection::sendUnsubscribe(
      }
      else
      {
@@ -76,7 +88,7 @@ index fcfe8f1..fe6f3cf 100644
          return;
      }
      subContexts_.emplace(subCtx->contextId(), subCtx);
-@@ -430,6 +452,8 @@ void RedisConnection::sendUnsubscribeInLoop(
+@@ -430,6 +457,8 @@ void RedisConnection::sendUnsubscribeInLoop(
      // This problem is fixed in 2021-12-02 commit da5a4ff, but
      // have not been released as a tag.
      // Here we just register a same function to deal with both situation.

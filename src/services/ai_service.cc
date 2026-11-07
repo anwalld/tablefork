@@ -187,7 +187,7 @@ drogon::Task<> AiService::removeOwned(const GuardedTransactionPtr &tx,int64_t ro
 {
     co_await tx->execSqlCoro("DELETE r FROM ai_member_requests r JOIN ai_profiles p ON p.member_id=r.member_id WHERE r.room_id=? AND p.creator_user_id=?",roomId,userId);
     co_await tx->execSqlCoro("DELETE rm FROM room_members rm JOIN ai_profiles p ON p.member_id=rm.member_id WHERE rm.room_id=? AND p.creator_user_id=?",roomId,userId);
-    co_await tx->execSqlCoro("UPDATE ai_generations g JOIN ai_profiles p ON p.member_id=g.member_id SET g.content='',g.stopped=TRUE,g.status='saved' WHERE g.room_id=? AND p.creator_user_id=? AND g.status<>'saved'",roomId,userId);
+    co_await tx->execSqlCoro("UPDATE ai_generations g JOIN ai_profiles p ON p.member_id=g.member_id SET g.content='',g.last_nonempty_content=NULL,g.outcome='cancelled',g.phase='finished' WHERE g.room_id=? AND p.creator_user_id=? AND g.phase<>'finished'",roomId,userId);
 }
 
 drogon::Task<AiService::RequestOutcome> AiService::request(Session session,
@@ -364,7 +364,7 @@ drogon::Task<std::optional<int64_t>> AiService::remove(Session session,
         "DELETE FROM room_members WHERE room_id = ? AND member_id = ?",
         roomId,
         ai.memberId);
-    co_await tx->execSqlCoro("UPDATE ai_generations SET content='',stopped=TRUE,status='saved' WHERE room_id=? AND member_id=? AND status<>'saved'",roomId,ai.memberId);
+    co_await tx->execSqlCoro("UPDATE ai_generations SET content='',last_nonempty_content=NULL,outcome='cancelled',phase='finished' WHERE room_id=? AND member_id=? AND phase<>'finished'",roomId,ai.memberId);
     co_await RequestMemo::finish(tx, session.request, actor,
         removed.affectedRows() ? Json::Value(Json::Int64(ai.memberId)) : Json::Value());
     co_await commit(std::move(tx));

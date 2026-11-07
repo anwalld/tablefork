@@ -56,6 +56,9 @@ class Engine:
         self.clock = clock
         self.tasks: set[asyncio.Task] = set()
         self.running_rooms: set[int] = set()
+        self.control_watchers = {}
+        self.control_wakeup = asyncio.Event()
+        self.control_monitor_task = None
 
     async def handle(self, event, ack: Callable[[], Awaitable[None]]) -> None:
         seen = f"ai:event:{event.instance_id}:{event.event_id}"
@@ -66,9 +69,14 @@ class Engine:
         value = getattr(event, body) if body else None
         if body in ('message_saved', 'members_changed'):
             room_id = value.room.room_id
-        elif body in ('room_deleted', 'generation_rejected'):
+        elif body in ('room_deleted', 'generation_rejected', 'control_changed'):
             room_id = value.room_id
         else:
+            await ack()
+            return
+
+        if body == 'control_changed':
+            self.sync_controls()
             await ack()
             return
 
@@ -96,7 +104,7 @@ class Engine:
                 elif body == 'generation_rejected':
                     if state.active and state.active['id'] == value.generation_id:
                         if self.controls:
-                            await self.controls.failed(state.active)
+                            await self.controls.cancelled(state.active)
                         self._finish_failed(state, state.active)
                 elif body == 'members_changed':
                     _apply_snapshot(state, value.room)
@@ -121,9 +129,13 @@ class Engine:
                     job = state.active
                     if job and job['id'] == value.generation_id:
                         state.active = None
+                        if value.generation_outcome == 'failed' or job.get('outcome') == 'failed':
+                            if job['kind'] in ('proactive', 'goodbye') and job['epoch'] == state.epoch:
+                                state.timer_due = self._next_timer(state)
                         if (job['epoch'] == state.epoch and not paused and
                             (not cutoff or job.get('trigger_seq', 0) > cutoff) and
-                            not value.stopped and not job.get('stopped')):
+                            not value.stopped and not job.get('stopped') and
+                            value.generation_outcome != 'failed' and job.get('outcome') != 'failed'):
                             if job['kind'] in ('proactive', 'goodbye'):
                                 rules.on_proactive_saved(state, job['epoch'], job['slot'])
                                 state.timer_due = self._next_timer(state)
@@ -240,9 +252,12 @@ class Engine:
                 state.active = pending.pop(0) if pending else None
                 state.pending = pending
             active = state.active
-            if active and active['id'] == durable_id and durable and durable[0] in ('final', 'stopped', 'saved'):
-                if durable[1].strip():
-                    active.update(status='final', content=durable[1], stopped=bool(durable[2]))
+            if active and active['id'] == durable_id and durable:
+                active['attempt'] = max(active['attempt'], durable.attempt)
+            if active and active['id'] == durable_id and durable and durable.phase != 'generating':
+                if durable.outcome in ('completed', 'failed') or (durable.stopped and durable.content.strip()):
+                    active.update(status='final', content=durable.content, stopped=durable.stopped,
+                                  outcome=durable.outcome, attempt=durable.attempt)
                 else:
                     state.active = None
                     return None
@@ -255,8 +270,15 @@ class Engine:
                 if active['attempt'] >= self.settings.generation_max_attempts:
                     exhausted = copy.deepcopy(active)
                     if self.controls:
-                        await self.controls.failed(active)
-                    self._finish_failed(state, active)
+                        durable = await self.controls.failed(active)
+                        if durable and durable.outcome in ('completed', 'failed', 'stopped'):
+                            active.update(status='final', content=durable.content, outcome=durable.outcome, stopped=durable.stopped)
+                            job = copy.deepcopy(active)
+                        else:
+                            self._finish_failed(state, active)
+                    else:
+                        active.update(status='final', content=active.get('last_nonempty_content', ''), outcome='failed')
+                        job = copy.deepcopy(active)
                 else:
                     # The claim is the start boundary. A human message that
                     # arrives later does not cancel this already-started reply.
@@ -272,7 +294,7 @@ class Engine:
                     active['lease_until'] = self.clock() + self.settings.work_lease_seconds
                     job = copy.deepcopy(active)
         if exhausted:
-            self._failed(room_id, exhausted, 'interrupted', 'AI 回复多次中断，请稍后重试')
+            self._failure_notice(room_id, exhausted, 'interrupted', 'AI 回复多次中断，请稍后重试')
         return job
 
     async def _run_room(self, room_id):
@@ -389,10 +411,14 @@ class Engine:
             # Snapshots let a reconnect or a new attempt replace partial text.
             snapshot = ''.join(parts)[:MAX_CONTENT]
             if self.controls:
-                await self.controls.snapshot(job, snapshot)
-                durable = await self.controls.generation(job['id'])
-                if not durable or durable[0] != 'generating':
+                saved = await self.controls.snapshot(job, snapshot)
+                if not saved:
                     raise asyncio.CancelledError
+            elif snapshot.strip():
+                async with self._room(room_id) as current:
+                    if not self._owns(current, job):
+                        raise asyncio.CancelledError
+                    current.active['last_nonempty_content'] = snapshot
             delta = ''.join(buffered)
             buffered.clear()
             self.send(ai_pb2.AiAction(chunk=ai_pb2.Chunk(
@@ -412,13 +438,20 @@ class Engine:
                         await flush()
             await flush()
         except KeyRejected:
+            await flush()
             await self._fail_job(room_id, job, 'api_key_invalid',
                                  f'{PROVIDER_NAMES[ai.provider]} 拒绝了你的 API key，请在设置里更新', False)
             return
         except TimeoutError:
+            await flush()
             await self._fail_job(room_id, job, 'timeout', f'{ai.name} 回复超时', True)
             return
+        except asyncio.CancelledError:
+            if buffered:
+                await flush()
+            raise
         except Exception as error:
+            await flush()
             log.warning('generation by %s failed: %s', ai.slug, type(error).__name__)
             await self._fail_job(room_id, job, 'provider_error', f'{ai.name} 暂时无法回复', True)
             return
@@ -439,6 +472,10 @@ class Engine:
 
     async def _controlled_finish(self, room_id, job):
         durable = await self.controls.generation(job['id'])
+        if durable and durable.phase == 'generating':
+            # A failed control read cancels upstream conservatively. Keep the
+            # leased job recoverable until SQL confirms a terminal result.
+            return
         final = None
         async with self._room(room_id) as state:
             if not self._owns(state, job):
@@ -451,8 +488,8 @@ class Engine:
             state.pending.clear()
             state.timer_due = None
             state.target = None
-            if durable and durable[1].strip():
-                state.active.update(status='final', content=durable[1], stopped=bool(durable[2]),
+            if durable and (durable.outcome in ('completed', 'failed') or (durable.stopped and durable.content.strip())):
+                state.active.update(status='final', content=durable.content, stopped=durable.stopped, outcome=durable.outcome,
                     retry_at=self.clock() + self.settings.retry_base_seconds)
                 final = copy.deepcopy(state.active)
             else:
@@ -462,25 +499,52 @@ class Engine:
         else:
             self._failed(room_id, job, 'stopped', '已停止')
 
+    def sync_controls(self):
+        # Versions are wake hints only. Every observation reads authoritative
+        # SQL, so even an older duplicate event cannot restore an old state.
+        self.control_wakeup.set()
+
     async def _watch_control(self, room_id, job, generation):
-        while not generation.done():
-            await asyncio.sleep(0.1)
+        self.control_watchers[job['id']] = (job, generation)
+        self.sync_controls()
+        if self.control_monitor_task is None or self.control_monitor_task.done():
+            self.control_monitor_task = asyncio.create_task(self._monitor_controls())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.control_watchers.pop(job['id'], None)
+            if not self.control_watchers and self.control_monitor_task:
+                self.control_monitor_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.control_monitor_task
+                self.control_monitor_task = None
+
+    async def _monitor_controls(self):
+        while self.control_watchers:
+            self.control_wakeup.clear()
+            observed = dict(self.control_watchers)
             try:
-                durable = await self.controls.generation(job['id'])
-                if durable and (durable[2] or durable[0] == 'saved'):
-                    generation.cancel()
-                    return
+                durable = await self.controls.generations(observed)
+                for generation_id, (job, generation) in observed.items():
+                    row = durable.get(generation_id)
+                    if row is None or row.phase != 'generating' or row.attempt != job['attempt']:
+                        generation.cancel()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # Fail closed if the control fence cannot be read. Leave the
-                # durable job recoverable instead of generating unchecked.
-                generation.cancel()
-                raise
+                # SQL uncertainty stops upstream work. The leased durable job
+                # is recovered only after its state can be read again.
+                log.exception('generation control sync')
+                for _, generation in observed.values():
+                    generation.cancel()
+            try:
+                await asyncio.wait_for(self.control_wakeup.wait(), self.settings.control_poll_seconds)
+            except TimeoutError:
+                pass
 
     def _send_final(self, room_id, job):
         self.send(ai_pb2.AiAction(final=ai_pb2.Final(room_id=room_id,
-            generation_id=job['id'], ai_member_id=job['member_id'], content=job['content'],admission_id=job.get('admission_id',''))))
+            generation_id=job['id'], ai_member_id=job['member_id'], content=job['content'],admission_id=job.get('admission_id',''),attempt=job['attempt'])))
 
     def _finish_failed(self, state, job):
         state.active = None
@@ -495,17 +559,35 @@ class Engine:
             if retryable and job['attempt'] < self.settings.generation_max_attempts:
                 state.active.update(status='queued', owner='', lease_until=0,
                     retry_at=self.clock() + self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1))
+            elif code == 'ai_removed' or (code == 'api_key_required' and job['attempt'] == 1):
+                if self.controls:
+                    await self.controls.cancelled(job)
+                self._finish_failed(state, job)
+                terminal = True
             else:
                 if self.controls:
-                    await self.controls.failed(job)
-                self._finish_failed(state, job)
+                    durable = await self.controls.failed(job, code)
+                    if durable and durable.outcome in ('completed', 'failed', 'stopped'):
+                        state.active.update(status='final', content=durable.content,
+                                            outcome=durable.outcome, stopped=durable.stopped)
+                    else:
+                        self._finish_failed(state, job)
+                else:
+                    state.active.update(status='final', content=state.active.get('last_nonempty_content', ''), outcome='failed')
                 terminal = True
         log.info(json.dumps({'event': 'request_stage', 'instance': 'ai',
             'operation': 'ai.generate', 'stage': 'ai_attempt', 'result': code,
             'generation_id': job['id'], 'request_id': job.get('trigger_id', ''),
             'attempt': job['attempt'], 'room_id': room_id}))
         if terminal:
-            self._failed(room_id, job, code, message)
+            self._failure_notice(room_id, job, code, message)
+            state = await self._load(room_id)
+            if state.active and state.active['id'] == job['id'] and state.active['status'] == 'final':
+                self._send_final(room_id, state.active)
+
+    def _failure_notice(self, room_id, job, code, message):
+        self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(room_id=room_id,
+            notify_member_id=job['payer'][0], code=code, message=message)))
 
     def _notices(self, room_id, decision):
         for missing in decision.missing:

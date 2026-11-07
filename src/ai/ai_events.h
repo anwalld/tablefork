@@ -12,6 +12,7 @@ namespace chat
 // chat works without the AI service.
 drogon::Task<> reportMessage(StoredMessage message, RequestContextPtr context = {});
 drogon::Task<> reportMembersChanged(int64_t roomId, RequestContextPtr context = {});
+drogon::Task<> reportControlChanged(int64_t roomId, RequestContextPtr context = {});
 void reportRoomDeleted(int64_t roomId);
 void reportGenerationRejected(int64_t roomId, const std::string &generationId);
 }  // namespace chat

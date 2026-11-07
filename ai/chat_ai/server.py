@@ -78,6 +78,7 @@ class Gateway(ai_pb2_grpc.AiGatewayServicer):
     async def Connect(self, request_iterator, context):
         await self._authorize(context)
         queue = self.outbox.open()
+        self.engine.sync_controls()
         log.info("chat server connected")
 
         async def read():

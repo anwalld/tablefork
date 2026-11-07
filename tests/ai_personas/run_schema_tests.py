@@ -5,6 +5,7 @@ Run from the repo root: python3 tests/ai_personas/run_schema_tests.py
 Uses existing local images by default. No ports, production volumes or .env.
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -19,6 +20,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--suite', choices=('personas', 'generation'), default='personas')
+    suite = parser.parse_args().suite
+    target = '7' if suite == 'personas' else '10'
+    test_directory = 'ai_personas' if suite == 'personas' else 'generation_resilience'
     evidence = Path(tempfile.mkdtemp(prefix='cppai-personas-schema-', dir='/private/tmp' if Path('/private/tmp').exists() else None))
     os.chmod(evidence, 0o700)
     name = 'cppai-personas-schema-' + secrets.token_hex(6)
@@ -43,7 +49,7 @@ def main():
             raise RuntimeError(f'{label} failed; see {evidence}/run.log')
         return result
 
-    def flyway(database, command='migrate', target=None):
+    def flyway(database, command='migrate', target=target):
         label = f'{database}-{command}' + (f'-target-{target}' if target else '')
         args = ['docker','run','--rm','--network',name,'-e','FLYWAY_PASSWORD',
                 '-e',f'FLYWAY_URL=jdbc:mariadb://mysql:3306/{database}?allowPublicKeyRetrieval=true&useSsl=false',
@@ -51,12 +57,12 @@ def main():
         if target: args.append(f'-target={target}')
         run(label,args)
 
-    def probe(database, command):
+    def probe(database, command, image=None):
         run(f'{database}-'+('pytest' if command[0]=='-m' else 'fixture'),
-            ['docker','run','--rm','--network',name,'-e','MYSQL_HOST=mysql','-e','MYSQL_PASSWORD',
+            ['docker','run','--rm','--network',name,'-w','/tmp','-e','PYTHONPATH=/work/ai','-e','MYSQL_HOST=mysql','-e','MYSQL_PASSWORD',
              '-e',f'MYSQL_DATABASE={database}','-e','EVIDENCE_DIR=/evidence',
              '-e','PYTHONDONTWRITEBYTECODE=1','-v',f'{ROOT}:/work:ro','-v',f'{evidence}:/evidence',
-             '--entrypoint','python',summary['test_image'],*command])
+             '--entrypoint','python',image or summary['test_image'],*command])
 
     print(f'Evidence: {evidence}',flush=True)
     try:
@@ -80,15 +86,22 @@ def main():
             input="CREATE DATABASE chat_fresh CHARACTER SET utf8mb4 COLLATE utf8mb4_bin; GRANT ALL ON chat_fresh.* TO 'chat'@'%';\n")
         # A clean database and a genuine V6 database take different paths.
         flyway('chat_fresh')
-        flyway('chat_upgrade',target='6')
-        probe('chat_upgrade',['/work/tests/ai_personas/upgrade_fixture.py'])
+        flyway('chat_upgrade',target='6' if suite == 'personas' else '7')
+        probe('chat_upgrade',[f'/work/tests/{test_directory}/upgrade_fixture.py'])
+        if suite == 'generation':
+            flyway('chat_upgrade',target='8')
+            probe('chat_upgrade',['/work/tests/generation_resilience/verify_expanded.py'])
         flyway('chat_upgrade')
         for database in ('chat_fresh','chat_upgrade'):
             flyway(database)  # No migration should run twice.
             flyway(database,'validate')
-            probe(database,['-m','pytest','-q','-p','no:cacheprovider','/work/tests/ai_personas/test_schema.py'])
+            probe(database,['-m','pytest','-q','-p','no:cacheprovider',f'/work/tests/{test_directory}/test_schema.py'])
+            if suite == 'generation':
+                probe(database,['-m','pytest','-c','/work/ai/pytest.ini','-q','-p','no:cacheprovider',
+                    '/work/tests/generation_resilience/test_controls_sql.py'],
+                    image=os.environ.get('GENERATION_AI_TEST_IMAGE','cppai-personas-ai-unit'))
         summary['source_sha256'] = {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
-                                    for directory in ('migrations','tests/ai_personas')
+                                    for directory in ('migrations',f'tests/{test_directory}')
                                     for p in sorted((ROOT/directory).rglob('*')) if p.is_file() and '__pycache__' not in p.parts}
         status=0
     except Exception as error:

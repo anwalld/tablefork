@@ -17,7 +17,8 @@ def to_chat(entries: list[dict], speaker_member_id: int, max_messages: int, max_
     """
     chat: list[ChatMessage] = []
     used = 0
-    for entry in reversed(entries[-max_messages:]):
+    eligible = [entry for entry in entries if entry.get("generation_outcome") != "failed"]
+    for entry in reversed(eligible[-max_messages:]):
         member = entry["member"]
         if member["id"] == speaker_member_id:
             message = ChatMessage("assistant", entry["content"])
@@ -37,12 +38,20 @@ async def recent_messages(
     """The room's newest messages, oldest first, from the hot cache or MySQL."""
     raw = await cache.zrevrange(f"room:{room_id}:recent", 0, count - 1)
     if raw:
-        return [json.loads(item) for item in reversed(raw)]
+        entries = [json.loads(item) for item in reversed(raw)]
+        eligible = [entry for entry in entries if entry.get('generation_outcome') != 'failed']
+        # Older AI cache entries cannot prove the durable result. Refill from
+        # SQL after filtering so failures never consume the context allowance.
+        unknown_ai = any(entry.get('member', {}).get('type') == 'ai' and
+                         'generation_outcome' not in entry for entry in entries)
+        if not unknown_ai and (len(eligible) >= count or pool is None):
+            return eligible[-count:]
+
     async with pool.acquire() as connection, connection.cursor() as cursor:
         await cursor.execute(
             "SELECT m.member_id, mem.display_name, m.content FROM messages m "
             "JOIN members mem ON mem.id = m.member_id "
-            "WHERE m.room_id = %s ORDER BY m.seq DESC LIMIT %s",
+            "WHERE m.room_id = %s AND m.generation_outcome <> 'failed' ORDER BY m.seq DESC LIMIT %s",
             (room_id, count),
         )
         rows = await cursor.fetchall()

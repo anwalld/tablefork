@@ -648,7 +648,7 @@ onBeforeUnmount(() => {
             <button :disabled="searchBusy">搜索</button>
           </form>
           <ul><li v-for="message in searchResults" :key="message.seq">
-            <button class="link" @click="locateMessage(activeId, message.seq)">{{ message.member.name }} · {{ message.content }}</button>
+            <button class="link" @click="locateMessage(activeId, message.seq)">{{ message.member.name }} · {{ message.content }}<span v-if="message.generation_outcome === 'failed'"> · 生成失败</span></button>
           </li></ul>
           <button v-if="searchBefore" :disabled="searchBusy" @click="findMessages(true)">更多结果</button>
         </section>
@@ -675,7 +675,8 @@ onBeforeUnmount(() => {
               <div class="meta">
                 <span>{{ message.member.name }}</span>
                 <time>{{ formatTime(message.created_at) }}</time>
-                <span v-if="message.stopped">已停止</span>
+                <span v-if="message.generation_outcome === 'failed'">生成失败</span>
+                <span v-else-if="message.stopped">已停止</span>
               </div>
               <p class="bubble">{{ message.content }}</p>
             </article>

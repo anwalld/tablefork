@@ -149,6 +149,24 @@ class ChatControls(unittest.TestCase):
         self.assertEqual(owner.put(state, json={'paused': False}).status_code, 200)
         self.assertFalse(owner.get(state).json()['paused'])
 
+    def test_durable_failure_survives_late_stop_and_pause(self):
+        owner, _, member = self.user()
+        room = self.room(owner)
+        generation = uuid.uuid4().hex
+        with self.db.cursor() as cursor:
+            cursor.execute("SELECT member_id FROM ai_profiles ORDER BY member_id LIMIT 1")
+            ai = cursor.fetchone()[0]
+            cursor.execute("INSERT INTO room_members (room_id,member_id) VALUES (%s,%s)", (room, ai))
+            cursor.execute("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,phase,outcome) "
+                           "VALUES (%s,%s,%s,%s,'failed partial','ready','failed')", (generation,room,ai,member))
+        self.assertEqual(owner.post(BASE + f'/api/rooms/{room}/ai-generations/{generation}/stop').status_code, 200)
+        state = BASE + f'/api/rooms/{room}/ai-state'
+        self.assertEqual(owner.put(state, json={'paused': True}).status_code, 200)
+        with self.db.cursor() as cursor:
+            cursor.execute("SELECT phase,outcome,content FROM ai_generations WHERE generation_id=%s", (generation,))
+            self.assertEqual(cursor.fetchone(), ('ready','failed','failed partial'))
+        self.assertNotIn(generation, [item['id'] for item in owner.get(state).json()['generations']])
+
     def test_unstorable_stopped_snapshots_do_not_block_room_controls(self):
         owner, _, member = self.user()
         room = self.room(owner)
@@ -158,8 +176,8 @@ class ChatControls(unittest.TestCase):
             ai = c.fetchone()[0]
             # The AI is not (or no longer) a room member, so its stopped
             # snapshot can never become a message.
-            c.execute("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,status,stopped) "
-                      "VALUES (%s,%s,%s,%s,'left mid reply','stopped',TRUE)", (orphan, room, ai, member))
+            c.execute("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,phase,outcome) "
+                      "VALUES (%s,%s,%s,%s,'left mid reply','ready','stopped')", (orphan, room, ai, member))
             c.execute("INSERT INTO room_members (room_id, member_id) VALUES (%s,%s)", (room, ai))
             c.execute("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content) "
                       "VALUES (%s,%s,%s,%s,' \n')", (blank, room, ai, member))
@@ -168,8 +186,8 @@ class ChatControls(unittest.TestCase):
         self.assertEqual(owner.put(state, json={'paused': True}).status_code, 200)
         self.assertEqual(owner.put(state, json={'paused': False}).status_code, 200)
         with self.db.cursor() as c:
-            c.execute("SELECT status FROM ai_generations WHERE generation_id IN (%s,%s)", (orphan, blank))
-            self.assertEqual([row[0] for row in c.fetchall()], ['saved', 'saved'])
+            c.execute("SELECT phase FROM ai_generations WHERE generation_id IN (%s,%s)", (orphan, blank))
+            self.assertEqual([row[0] for row in c.fetchall()], ['finished', 'finished'])
         self.assertEqual(owner.get(BASE + f'/api/rooms/{room}/messages').json()['messages'], [])
 
 
