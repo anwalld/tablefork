@@ -320,3 +320,13 @@ it('ignores an old admission chunk after the same AI member rejoined', async () 
   await flushPromises()
   expect(view.text()).toContain('current admission is visible')
 })
+
+
+it.each(['partial retained', ''])('renders durable failed history with body %j', async (content) => {
+  api.history.mockImplementation(async (id, options) => ({ messages: id === 7 && !options
+    ? [{ ...saved, content, generation_outcome: 'failed', generation_id: 'failed-generation' }] : [] }))
+  const view = await chat()
+  expect(view.text()).toContain('生成失败')
+  expect(view.findAll('.messages .message')).toHaveLength(1)
+  expect(view.get('.messages .bubble').text()).toBe(content)
+})

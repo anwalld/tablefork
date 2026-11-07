@@ -26,3 +26,10 @@ def test_keeps_the_newest_that_fit():
 def test_a_single_long_message_is_kept():
     chat = to_chat([entry(1, "a", "x" * 100)], 100, 30, 10)
     assert len(chat) == 1
+
+
+def test_failed_entries_are_excluded_before_applying_count_limit():
+    entries = [entry(1, 'alice', 'older'), entry(100, 'Claude', 'complete'),
+               {**entry(100, 'Claude', 'failed text'), 'generation_outcome':'failed'},
+               {**entry(100, 'Claude', ''), 'generation_outcome':'failed'}]
+    assert [message.content for message in to_chat(entries,100,2,1000)] == ['alice：older','complete']

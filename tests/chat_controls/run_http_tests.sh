@@ -25,7 +25,7 @@ for i in $(seq 1 60); do
     sleep 1
 done
 [ "$ready" -eq 1 ] || exit 1
-for sql in migrations/V*.sql; do
+printf '%s\n' migrations/V*.sql | sort -t V -k2,2n | while IFS= read -r sql; do
     if [ "$(basename "$sql")" = V6__attention_and_ai_controls.sql ]; then
         docker exec -i "$name-mysql" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -h127.0.0.1 -uchat chat' < tests/chat_controls/upgrade_fixture.sql
     fi

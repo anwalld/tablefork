@@ -198,17 +198,18 @@ async def test_timeout_fails_once_attempts_run_out():
     h = Harness(generation_timeout=0.2)
     await h.human_says(ALICE, "#slow please", [ALICE], [CLAUDE])
     await h.settle()
-    failed = h.of("failed")
+    failed = h.of("notice")
     assert len(failed) == 1 and failed[0].code == "timeout"
     assert failed[0].notify_member_id == ALICE[0]
-    assert h.of("final") == []
+    assert len(h.of("final")) == 1
+    assert (await h.engine._load(1)).active is None
 
 
 async def test_rejected_key_fails_with_its_code():
     h = Harness(keys={(1, "anthropic"): "fake-reject"})
     await h.human_says(ALICE, "hi", [ALICE], [CLAUDE])
     await h.settle()
-    assert [f.code for f in h.of("failed")] == ["api_key_invalid"]
+    assert [f.code for f in h.of("notice")] == ["api_key_invalid"]
 
 
 async def test_chain_continues_with_p_one_and_is_paid_by_the_human():
@@ -276,7 +277,7 @@ async def test_failure_is_reported_for_provider_errors():
     h = Harness()
     await h.human_says(ALICE, "#fail now", [ALICE], [CLAUDE])
     await h.settle()
-    assert [f.code for f in h.of("failed")] == ["provider_error"]
+    assert [f.code for f in h.of("notice")] == ["provider_error"]
 
 
 async def test_room_deleted_forgets_state():
@@ -374,7 +375,8 @@ async def test_failed_proactive_reply_does_not_count_or_end_conversation():
         await h.engine.fire_due_timers(); await h.settle()
     state = await h.engine._load(1)
     assert state.proactive_mask == 0 and state.target == 'claude'
-    assert len(h.of('final')) == 1 and len(h.of('failed')) == 3
+    assert len(h.of('final')) == 4 and len(h.of('notice')) == 3
+    assert len(h.saved_ids) == 4
 
 
 async def test_completed_result_is_redelivered_without_generating_again():

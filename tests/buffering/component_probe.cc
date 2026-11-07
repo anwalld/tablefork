@@ -114,13 +114,59 @@ drogon::Task<> probe()
     try { co_await MessageService::saveAiMessage(characterId,privateRoomId,"old-admission","old output",oldAdmission); }
     catch(const ApiError &e) { staleRejected=e.code()=="invalid_argument"; }
     expect(staleRejected,"old admission result was accepted after rejoin");
-    co_await db->execSqlCoro("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot) VALUES ('new-admission',?,?,?,'new output',UNHEX(?),1,'new persona')",privateRoomId,characterId,session.memberId,newAdmission);
+    co_await db->execSqlCoro("INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot,phase,outcome) VALUES ('new-admission',?,?,?,'new output',UNHEX(?),1,'new persona','ready','completed')",privateRoomId,characterId,session.memberId,newAdmission);
     const auto validFinal=co_await MessageService::saveAiMessage(characterId,privateRoomId,"new-admission","new output",newAdmission);
     const auto duplicateFinal=co_await MessageService::saveAiMessage(characterId,privateRoomId,"new-admission","new output",newAdmission);
     expect(!validFinal.duplicate && duplicateFinal.duplicate,"private final was not stored exactly once");
     rows=co_await db->execSqlCoro("SELECT COUNT(*) AS n FROM messages WHERE room_id=?",privateRoomId);
     expect(rows[0]["n"].as<int>()==1,"stale private generation polluted history");
     std::cout<<"PASS: private role identity/idempotency and old-admission final rejection after rejoin\n";
+    for (const auto &partial : {std::string("last nonempty attempt"), std::string("")})
+    {
+        const auto id = partial.empty() ? "empty-failure" : "partial-failure";
+        co_await db->execSqlCoro(
+            "INSERT INTO ai_generations (generation_id,room_id,member_id,payer_member_id,content,admission_id,persona_version,persona_snapshot,phase,outcome,attempt,content_attempt) "
+            "VALUES (?,?,?,?,?,UNHEX(?),1,'new persona','ready','failed',3,1)",
+            id,privateRoomId,characterId,session.memberId,partial,newAdmission);
+        bool staleAttemptRejected = false;
+        try { co_await MessageService::saveAiMessage(characterId,privateRoomId,id,partial,newAdmission,2); }
+        catch (const ApiError &e) { staleAttemptRejected = e.code()=="invalid_argument"; }
+        expect(staleAttemptRejected,"stale attempt final was accepted");
+        if (!partial.empty())
+        {
+            // Force the message insert to fail after its generation phase was
+            // updated. Both writes must roll back before the result is retried.
+            co_await db->execSqlCoro("UPDATE rooms SET last_seq=0 WHERE id=?",privateRoomId);
+            bool insertRejected = false;
+            try { co_await MessageService::saveAiMessage(characterId,privateRoomId,id,partial,newAdmission,3); }
+            catch (const drogon::orm::DrogonDbException &) { insertRejected = true; }
+            expect(insertRejected,"message insert failure was not exercised");
+            const auto rolledBack = co_await db->execSqlCoro("SELECT phase FROM ai_generations WHERE generation_id=?",id);
+            expect(rolledBack[0]["phase"].as<std::string>()=="ready","failed message insert consumed its durable result");
+            co_await db->execSqlCoro("UPDATE rooms SET last_seq=(SELECT MAX(seq) FROM messages WHERE room_id=?) WHERE id=?",privateRoomId,privateRoomId);
+        }
+        const auto failed = co_await MessageService::saveAiMessage(characterId,privateRoomId,id,"untrusted wire content",newAdmission,3);
+        const auto duplicate = co_await MessageService::saveAiMessage(characterId,privateRoomId,id,partial,newAdmission,3);
+        expect(!failed.duplicate && duplicate.duplicate,"failed result duplicated its history record");
+        expect(failed.json["content"].asString()==partial,"failure snapshot was not authoritative");
+        expect(failed.json["generation_outcome"].asString()=="failed","failure metadata missing");
+    }
+    const auto history = co_await MessageService::history(session,privateRoomId,HistoryQuery{std::nullopt,std::nullopt,30});
+    expect(history["messages"].size()==3,"failure history did not survive SQL reload");
+    expect(history["messages"][2]["generation_outcome"].asString()=="failed","empty failure disappeared from history");
+    std::cout<<"PASS: partial/empty failure history, SQL canonical text, attempt fencing and final deduplication\n";
+    for (const auto &text : {std::string("量子纠缠相关"),std::string("无匹配"),std::string("另一个量子纠缠")})
+        co_await MessageService::save(session,privateRoomId,"search-"+std::to_string(utf8Length(text).value())+text,text);
+    const auto indexedSearch = co_await MessageService::search(session,privateRoomId,"量子纠缠",std::nullopt,std::nullopt,std::nullopt,std::nullopt,1);
+    expect(indexedSearch["messages"].size()==1,"indexed search lost a CJK substring");
+    co_await db->execSqlCoro("ALTER TABLE messages DROP INDEX ft_messages_content");
+    const auto fallbackSearch = co_await MessageService::search(session,privateRoomId,"量子纠缠",std::nullopt,std::nullopt,std::nullopt,std::nullopt,1);
+    expect(indexedSearch==fallbackSearch,"unavailable index changed exact search results");
+    const auto nextPage = co_await MessageService::search(session,privateRoomId,"量子纠缠",std::nullopt,std::nullopt,std::nullopt,indexedSearch["next_before"].asInt64(),1);
+    expect(nextPage["messages"].size()==1 && nextPage["messages"][0]["seq"].asInt64()<indexedSearch["messages"][0]["seq"].asInt64(),"fallback search pagination failed");
+    std::cout<<"PASS: CJK indexed search and missing-index fallback preserve page contents and cursor\n";
+
+
     std::atomic<int> subscriberReady{0},oldActions{0},currentChunk{0},currentFailed{0},burstChunks{0};
     const auto channel="room:"+std::to_string(privateRoomId);
     auto subscriber=drogon::app().getRedisClient()->newSubscriber();

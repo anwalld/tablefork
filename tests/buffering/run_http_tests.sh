@@ -35,7 +35,7 @@ for i in $(seq 1 60); do
     sleep 1
 done
 [ "$ready" -eq 1 ] || exit 1
-for sql in migrations/V*.sql; do docker exec -i "$name-mysql" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -h127.0.0.1 -uchat chat' < "$sql"; done
+printf '%s\n' migrations/V*.sql | sort -t V -k2,2n | while IFS= read -r sql; do docker exec -i "$name-mysql" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -h127.0.0.1 -uchat chat' < "$sql"; done
 for instance in a b; do
     case "$instance" in a) alias=app-1; delay=2000;; b) alias=app-2; delay=0;; esac
     docker run -d --name "$name-$instance" --network "$name" --network-alias "$alias" \

@@ -58,14 +58,14 @@ drogon::Task<bool> currentAdmission(int64_t roomId,
     const auto context = RequestBuffer::instance().backgroundContext();
     checkRequest(context);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT p.is_legacy, HEX(a.admission_id) AS admission, g.stopped "
+        "SELECT p.is_legacy, HEX(a.admission_id) AS admission, g.phase "
         "FROM room_members rm JOIN ai_profiles p ON p.member_id=rm.member_id "
         "LEFT JOIN room_ai_personas a ON a.room_id=rm.room_id AND a.member_id=rm.member_id "
         "LEFT JOIN ai_generations g ON g.generation_id=? AND g.room_id=rm.room_id "
         "WHERE rm.room_id=? AND rm.member_id=?", generation, roomId, memberId);
     checkRequest(context);
     if (rows.empty()) co_return false;
-    if (!generation.empty() && !rows[0]["stopped"].isNull() && rows[0]["stopped"].as<bool>()) co_return false;
+    if (!generation.empty() && !rows[0]["phase"].isNull() && rows[0]["phase"].as<std::string>() != "generating") co_return false;
     if (rows[0]["is_legacy"].as<bool>()) co_return true;
     co_return !admission.empty() && !rows[0]["admission"].isNull() &&
               rows[0]["admission"].as<std::string>() == admission;
@@ -99,7 +99,7 @@ void onFinal(ai::Final final)
         try
         {
             message = co_await MessageService::saveAiMessage(
-                final.ai_member_id(), final.room_id(), final.generation_id(), final.content(),final.admission_id());
+                final.ai_member_id(), final.room_id(), final.generation_id(), final.content(),final.admission_id(),final.attempt());
         }
         catch (const ApiError &e)
         {

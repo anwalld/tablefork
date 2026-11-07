@@ -91,6 +91,7 @@ drogon::Task<> reportMessage(StoredMessage message, RequestContextPtr context)
         saved->set_seq(message.seq);
         saved->set_content(json["content"].asString());
         saved->set_stopped(json["stopped"].asBool());
+        saved->set_generation_outcome(json["generation_outcome"].asString());
         saved->set_client_msg_id(json["client_msg_id"].asString());
         saved->set_created_at_ms(json["created_at"].asInt64());
         checkRequest(context);
@@ -142,3 +143,27 @@ void reportGenerationRejected(int64_t roomId, const std::string &generationId)
     }
 }
 }  // namespace chat
+
+namespace chat
+{
+drogon::Task<> reportControlChanged(int64_t roomId, RequestContextPtr context)
+{
+    if (!aiGateway()) co_return;
+    try
+    {
+        const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT revision FROM room_ai_controls WHERE room_id=?", roomId);
+        if (rows.empty()) co_return;
+        ai::GatewayEvent event;
+        auto *changed = event.mutable_control_changed();
+        changed->set_room_id(roomId);
+        changed->set_revision(rows[0]["revision"].as<uint64_t>());
+        checkRequest(context);
+        aiGateway()->send(std::move(event));
+    }
+    catch (const std::exception &)
+    {
+        LOG_WARN << "AI control notification deferred";
+    }
+}
+}

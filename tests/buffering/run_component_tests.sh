@@ -20,7 +20,7 @@ for i in $(seq 1 60); do
     sleep 1
 done
 [ "$ready" -eq 1 ] || { echo 'Disposable MySQL did not start' >&2; exit 1; }
-for sql in migrations/V*.sql; do
+printf '%s\n' migrations/V*.sql | sort -t V -k2,2n | while IFS= read -r sql; do
     docker exec -i "$name-mysql" sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -h127.0.0.1 -uchat chat' < "$sql"
 done
 ip=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name-redis")

@@ -42,7 +42,7 @@ class MessageService
     static drogon::Task<StoredMessage> saveAiMessage(int64_t aiMemberId,
                                                      int64_t roomId,
                                                      std::string generationId,
-                                                     std::string content, std::string admissionId = "");
+                                                     std::string content, std::string admissionId = "", uint32_t attempt = 0);
 
     // Updates the hot cache and publishes. The message is already durable, so
     // failures are only logged; clients backfill by seq.

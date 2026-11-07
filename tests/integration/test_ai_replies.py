@@ -143,19 +143,24 @@ def test_messages_during_a_reply_are_answered_once(make_user, make_room, make_so
     assert_no_ai_reply(socket, 2)
 
 
-def test_failure_clears_the_room_and_tells_the_sender(make_user, make_room, make_socket):
+def test_failure_is_saved_and_only_sender_receives_details(make_user, make_room, make_socket):
     (alice, bob), room_id = room_with(make_user, make_room, ["claude"], humans=2)
     alice_socket, bob_socket = make_socket(alice), make_socket(bob)
     alice_socket.subscribe(room_id)
     bob_socket.subscribe(room_id)
     alice_socket.post(room_id, "@claude #fail")
-    assert bob_socket.expect("ai_failed", timeout=10)["member_id"]
-    alice_socket.expect("ai_failed", timeout=10)
+    failed = ai_reply(bob_socket, timeout=10)
+    assert failed['generation_outcome'] == 'failed'
+    assert failed['content'] == ''
+    assert ai_reply(alice_socket, timeout=10)['seq'] == failed['seq']
+    history = alice.get(f"/api/rooms/{room_id}/messages").json()['messages']
+    assert [message for message in history if message.get('generation_id') == failed['generation_id']] == [failed]
     assert alice_socket.expect("ai_notice", timeout=10)["code"] == "provider_error"
     with pytest.raises(TimeoutError):
         bob_socket.expect("ai_notice", timeout=1)
     history = alice.get(f"/api/rooms/{room_id}/messages").json()["messages"]
-    assert [m["member"]["type"] for m in history] == ["human"]
+    assert [m["member"]["type"] for m in history] == ["human", "ai"]
+    assert history[-1]["generation_outcome"] == "failed"
 
 
 def test_timeout_is_a_failure(make_user, make_room, make_socket):
