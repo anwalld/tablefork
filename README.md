@@ -314,6 +314,8 @@ docker compose up -d --wait
 
 镜像构建时会给 Drogon 1.9.13 打上 `docker/drogon-mysql-disconnect.patch`。未打补丁时，MySQL 不可达会让应用在 `MysqlConnection::disconnect()` 中段错误退出。
 
+还会打上 `docker/drogon-redis-disconnect.patch`。Drogon 1.9.13 跨线程发送 Redis 命令时，排队的任务只持有连接的裸指针；如果连接在这期间断开，hiredis 会先释放上下文，排队的发送随后访问已释放的内存，表现为 Redis 故障切换窗口里后端偶发 `It is forbidden to run loop on threads other than event-loop thread` 后退出，或 `malloc(): ... corrupted`。补丁让排队任务持有连接的所有权，并让断开后的发送、订阅直接以 `Connection is broken` 失败。
+
 
 ### AI 回复恢复
 

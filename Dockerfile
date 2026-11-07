@@ -1,7 +1,7 @@
 # deps: toolchain plus Drogon built from source with MySQL and Redis enabled.
 FROM ubuntu:24.04 AS deps
 ARG DROGON_VERSION=v1.9.13
-COPY docker/drogon-mysql-disconnect.patch /tmp/
+COPY docker/drogon-mysql-disconnect.patch docker/drogon-redis-disconnect.patch /tmp/
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates pkg-config \
         libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev libc-ares-dev libbrotli-dev \
@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 --branch "${DROGON_VERSION}" --recurse-submodules --shallow-submodules \
         https://github.com/drogonframework/drogon.git /tmp/drogon \
     && git -C /tmp/drogon apply /tmp/drogon-mysql-disconnect.patch \
+    && git -C /tmp/drogon apply /tmp/drogon-redis-disconnect.patch \
     && cmake -S /tmp/drogon -B /tmp/drogon/build \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
         -DBUILD_CTL=OFF -DBUILD_EXAMPLES=OFF \

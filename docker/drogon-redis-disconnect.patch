@@ -1,0 +1,119 @@
+diff --git a/nosql_lib/redis/src/RedisConnection.cc b/nosql_lib/redis/src/RedisConnection.cc
+index fcfe8f1..fe6f3cf 100644
+--- a/nosql_lib/redis/src/RedisConnection.cc
++++ b/nosql_lib/redis/src/RedisConnection.cc
+@@ -262,6 +262,8 @@ void RedisConnection::handleDisconnect()
+     redisContext_->ev.delRead = nullptr;
+     redisContext_->ev.cleanup = nullptr;
+     redisContext_->ev.data = nullptr;
++    // Owned and freed by hiredis after this callback returns.
++    redisContext_ = nullptr;
+ }
+ 
+ void RedisConnection::addWrite(void *userData)
+@@ -318,6 +320,18 @@ void RedisConnection::sendCommandInLoop(
+     RedisResultCallback &&resultCallback,
+     RedisExceptionCallback &&exceptionCallback)
+ {
++    loop_->assertInLoopThread();
++    // hiredis frees the context once the disconnect callback returns; a send
++    // queued before the disconnect must fail instead of touching it.
++    if (status_ == ConnectStatus::kEnd || !redisContext_)
++    {
++        if (exceptionCallback)
++        {
++            exceptionCallback(RedisException(RedisErrorCode::kConnectionBroken,
++                                             "Connection is broken"));
++        }
++        return;
++    }
+     resultCallbacks_.emplace(std::move(resultCallback));
+     exceptionCallbacks_.emplace(std::move(exceptionCallback));
+ 
+@@ -370,7 +384,11 @@ void RedisConnection::disconnect()
+ {
+     auto thisPtr = shared_from_this();
+     loop_->queueInLoop(
+-        [thisPtr]() { redisAsyncDisconnect(thisPtr->redisContext_); });
++        [thisPtr]() {
++            if (thisPtr->status_ != ConnectStatus::kEnd &&
++                thisPtr->redisContext_)
++                redisAsyncDisconnect(thisPtr->redisContext_);
++        });
+ }
+ 
+ void RedisConnection::sendSubscribe(
+@@ -382,7 +400,9 @@ void RedisConnection::sendSubscribe(
+     }
+     else
+     {
+-        loop_->queueInLoop([this, subCtx]() { sendSubscribeInLoop(subCtx); });
++        loop_->queueInLoop([thisPtr = shared_from_this(), subCtx]() {
++            thisPtr->sendSubscribeInLoop(subCtx);
++        });
+     }
+ }
+ 
+@@ -395,16 +415,18 @@ void RedisConnection::sendUnsubscribe(
+     }
+     else
+     {
+-        loop_->queueInLoop([this, subCtx]() { sendUnsubscribeInLoop(subCtx); });
++        loop_->queueInLoop([thisPtr = shared_from_this(), subCtx]() {
++            thisPtr->sendUnsubscribeInLoop(subCtx);
++        });
+     }
+ }
+ 
+ void RedisConnection::sendSubscribeInLoop(
+     const std::shared_ptr<SubscribeContext> &subCtx)
+ {
+-    if (!subCtx->alive())
++    if (!subCtx->alive() || status_ == ConnectStatus::kEnd || !redisContext_)
+     {
+-        // Unsub-ed by somewhere else
++        // Unsub-ed by somewhere else, or the connection already ended
+         return;
+     }
+     subContexts_.emplace(subCtx->contextId(), subCtx);
+@@ -430,6 +452,8 @@ void RedisConnection::sendUnsubscribeInLoop(
+     // This problem is fixed in 2021-12-02 commit da5a4ff, but
+     // have not been released as a tag.
+     // Here we just register a same function to deal with both situation.
++    if (status_ == ConnectStatus::kEnd || !redisContext_)
++        return;
+     redisAsyncFormattedCommand(
+         redisContext_,
+         [](redisAsyncContext *context, void *r, void *subCtx) {
+diff --git a/nosql_lib/redis/src/RedisConnection.h b/nosql_lib/redis/src/RedisConnection.h
+index e2e4ef7..33e4ab0 100644
+--- a/nosql_lib/redis/src/RedisConnection.h
++++ b/nosql_lib/redis/src/RedisConnection.h
+@@ -109,11 +109,11 @@ class RedisConnection : public trantor::NonCopyable,
+         else
+         {
+             loop_->queueInLoop(
+-                [this,
++                [thisPtr = shared_from_this(),
+                  callback = std::move(resultCallback),
+                  exceptionCallback = std::move(exceptionCallback),
+                  command = std::move(command)]() mutable {
+-                    sendCommandInLoop(command,
++                    thisPtr->sendCommandInLoop(command,
+                                       std::move(callback),
+                                       std::move(exceptionCallback));
+                 });
+@@ -138,11 +138,11 @@ class RedisConnection : public trantor::NonCopyable,
+             else
+             {
+                 loop_->queueInLoop(
+-                    [this,
++                    [thisPtr = shared_from_this(),
+                      callback = std::move(resultCallback),
+                      exceptionCallback = std::move(exceptionCallback),
+                      fullCommand = std::move(fullCommand)]() mutable {
+-                        sendCommandInLoop(fullCommand,
++                        thisPtr->sendCommandInLoop(fullCommand,
+                                           std::move(callback),
+                                           std::move(exceptionCallback));
+                     });
