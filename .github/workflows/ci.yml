@@ -7,12 +7,44 @@ on:
   # Lets CI be rerun by hand from the Actions tab or `gh workflow run CI`.
   workflow_dispatch:
 
+# 同一 PR 连推多个 commit 时取消旧的运行，只留最新，避免并发挤占 runner。
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  # 前端 vitest 单测：独立 job，不起 compose 栈，与 integration 并行。
+  unit-web:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install and run frontend unit tests
+        working-directory: web
+        run: |
+          npm ci
+          npm run test
+
+  # 重型 compose 集成测试：共享单一栈、串行执行。用 buildx GHA 缓存压构建时间。
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Create .env with throwaway passwords
         run: |
@@ -26,6 +58,9 @@ jobs:
           done
 
       - name: Run unit, web and integration tests
+        env:
+          # test.sh 据此走 docker buildx + GHA 缓存；本地不设此变量，行为不变。
+          GHA_CACHE: "1"
         run: scripts/test.sh
 
       - name: Show logs on failure
