@@ -2,14 +2,14 @@
 
 产品行为要求见 `openspec/changes/multi-ai-collaboration/specs/`，设计取舍见同目录的 `design.md`。本文说明怎么开启、有哪些指令和接口、要配哪些参数、费用由谁出，以及参考了哪些项目。
 
-所有能力都有两道开关：部署级的 `.env` 开关（默认关闭），以及房间级的“协作模式”（默认关闭，由群主或管理员打开）。两道都打开才生效；关闭时房间的行为与原来完全一致。
+房间级的“协作模式”在新建房间时默认打开，群主或管理员可以随时关掉；关掉后房间退化为普通的多人 AI 聊天室，行为与原来完全一致。摘要、记忆、资料库和工具会产生额外的模型调用，另有部署级的 `.env` 开关，默认关闭。
 
 ## 能力一览
 
 | 能力 | 做什么 | 部署开关 |
 | --- | --- | --- |
-| 协作模式 | 房间级开关；打开后系统提示里会注入当前时间、房间名、在场成员和各 AI 的分工 | 无（房间内切换） |
-| 主持人 | 人发言后由主持人 AI 决定谁来回复、AI 之间要不要接话；每轮回复数有上限；主持人不可用时退回原规则 | `AI_HOST_PROVIDER` 等 |
+| 协作模式 | 房间级开关，新房间默认打开；打开后系统提示里会注入当前时间、房间名、在场成员和各 AI 的分工 | 无（房间内切换） |
+| 主持人 | 人类发言后由主持人（AI）决定谁来回复、AI 之间要不要接话；每轮回复数有上限；主持人不可用（比如没有 DeepSeek key）时退回原规则，同一个人在同一个房间每小时最多提示一次 | `AI_HOST_PROVIDER` 等 |
 | 超时确认 | 冷场时不再闲聊；有待执行的下一步时发“你还在吗”。讨论类、只读类超时自动继续，有副作用的超时不执行 | 无 |
 | 主席团 | `/vote 议题` 发起表决：主席各自独立判断，领头主席算 1.5 票，每轮轮换且不能是提案人，至少 3 张有效票才计票；群主或管理员可以 `/veto` 或 `/force-pass` | `AI_COUNCIL_TIMEOUT_SECONDS` |
 | 小会 | `/breakout @成员 议题` 把一部分成员拉进子房间；继承开会时父房间的上下文，预算沿父链逐级扣减，耗尽或被关闭时生成结论并发回父房间。父房间所有人都能旁观、搜索 | `AI_BREAKOUT_REPLY_BUDGET` |
@@ -46,7 +46,7 @@
 
 | 方法与路径 | 权限 | 说明 |
 | --- | --- | --- |
-| `PUT /api/rooms/{id}/collaboration` `{"enabled": bool}` | 群主、管理员 | 开关协作模式；关闭时其下所有小会（各层）一起结束并生成结论 |
+| `PUT /api/rooms/{id}/collaboration` `{"enabled": bool}` | 群主、管理员 | 开关协作模式（新房间默认开）；关闭时其下所有小会（各层）一起结束并生成结论 |
 | `PUT /api/rooms/{id}/council` `{"members": [id...]}` | 群主、管理员 | 指定主席团 |
 | `GET /api/rooms/{id}/memories` | 能读这个房间的人 | 房间记忆列表 |
 | `DELETE /api/rooms/{id}/memories/{memory}` | 群主、管理员 | 删除一条房间记忆，之后不再注入 |
@@ -103,9 +103,10 @@
 | 记忆守门与分层抽取（`recall.py`） | LobeHub `packages/memory-user-memory` | LobeHub Community License |
 | 资料切片与来源格式（`knowledge.py`） | LobeHub `src/libs/document-loaders`、`apps/server/src/modules/ContentChunk`、`knowledgeBaseQA` | LobeHub Community License |
 | 主持人（`host.py`） | LobeHub `group-supervisor` | LobeHub Community License |
+| 超时确认与中断续跑 | LangGraph 的持久执行和人在回路（`interrupt`）思路 | MIT（只借思路，没有用作运行时） |
 | 桌型模板 | ChatDev 的角色与阶段链思路 | Apache-2.0（只借思路） |
 | 主席团 | 思路来自 LLM Council 的评审流程与“主席独断”问题；计票仿 Redis Sentinel 的主观下线与客观下线 | LLM Council 没有许可证，只借思路，没有拷贝代码 |
 | 小会 | Linux fork（写时复制的上下文）和 cgroup（层级记账） | — |
 | MCP 客户端 | 官方 MCP Python SDK（`mcp==2.3.0`） | MIT |
 
-本项目是个人学习用途。照搬 LobeHub 提示词和结构的文件，文件头都注明了来源路径和许可。
+本项目是个人学习用途。参考 LobeHub 提示词和结构的文件，文件头都注明了来源路径和许可。
