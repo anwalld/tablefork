@@ -178,3 +178,92 @@ def related_note(items: list[dict]) -> ChatMessage | None:
     if not items:
         return None
     return ChatMessage("user", "\n".join([RETRIEVAL_HEADER] + [format_related(i) for i in items]))
+
+
+# --- Collaboration mode injectors -------------------------------------------
+# The system prompt gains the current date and a rundown of who is in the room
+# and what each AI does. These only run when a room has collaboration enabled,
+# so non-collaborative rooms keep their old prompt byte for byte.
+
+def date_text(now: float | None = None) -> str:
+    """Current date and time, injected into the system prompt."""
+    moment = time.localtime(now if now is not None else time.time())
+    return f"当前时间：{time.strftime('%Y-%m-%d %H:%M', moment)}"
+
+
+def room_members_text(room_name: str, humans: list, ais: list) -> str:
+    """Room name, the humans present, and each AI's role (its persona)."""
+    lines: list[str] = []
+    if room_name:
+        lines.append(f"房间：{room_name}")
+    if humans:
+        names = "、".join(h.name or f"成员{h.member_id}" for h in humans)
+        lines.append(f"在场的人类成员：{names}")
+    for ai in ais:
+        role = (ai.persona or "").strip()
+        lines.append(f"{ai.name}：{role}" if role else f"{ai.name}（AI 成员）")
+    return "\n".join(lines)
+
+
+def build_system_prompt(ai, persona: str, *, collaboration: bool,
+                        room_name: str, humans: list, ais: list,
+                        now: float | None = None) -> str:
+    """The system prompt for `ai` in a room, with collaboration context added.
+
+    Without collaboration this is exactly the old prompt: the legacy persona,
+    or the owner-authored persona prefixed with who the AI is.
+    """
+    base = (persona if ai.is_legacy
+            else f'你是 {ai.name}，聊天室中的独立AI角色，created by {ai.creator_name}。只以自己的身份说话。\n' + persona)
+    if not collaboration:
+        return base
+    injected = "\n".join(part for part in (date_text(now), room_members_text(room_name, humans, ais)) if part)
+    return base + "\n\n" + injected if injected else base
+
+
+def allocate(budget: int, fixed: int, related: int, memory: int,
+             floor: float = 0.5) -> tuple[bool, int, int]:
+    """Shares one context budget between injected material and history.
+
+    `fixed` (the summary) is always kept. Recent history should keep at least
+    `floor` of the budget; to get there, retrieval is dropped first, then
+    memory is cut, and only then does history shrink.
+    Returns (keep_related, memory_allowed, history_budget).
+    """
+    minimum = int(budget * floor)
+    history = budget - fixed - related - memory
+    if history >= minimum:
+        return True, memory, max(1, history)
+    history += related
+    if history >= minimum:
+        return False, memory, history
+    cut = min(memory, minimum - history)
+    return False, memory - cut, max(1, history + cut)
+
+
+def fork_filter(entries: list[dict], fork_seq: int) -> list[dict]:
+    """The parent's history up to the fork point, for a breakout's context.
+
+    A breakout inherits its parent's history only through `fork_seq`; later
+    parent messages do not enter the breakout, and the breakout's own messages
+    are fetched separately and appended after these.
+    """
+    return [entry for entry in entries if entry.get("seq", 0) <= fork_seq]
+
+
+async def parent_messages_until(pool: aiomysql.Pool, parent_room_id: int,
+                                fork_seq: int, count: int) -> list[dict]:
+    """The parent's newest messages at or before `fork_seq`, oldest first."""
+    if pool is None or parent_room_id <= 0:
+        return []
+    async with pool.acquire() as connection, connection.cursor() as cursor:
+        await cursor.execute(
+            "SELECT m.member_id, mem.display_name, m.content, m.seq FROM messages m "
+            "JOIN members mem ON mem.id = m.member_id "
+            "WHERE m.room_id = %s AND m.seq <= %s AND m.generation_outcome <> 'failed' "
+            "ORDER BY m.seq DESC LIMIT %s",
+            (parent_room_id, fork_seq, count),
+        )
+        rows = await cursor.fetchall()
+    return [{"member": {"id": row[0], "name": row[1]}, "content": row[2], "seq": row[3]}
+            for row in reversed(rows)]

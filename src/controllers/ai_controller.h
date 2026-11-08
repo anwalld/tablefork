@@ -23,6 +23,8 @@ class AiController : public drogon::HttpController<AiController>
     ADD_METHOD_TO(AiController::keys, "/api/keys", drogon::Get);
     ADD_METHOD_TO(AiController::storeKey, "/api/keys/{1}", drogon::Put);
     ADD_METHOD_TO(AiController::deleteKey, "/api/keys/{1}", drogon::Delete);
+    ADD_METHOD_TO(AiController::tableTemplates, "/api/table-templates", drogon::Get);
+    ADD_METHOD_TO(AiController::launchTemplate, "/api/rooms/{1}/table-template", drogon::Post);
     METHOD_LIST_END
 
     using Response = drogon::Task<drogon::HttpResponsePtr>;
@@ -42,5 +44,7 @@ class AiController : public drogon::HttpController<AiController>
     // service and never logged or stored here.
     Response storeKey(drogon::HttpRequestPtr req, std::string provider);
     Response deleteKey(drogon::HttpRequestPtr req, std::string provider);
+    Response tableTemplates(drogon::HttpRequestPtr req);
+    Response launchTemplate(drogon::HttpRequestPtr req, std::string roomId);
 };
 }  // namespace chat

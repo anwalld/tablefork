@@ -13,10 +13,17 @@ import uuid
 from typing import Awaitable, Callable
 
 from . import rules
+from . import host
+from . import council
+from . import breakout
+from . import recall
+from . import knowledge
+from . import tools
+from .council_state import Ballot
 from .controls import GenerationControls
-from .context import estimate_tokens, recent_messages, related_messages, related_note, to_chat
+from .context import allocate, build_system_prompt, date_text, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
-from .providers.base import ChatMessage, KeyRejected, ProviderError
+from .providers.base import ChatMessage, KeyRejected, ProviderError, ToolExchange
 
 log = logging.getLogger(__name__)
 PROVIDER_NAMES = {"deepseek": "DeepSeek", "openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Gemini"}
@@ -24,6 +31,9 @@ MAX_CONTENT = 4000
 PROACTIVE_PROMPT = "（对方有一阵子没说话了。请你自然地主动说点什么，比如接着刚才的话题，或者问候一下。）"
 GOODBYE_PROMPT = "（对方很久没有回复了。请简短、自然地道个别，说下次再聊。）"
 MAX_RETRY_AFTER = 60
+# How long to wait before checking that a sent breakout conclusion was stored.
+CONCLUSION_RECHECK = 30
+CONCLUSION_MAX_SENDS = 20
 
 
 def strip_self_name(text: str, name: str) -> str:
@@ -75,6 +85,11 @@ class Engine:
         self.control_watchers = {}
         self.control_wakeup = asyncio.Event()
         self.control_monitor_task = None
+        # Fixed at start: nobody can add a tool at runtime.
+        self.tools = tools.load(settings.tools_file) if settings.tools_enabled else {}
+        self.described_tools = None
+        self.vectors = (knowledge.VectorStore(settings.pgvector_dsn, settings.embedding_dimensions)
+                        if settings.knowledge_enabled and settings.pgvector_dsn else None)
 
     async def handle(self, event, ack: Callable[[], Awaitable[None]]) -> None:
         seen = f"ai:event:{event.instance_id}:{event.event_id}"
@@ -85,7 +100,8 @@ class Engine:
         value = getattr(event, body) if body else None
         if body in ('message_saved', 'members_changed'):
             room_id = value.room.room_id
-        elif body in ('room_deleted', 'generation_rejected', 'control_changed'):
+        elif body in ('room_deleted', 'generation_rejected', 'control_changed', 'confirmation_input',
+                      'council_start', 'council_override', 'breakout_closed'):
             room_id = value.room_id
         else:
             await ack()
@@ -94,6 +110,46 @@ class Engine:
         if body == 'control_changed':
             self.sync_controls()
             await ack()
+            return
+
+        if body == 'confirmation_input':
+            # The chat server checked the owner/admin role; here the step's own
+            # initiator is also allowed. Only those responses touch the step.
+            async with self._room(room_id, seen) as state:
+                if (state is not None and state.pending_step is not None
+                        and state.pending_step.get('status') in ('pending', 'paused')):
+                    step = state.pending_step
+                    allowed = value.privileged or value.member_id == step.get('initiator')
+                    if allowed and value.response in ('continue', 'cancel'):
+                        step['status'] = 'done' if value.response == 'continue' else 'cancelled'
+                        state.timer_due = None
+                        if step['status'] == 'cancelled':
+                            self._post_system(room_id, f"已取消：{step.get('description') or '下一步'}。")
+                        elif step.get('kind') == 'tool':
+                            # Confirmed: the tool runs once, in a new job.
+                            self._enqueue_job(state, step['slug'], step['payer'], 'tool_continue',
+                                              tool=step['tool'], step_id=step['id'])
+            await ack()
+            await self._drain(room_id)
+            return
+
+        if body == 'council_start':
+            await self._start_council(room_id, value.topic, value.proposer_member_id, seen)
+            await ack()
+            return
+
+        if body == 'council_override':
+            await self._override_council(room_id, value.verdict)
+            await ack()
+            return
+
+        if body == 'breakout_closed':
+            payer = [value.closed_by_member_id, value.closed_by_user_id]
+            async with self._room(room_id, seen) as state:
+                if state is not None and not state.deleted:
+                    self._begin_conclusion(state, payer)
+            await ack()
+            await self._advance_conclusion(room_id)
             return
 
         # This can fail. No receipt has been recorded, so resending is safe.
@@ -124,6 +180,11 @@ class Engine:
                         self._finish_failed(state, state.active)
                 elif body == 'members_changed':
                     _apply_snapshot(state, value.room)
+                elif state.conclusion is not None:
+                    # A wrapping-up breakout schedules nothing new; a reply
+                    # that was already running just finishes.
+                    if value.sender.is_ai and state.active and state.active['id'] == value.generation_id:
+                        state.active = None
                 elif body == 'message_saved' and not value.sender.is_ai and (paused or (cutoff and value.seq <= cutoff)):
                     state.pending.clear()
                     state.timer_due = None
@@ -135,7 +196,10 @@ class Engine:
                                              else hashlib.sha256(raw_trace.encode()).hexdigest())
                     _apply_snapshot(state, value.room)
                     payer = rules.Human(value.sender.member_id, value.sender.user_id)
-                    decision = rules.on_human_message(state, payer, value.content, available, self.rng, value.mention_ids)
+                    if state.collaboration_enabled:
+                        decision = await self._host_round(state, room_id, payer, value.content, available, value.mention_ids)
+                    else:
+                        decision = rules.on_human_message(state, payer, value.content, available, self.rng, value.mention_ids)
                     state.timer_due = self._next_timer(state)
                     self._enqueue(state, decision, {
                         'name': value.sender.name or '用户', 'content': value.content,
@@ -156,8 +220,18 @@ class Engine:
                                 rules.on_proactive_saved(state, job['epoch'], job['slot'])
                                 state.timer_due = self._next_timer(state)
                             payer = rules.Human(*job['payer'])
-                            decision = rules.on_ai_message(state, value.sender.slug, value.content,
-                                payer, job['hop'], available, self.settings.chain_p, self.rng)
+                            if state.collaboration_enabled:
+                                speakers, end = await self._host_pick(room_id, state, payer.user_id)
+                                if speakers is not None:
+                                    decision = rules.on_host_decision(
+                                        state, speakers, end, payer, available, [],
+                                        self.settings.round_max_replies, kind="chain", hop=job['hop'] + 1)
+                                else:
+                                    decision = rules.on_ai_message(state, value.sender.slug, value.content,
+                                        payer, job['hop'], available, self.settings.chain_p, self.rng)
+                            else:
+                                decision = rules.on_ai_message(state, value.sender.slug, value.content,
+                                    payer, job['hop'], available, self.settings.chain_p, self.rng)
                             self._enqueue(state, decision)
         # The state and queue have committed, including for duplicate delivery.
         await ack()
@@ -181,6 +255,18 @@ class Engine:
                 'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
             })
 
+    def _enqueue_job(self, state, slug, payer, kind, **extra):
+        ai = state.ai(slug)
+        if ai is None:
+            return
+        state.pending.append({
+            'id': uuid.uuid4().hex, 'slug': slug, 'payer': list(payer), 'kind': kind, 'hop': 1,
+            'epoch': state.epoch, 'slot': state.proactive_mask.bit_count(), 'attempt': 0,
+            'member_id': ai.member_id, 'admission_id': ai.admission_id, 'trigger': None,
+            'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
+            'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0, **extra,
+        })
+
     async def fire_due_timers(self):
         due = await self.cache.zrangebyscore('ai:timers', '-inf', self.clock())
         for raw in due:
@@ -188,6 +274,9 @@ class Engine:
             # Fetching keys may take time. Recheck the timer under the same
             # room lock used by human messages before accepting this firing.
             state = await self._load(room_id)
+            if state.conclusion is not None:
+                await self._advance_conclusion(room_id)
+                continue
             if self.controls:
                 paused, cutoff = await self.controls.room(room_id)
                 if paused or (cutoff and state.last_trigger_seq <= cutoff):
@@ -201,6 +290,10 @@ class Engine:
             decision = rules.Decision()
             async with self._room(room_id) as state:
                 if state.deleted or state.timer_due is None or state.timer_due > self.clock():
+                    continue
+                if state.collaboration_enabled:
+                    # No idle chat: only a timed-out confirmation request runs.
+                    await self._pending_deadline(room_id, state)
                     continue
                 if human is None or state.humans != [human]:
                     continue
@@ -220,6 +313,7 @@ class Engine:
             try:
                 await self.recover_work()
                 await self.fire_due_timers()
+                await self.sweep_knowledge()
             except Exception:
                 log.exception('AI background work')
             await asyncio.sleep(self.settings.timer_poll_seconds)
@@ -233,6 +327,15 @@ class Engine:
         task.add_done_callback(self.tasks.discard)
 
     async def _claim(self, room_id):
+        concluding = []
+        try:
+            return await self._claim_inner(room_id, concluding)
+        finally:
+            # After the room lock is released, so it sees the committed state.
+            if concluding:
+                self._spawn(self._advance_conclusion(room_id))
+
+    async def _claim_inner(self, room_id, concluding):
         job = None
         exhausted = None
         paused, cutoff = await self.controls.room(room_id) if self.controls else (False, 0)
@@ -256,6 +359,8 @@ class Engine:
                 if paused:
                     state.timer_due = None
                     state.target = None
+            if state.conclusion is not None:
+                state.pending.clear()
             if state.active is None:
                 # Messages queued before generation starts share one reply
                 # per AI. The latest trigger supplies the payer and epoch.
@@ -268,6 +373,15 @@ class Engine:
                 state.active = pending.pop(0) if pending else None
                 state.pending = pending
             active = state.active
+            if (active and active['attempt'] == 0 and active['status'] == 'queued'
+                    and active['kind'] != 'vote' and state.parent_room_id
+                    and not await self._charge(room_id, state, active['id'])):
+                # Out of budget at some level: no more AI turns, wrap up.
+                self._begin_conclusion(state, active['payer'])
+                state.active = None
+                state.pending.clear()
+                active = None
+                concluding.append(room_id)
             if active and active['id'] == durable_id and durable:
                 active['attempt'] = max(active['attempt'], durable.attempt)
             if active and active['id'] == durable_id and durable and durable.phase != 'generating':
@@ -324,6 +438,12 @@ class Engine:
             result = 'processed'
             if job['status'] == 'final':
                 self._send_final(room_id, job)
+                return
+            if job['kind'] == 'vote':
+                await self._run_vote(room_id, job)
+                async with self._room(room_id) as state:
+                    if state.active and state.active['id'] == job['id']:
+                        state.active = None
                 return
             if self.controls and not await self.controls.reserve(room_id, job):
                 result = 'controlled'
@@ -403,10 +523,22 @@ class Engine:
             await self._fail_job(room_id, job, 'api_key_required',
                                  f'请先填写 {PROVIDER_NAMES[ai.provider]} 的 API key', False)
             return
-        messages, related = await self._context(room_id, job, ai.member_id)
+        job['parent_room_id'] = state.parent_room_id
+        job['fork_seq'] = state.fork_seq
+        summary, room_memories, user_memories = await self._recall(room_id, state)
+        messages, related, memory = await self._context(
+            room_id, job, ai.member_id, summary, room_memories, user_memories)
         if 'persona_snapshot' not in job:
             job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
-        system = job['persona_snapshot'] if ai.is_legacy else f'你是 {ai.name}，聊天室中的独立AI角色，created by {ai.creator_name}。只以自己的身份说话。\n' + job['persona_snapshot']
+        system = build_system_prompt(ai, job['persona_snapshot'],
+                                     collaboration=state.collaboration_enabled,
+                                     room_name=state.room_name,
+                                     humans=state.humans, ais=state.ais)
+        # Order per ai-context: system prompt, history summary, memory. Both
+        # change only at segment boundaries, so the cached prefix holds.
+        for block in (recall.summary_block(summary), memory):
+            if block:
+                system += "\n\n" + block
         if job['kind'] in ('proactive', 'goodbye'):
             prompt = GOODBYE_PROMPT if job['kind'] == 'goodbye' else PROACTIVE_PROMPT
             messages.append(ChatMessage('user', prompt))
@@ -418,6 +550,14 @@ class Engine:
         if related is not None:
             # Placed just before the newest turn, so the cached prefix stays the same.
             messages.insert(len(messages) - 1, related)
+        prefix = ''
+        if job['kind'] == 'tool_continue':
+            record, note = await self._run_confirmed_tool(room_id, job)
+            prefix = record + "\n"
+            messages.append(ChatMessage('user', note))
+        provider = self.providers.create(ai.provider)
+        use_tools = (bool(self.tools) and state.collaboration_enabled and job['kind'] != 'tool_continue'
+                     and hasattr(provider, 'complete'))
         strip = self.settings.strip_self_name
 
         def visible(text):
@@ -457,16 +597,24 @@ class Engine:
                 sequence=sequence, cumulative=True, admission_id=job.get("admission_id", ""))))
             last_flush = time.monotonic()
         await flush()  # clears the previous attempt even before the first token
+        if prefix:
+            parts.append(prefix)
+            buffered.append(prefix)
         try:
-            provider = self.providers.create(ai.provider)
-            async with asyncio.timeout(self.settings.generation_timeout):
-                async for piece in provider.stream(model=agent.model, system=system,
-                        messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens,
-                        cache_prefix=self.settings.context_block > 0):
-                    parts.append(piece)
-                    buffered.append(piece)
-                    if time.monotonic() - last_flush >= self.settings.chunk_interval:
-                        await flush()
+            if use_tools:
+                # Tool turns are not streamed; the reply arrives in one piece.
+                text = await self._tool_loop(room_id, job, state, agent, provider, system, messages, key)
+                parts.append(text)
+                buffered.append(text)
+            else:
+                async with asyncio.timeout(self.settings.generation_timeout):
+                    async for piece in provider.stream(model=agent.model, system=system,
+                            messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens,
+                            cache_prefix=self.settings.context_block > 0):
+                        parts.append(piece)
+                        buffered.append(piece)
+                        if time.monotonic() - last_flush >= self.settings.chunk_interval:
+                            await flush()
             await flush()
         except KeyRejected:
             await flush()
@@ -504,14 +652,501 @@ class Engine:
                                 retry_at=self.clock() + self.settings.retry_base_seconds)
             final = copy.deepcopy(state.active)
         self._send_final(room_id, final)
+        if state.collaboration_enabled and job.get('window_start'):
+            self._spawn(self._process_segment(room_id, job['payer'][1], job['window_start']))
 
-    async def _context(self, room_id, job, member_id):
-        """Recent messages, plus related older ones when retrieval is on."""
+    async def _tool_specs(self):
+        if self.described_tools is None:
+            self.described_tools = await tools.mcp_describe(self.tools, self.settings.tool_timeout)
+        return self.described_tools
+
+    async def _tool_loop(self, room_id, job, state, agent, provider, system, messages, key):
+        """Up to four model turns with tools. Read-only tools run at once and
+        are recorded in the reply; a side-effecting call stops the loop and
+        becomes a confirmation request instead."""
+        described = await self._tool_specs()
+        specs = tools.schemas(described)
+        exchanges, records, text = [], [], ''
+        for _ in range(4):
+            async with asyncio.timeout(self.settings.generation_timeout):
+                turn = await provider.complete(model=agent.model, system=system, messages=messages,
+                                               exchanges=exchanges, tools=specs, api_key=key,
+                                               max_tokens=self.settings.max_output_tokens)
+            if not turn.calls:
+                text = turn.text
+                break
+            results = []
+            for call in turn.calls:
+                tool = described.get(call.name)
+                if tool is None:
+                    results.append((call.id, f'错误：没有名为 {call.name} 的工具，不能调用'))
+                    continue
+                if tool.risk == 'side_effect':
+                    await self._ask_tool_confirmation(room_id, job, call)
+                    shown = tools.summarize(json.dumps(call.arguments, ensure_ascii=False), 120)
+                    text = (f"我需要调用「{call.name}」（参数：{shown}）。这一步有副作用，"
+                            "要等发起人或群主、管理员回复“继续”才会执行，回复“否决”取消。")
+                    return "\n".join(records + [text])
+                result = await self._run_tool(room_id, job, tool, call.arguments)
+                records.append(tools.call_record(call.name, call.arguments, result))
+                results.append((call.id, result))
+            exchanges.append(ToolExchange(tuple(turn.calls), tuple(results)))
+        else:
+            text = text or '（工具调用次数已达上限，先回复到这里。）'
+        return "\n".join(records + [text]) if records else text
+
+    async def _run_tool(self, room_id, job, tool, arguments):
+        """Runs one tool; failures and timeouts come back as text for the
+        model, never as exceptions."""
+        limit = self.settings.tool_timeout
+        try:
+            async with asyncio.timeout(limit):
+                if tool.kind == 'builtin':
+                    return await self._builtin(room_id, job, tool.name, arguments)
+                return await tools.call_mcp(tool, arguments, limit)
+        except TimeoutError:
+            return f'调用超时（超过 {limit:g} 秒）'
+        except Exception as error:  # noqa: BLE001 - reported to the model
+            return f'调用失败：{error or type(error).__name__}'[:500]
+
+    async def _builtin(self, room_id, job, name, arguments):
+        query = str(arguments.get('query', '')).strip()
+        if name == 'current_time':
+            return date_text()
+        if name == 'search_messages':
+            if self.pool is None or not query:
+                return '聊天记录搜索不可用'
+            items = await related_messages(self.pool, room_id, job.get('window_start') or 2 ** 62, query,
+                                           self.settings.retrieval_top_k, self.settings.retrieval_chars)
+            note = related_note(items)
+            return note.content if note else '没有找到相关的聊天记录'
+        if name == 'search_knowledge':
+            note = await self._knowledge_note(room_id, job.get('parent_room_id', 0), job['payer'][1], query)
+            return note.content if note else '没有找到相关资料'
+        raise tools.ToolError(f'未知的内置工具 {name}')
+
+    async def _ask_tool_confirmation(self, room_id, job, call):
+        async with self._room(room_id) as state:
+            deadline = self.clock() + self.settings.council_timeout_seconds
+            state.pending_step = {
+                'id': f"tool:{job['id']}", 'kind': 'tool', 'risk': 'side_effect',
+                'initiator': job['payer'][0], 'payer': job['payer'], 'slug': job['slug'],
+                'tool': {'name': call.name, 'arguments': call.arguments},
+                'description': f'调用工具「{call.name}」', 'deadline': deadline, 'status': 'pending',
+            }
+            state.timer_due = deadline
+            step = copy.deepcopy(state.pending_step)
+        self._post_pending_step(room_id, step)
+
+    async def _run_confirmed_tool(self, room_id, job):
+        """Runs a confirmed side-effecting tool at most once, even if this job
+        is retried: the first attempt claims it, later ones reuse its result."""
+        call = job['tool']
+        marker = f"ai:tool:run:{job.get('step_id', job['id'])}"
+        if await self.cache.set(marker, '', nx=True, ex=86400):
+            tool = (await self._tool_specs()).get(call['name'])
+            result = ('错误：这个工具已不在部署配置里' if tool is None
+                      else await self._run_tool(room_id, job, tool, call['arguments']))
+            await self.cache.set(marker, result or '（无输出）', ex=86400)
+        else:
+            result = await self.cache.get(marker) or '上一次执行的结果未知；为避免重复执行，没有再次调用'
+        record = tools.call_record(call['name'], call['arguments'], result)
+        note = (f"（你之前请求调用的工具「{call['name']}」已经人工确认并执行，结果：{result}。"
+                "请根据结果简短回复。）")
+        return record, note
+
+    async def _recall(self, room_id, state):
+        """The summary and memories to inject; empty when off or on error."""
+        settings = self.settings
+        if (not state.collaboration_enabled or self.pool is None
+                or not (settings.summary_enabled or settings.memory_enabled)):
+            return '', [], []
+        try:
+            summary = ''
+            if settings.summary_enabled:
+                cached = await self.cache.get(f'ai:summary:{room_id}')
+                summary = (json.loads(cached)['content'] if cached
+                           else (await recall.load_summary(self.pool, room_id))[1])
+            room_memories, user_memories = [], []
+            if settings.memory_enabled:
+                rooms = [room_id] + ([state.parent_room_id] if state.parent_room_id else [])
+                room_memories = await recall.load_room_memories(self.pool, rooms)
+                # Only the humans in the current snapshot: a user's memories
+                # never reach a room they are not in.
+                user_memories = await recall.load_user_memories(self.pool, _human_names(state))
+            return summary, room_memories, user_memories
+        except Exception as error:  # noqa: BLE001 - recall never blocks a reply
+            log.warning('recall for room %s failed: %s', room_id, type(error).__name__)
+            return '', [], []
+
+    async def _recall_call(self, key, system, user, max_tokens):
+        """One call to the recall model; None on any failure."""
+        try:
+            parts = []
+            async with asyncio.timeout(self.settings.generation_timeout):
+                async for piece in self.providers.create(self.settings.recall_provider).stream(
+                        model=self.settings.recall_model, system=system,
+                        messages=[ChatMessage('user', user)], api_key=key, max_tokens=max_tokens):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return None
+        return ''.join(parts).strip() or None
+
+    async def _process_segment(self, room_id, payer_user_id, window_start):
+        """Folds messages that left the context window into the room summary
+        and extracts memories from them, one block at a time. Best effort:
+        on failure the cursor does not move and the next reply tries again."""
+        settings = self.settings
+        if self.pool is None or not (settings.summary_enabled or settings.memory_enabled):
+            return
+        lock = f'ai:segment:lock:{room_id}'
+        if not await self.cache.set(lock, '1', nx=True, ex=300):
+            return
+        try:
+            upto, existing = await recall.load_summary(self.pool, room_id)
+            if window_start - 1 - upto < settings.summary_block:
+                return
+            rows = await recall.messages_between(self.pool, room_id, upto, window_start, 200)
+            key = await self.keys.get(payer_user_id, settings.recall_provider) if rows else None
+            if key is None:
+                return
+            text = recall.transcript(rows)
+            summary = existing
+            if settings.summary_enabled:
+                summary = await self._recall_call(key, recall.SUMMARY_SYSTEM,
+                                                  recall.summary_input(existing, text), 1500)
+                if summary is None:
+                    return
+            if settings.memory_enabled:
+                await self._extract_memories(room_id, text, rows[-1]['seq'], key)
+            await recall.save_summary(self.pool, room_id, rows[-1]['seq'], summary)
+            await self.cache.set(f'ai:summary:{room_id}',
+                                 json.dumps({'upto': rows[-1]['seq'], 'content': summary}), ex=86400)
+        except Exception:
+            log.exception('segment for room %s', room_id)
+        finally:
+            await self.cache.delete(lock)
+
+    async def _extract_memories(self, room_id, text, source_seq, key):
+        """Gatekeeper first; extraction only for the layers it lets through."""
+        humans = _human_names(await self._load(room_id))
+        existing = recall.existing_text(await recall.load_room_memories(self.pool, [room_id]),
+                                        await recall.load_user_memories(self.pool, humans))
+        gate = await self._recall_call(key, recall.gate_system(existing), text, 400)
+        layers = recall.parse_gate(gate or '')
+        if not layers:
+            return []
+        out = await self._recall_call(key, recall.extract_system(layers, existing), text, 1500)
+        memories = recall.parse_memories(out or '', layers, {name: uid for uid, name in humans.items()})
+        if memories:
+            await recall.save_memories(self.pool, room_id, source_seq, memories)
+        return memories
+
+    async def _host_pick(self, room_id, state, payer_user_id):
+        """Asks the host who should speak next; (None, False) on any failure."""
+        settings = self.settings
+        key = await self.keys.get(payer_user_id, settings.host_provider)
+        if key is None:
+            return None, False
+        entries = await recent_messages(self.cache, self.pool, room_id, 20)
+        history = "\n".join(f"{e['member']['name']}：{e['content']}" for e in entries[-20:])
+        participants = "\n".join(f"{ai.name}：{(ai.persona or '').strip()}" for ai in state.ais)
+        system = host.HOST_PROMPT.format(participants=participants, history=history)
+        provider = self.providers.create(settings.host_provider)
+        try:
+            parts = []
+            async with asyncio.timeout(settings.generation_timeout):
+                async for piece in provider.stream(
+                        model=settings.host_model, system=system,
+                        messages=[ChatMessage("user", history)],
+                        api_key=key, max_tokens=256):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return None, False
+        parsed = host.parse_host_json("".join(parts))
+        if parsed is None:
+            return None, False
+        return parsed["speakers"], parsed["end"]
+
+    async def _host_round(self, state, room_id, payer, content, available, mention_ids):
+        """Lets the host decide the round's speakers; falls back on failure."""
+        if mention_ids:
+            mentioned = list(dict.fromkeys(a.slug for m in mention_ids
+                                           for a in state.ais if a.member_id == m))
+        else:
+            mentioned = rules.mentions(content, state.ais)
+        speakers, end = await self._host_pick(room_id, state, payer.user_id)
+        if speakers is not None:
+            return rules.on_host_decision(state, speakers, end, payer, available,
+                                          mentioned, self.settings.round_max_replies)
+        self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
+            room_id=room_id, notify_member_id=payer.member_id,
+            code='host_unavailable', message='主持人暂时不可用，已按原规则回复')))
+        return rules.on_human_message(state, payer, content, available, self.rng, mention_ids)
+
+    def _post_pending_step(self, room_id, step):
+        """Asks the chat server to show the room a confirmation request."""
+        self.send(ai_pb2.AiAction(system_notice=ai_pb2.SystemNotice(
+            room_id=room_id, content=rules.confirmation_text(step))))
+
+    def _post_system(self, room_id, content):
+        """Sends a room-wide system message via the chat server."""
+        self.send(ai_pb2.AiAction(system_notice=ai_pb2.SystemNotice(
+            room_id=room_id, content=content)))
+
+    async def _council_member_ids(self, room_id):
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT member_id FROM room_council WHERE room_id=%s", (room_id,))
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def _start_council(self, room_id, topic, proposer_member_id, seen):
+        chair_ids = await self._council_member_ids(room_id)
+        async with self._room(room_id, seen) as state:
+            if state is None or state.deleted:
+                return
+            chairs = [a.slug for a in state.ais if a.member_id in chair_ids]
+            if len(chairs) < 3:
+                self._post_system(room_id, "主席团成员不足 3 人，无法发起表决。")
+                return
+            round_ = int(await self.cache.incr(f'council:{room_id}:round'))
+            prev_raw = await self.cache.get(f'council:{room_id}:lead')
+            lead = council.rotate_lead(chairs, None, prev_raw.decode() if prev_raw else None)
+            deadline = self.clock() + self.settings.council_timeout_seconds
+            ballot = Ballot(round_, topic, proposer_member_id, lead, chairs, deadline)
+            await self.cache.set(f'council:{room_id}:{round_}', json.dumps(ballot.to_json()))
+            await self.cache.set(f'council:{room_id}:lead', lead)
+            proposer_user = next((h.user_id for h in state.humans if h.member_id == proposer_member_id), 0)
+            for slug in chairs:
+                ai = state.ai(slug)
+                state.pending.append({
+                    'id': uuid.uuid4().hex, 'slug': slug,
+                    'payer': [proposer_member_id, proposer_user],
+                    'kind': 'vote', 'hop': 1, 'epoch': state.epoch, 'slot': 0, 'attempt': 0,
+                    'member_id': ai.member_id, 'admission_id': ai.admission_id,
+                    'ballot_round': round_, 'topic': topic,
+                    'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
+                    'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
+                })
+            self._post_system(room_id, f"已发起表决（第 {round_} 轮）：{topic}")
+        await self._drain(room_id)
+
+    async def _override_council(self, room_id, verdict):
+        round_raw = await self.cache.get(f'council:{room_id}:round')
+        if not round_raw:
+            return
+        raw = await self.cache.get(f'council:{room_id}:{int(round_raw)}')
+        if not raw:
+            return
+        ballot = Ballot.from_json(json.loads(raw))
+        label = "强制通过" if verdict == "force_pass" else "否决"
+        self._post_system(room_id, f"第 {ballot.round} 轮表决已由人{label}。")
+        async with self._room(room_id) as state:
+            if state.pending_step is not None:
+                state.pending_step['status'] = 'done' if verdict == 'force_pass' else 'cancelled'
+
+    async def _finish_ballot(self, room_id, ballot):
+        result = ballot.tally()
+        label = {'pass': '客观通过', 'reject': '客观不通过', 'invalid': '无效，交给人决定'}[result.outcome]
+        rejects = [f"{ballot.votes[s]['reason']}" for s in ballot.chairs
+                   if s in ballot.votes and ballot.votes[s]['verdict'] == 'reject']
+        content = f"表决「{ballot.topic}」：{label}。"
+        if rejects:
+            content += " 少数派意见：" + "；".join(rejects)
+        self._post_system(room_id, content)
+        if self.settings.memory_enabled and self.pool is not None and result.outcome != 'invalid':
+            try:
+                await recall.save_memories(self.pool, room_id, 0, [{
+                    'layer': 'conclusion', 'user_id': None,
+                    'content': recall.council_memory(ballot.topic, label, rejects)}])
+            except Exception as error:  # noqa: BLE001 - memory is best effort
+                log.warning('council memory failed: %s', type(error).__name__)
+        if result.outcome == 'pass':
+            async with self._room(room_id) as state:
+                deadline = self.clock() + self.settings.council_timeout_seconds
+                state.pending_step = {
+                    'id': f'council:{ballot.round}', 'kind': 'council', 'risk': 'side_effect',
+                    'initiator': ballot.proposer, 'description': f'执行「{ballot.topic}」',
+                    'deadline': deadline, 'status': 'pending',
+                }
+                state.timer_due = deadline
+                self._post_pending_step(room_id, state.pending_step)
+
+    async def _run_vote(self, room_id, job):
+        state = await self._load(room_id)
+        ai = state.ai(job['slug'])
+        agent = self.agents.get(ai.model_slug or ai.slug) if ai else None
+        if ai is None or agent is None:
+            return
+        key = await self.keys.get(job['payer'][1], ai.provider)
+        if key is None:
+            return
+        system = council.VOTE_PROMPT.format(topic=job['topic'])
+        provider = self.providers.create(ai.provider)
+        try:
+            parts = []
+            async with asyncio.timeout(self.settings.generation_timeout):
+                async for piece in provider.stream(
+                        model=agent.model, system=system,
+                        messages=[ChatMessage("user", f"议题：{job['topic']}")],
+                        api_key=key, max_tokens=256):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return
+        verdict = council.parse_vote_json("".join(parts))
+        if verdict is None:
+            return
+        raw = await self.cache.get(f'council:{room_id}:{job["ballot_round"]}')
+        if not raw:
+            return
+        ballot = Ballot.from_json(json.loads(raw))
+        if not ballot.record(job['slug'], verdict['verdict'], verdict['reason']):
+            return
+        await self.cache.set(f'council:{room_id}:{job["ballot_round"]}', json.dumps(ballot.to_json()))
+        if ballot.complete():
+            await self._finish_ballot(room_id, ballot)
+
+    def _spawn(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _charge(self, room_id, state, generation_id) -> bool:
+        """Charges one AI reply to every breakout level above and including
+        this room (the root room has no budget). False when any is spent."""
+        if not self.settings.breakout_reply_budget:
+            return True
+        chain = [room_id]
+        parent = state.parent_room_id
+        while parent and len(chain) < 16:
+            upper = await self._load(parent)
+            if not upper.parent_room_id:
+                break  # the root
+            chain.append(parent)
+            parent = upper.parent_room_id
+        keys = [f'ai:budget:charged:{generation_id}'] + [f'ai:budget:{rid}' for rid in chain]
+        return bool(await self.cache.eval(breakout.CHARGE, len(keys), *keys,
+                                          str(self.settings.breakout_reply_budget)))
+
+    def _begin_conclusion(self, state, payer):
+        """Marks a breakout as wrapping up; the timer drives the rest."""
+        if not state.parent_room_id or state.conclusion is not None:
+            return
+        state.conclusion = {'payer': list(payer), 'content': '', 'delivered': False}
+        state.pending.clear()
+        state.timer_due = self.clock()
+
+    async def _advance_conclusion(self, room_id):
+        """Writes the conclusion once, then sends it until the chat server
+        has stored it in the parent room. Safe to run any number of times."""
+        state = await self._load(room_id)
+        conclusion = state.conclusion
+        if conclusion is None or conclusion.get('delivered'):
+            return
+        content = conclusion.get('content', '')
+        if not content:
+            summary = await self._summarize(room_id, state, conclusion['payer'])
+            names = await self._participant_names(room_id, state)
+            content = breakout.conclusion_content(state.room_name or '小会', names, summary)
+            content += f"\n（小会 #{room_id} 的全过程可在房间列表中打开查看）"
+        elif (await self._conclusion_stored(room_id, state.parent_room_id)
+              or conclusion.get('sends', 0) >= CONCLUSION_MAX_SENDS):
+            # Stored, or the parent keeps refusing it (say the initiator left):
+            # stop resending either way; the breakout stays readable.
+            if conclusion.get('sends', 0) >= CONCLUSION_MAX_SENDS:
+                log.warning('breakout %s conclusion was never stored', room_id)
+            async with self._room(room_id) as current:
+                if current.conclusion is not None:
+                    current.conclusion['delivered'] = True
+                    current.timer_due = None
+            return
+        async with self._room(room_id) as current:
+            if current.conclusion is None:
+                return
+            if not current.conclusion.get('content'):
+                current.conclusion['content'] = content
+            content = current.conclusion['content']
+            current.conclusion['sends'] = current.conclusion.get('sends', 0) + 1
+            # Without SQL there is nothing to confirm against.
+            current.conclusion['delivered'] = self.pool is None
+            current.timer_due = None if self.pool is None else self.clock() + CONCLUSION_RECHECK
+        self.send(ai_pb2.AiAction(breakout_concluded=ai_pb2.BreakoutConcluded(
+            room_id=room_id, content=content[:MAX_CONTENT])))
+
+    async def _conclusion_stored(self, room_id, parent_room_id):
+        if self.pool is None or not parent_room_id:
+            return False
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT 1 FROM messages WHERE room_id=%s AND client_msg_id=%s LIMIT 1",
+                              (parent_room_id, breakout.conclusion_message_id(room_id)))
+            return await cur.fetchone() is not None
+
+    async def _participant_names(self, room_id, state):
+        return [h.name for h in state.humans if h.name] + [ai.name for ai in state.ais]
+
+    async def _summarize(self, room_id, state, payer):
+        """One model call over the breakout's own messages, paid by `payer`.
+        Falls back to a fixed note so a conclusion is always posted."""
+        entries = await recent_messages(self.cache, self.pool, room_id, self.settings.context_messages)
+        transcript = "\n".join(f"{e['member']['name']}：{e['content']}" for e in entries)
+        if transcript:
+            for ai in state.ais:
+                agent = self.agents.get(ai.model_slug or ai.slug)
+                key = await self.keys.get(payer[1], ai.provider) if agent else None
+                if key is None:
+                    continue
+                try:
+                    parts = []
+                    async with asyncio.timeout(self.settings.generation_timeout):
+                        async for piece in self.providers.create(ai.provider).stream(
+                                model=agent.model, system=breakout.SUMMARY_PROMPT,
+                                messages=[ChatMessage('user', transcript)],
+                                api_key=key, max_tokens=400):
+                            parts.append(piece)
+                    summary = ''.join(parts).strip()
+                    if summary:
+                        return summary
+                except (KeyRejected, ProviderError, TimeoutError):
+                    continue
+        return '（没能自动生成总结，请打开小会查看全过程）'
+
+    async def _pending_deadline(self, room_id, state):
+        """Runs on a collaboration room's timer when a step waits for a human.
+
+        Discuss/readonly steps continue automatically; side effects stay paused
+        and the room is reminded again instead.
+        """
+        step = state.pending_step
+        if step is None or step.get('status') != 'pending':
+            state.timer_due = None
+            return
+        if rules.deadline_auto_continues(step.get('risk', 'discuss')):
+            step['status'] = 'done'
+            state.timer_due = None
+        else:
+            step['status'] = 'paused'
+            state.timer_due = self._next_timer(state)
+            self._post_pending_step(room_id, step)
+
+    async def _context(self, room_id, job, member_id, summary='', room_memories=(), user_memories=()):
+        """Recent messages, plus related older ones when retrieval is on, and
+        the memory block, all sharing one budget (ai-context: retrieval is
+        dropped first, then memory is cut, then older history)."""
         settings = self.settings
         count, chars, tokens = settings.context_messages, settings.context_chars, settings.context_tokens
         if job.get('context_halved'):
             count, chars, tokens = max(1, count // 2), max(1, chars // 2), tokens // 2
         entries = await recent_messages(self.cache, self.pool, room_id, count + settings.context_block)
+        own = [int(e['seq']) for e in entries if 'seq' in e]
+        if own:
+            # Messages before this have aged out and belong to the summary.
+            job['window_start'] = min(own)
+        if job.get('parent_room_id'):
+            # A breakout inherits the parent's history only up to the fork, then
+            # its own messages on top.
+            inherited = await parent_messages_until(self.pool, job['parent_room_id'],
+                                                   job.get('fork_seq', 0), count)
+            entries = inherited + entries
         trigger = job.get('trigger')
         related = None
         if (settings.retrieval_enabled and job['kind'] == 'reply' and trigger and entries
@@ -520,14 +1155,125 @@ class Engine:
                                            trigger.get('content', ''), settings.retrieval_top_k,
                                            settings.retrieval_chars)
             related = related_note(items)
-            if related is not None:
-                # The reference shares the history budget instead of adding to it.
-                if tokens:
-                    tokens = max(1, tokens - estimate_tokens(related.content))
-                else:
-                    chars = max(1, chars - len(related.content))
+        if job['kind'] == 'reply' and trigger:
+            found = await self._knowledge_note(room_id, job.get('parent_room_id', 0),
+                                               job['payer'][1], trigger.get('content', ''))
+            if found is not None:
+                # Knowledge and message retrieval are both "retrieval": one
+                # reference block, dropped first when the budget is short.
+                related = found if related is None else ChatMessage(
+                    'user', found.content + "\n\n" + related.content)
+        memory = recall.memory_block(list(room_memories), list(user_memories), settings.memory_chars)
+        if summary or memory:
+            measure = estimate_tokens if tokens else len
+            keep, allowed, history = allocate(tokens or chars, measure(summary),
+                                              measure(related.content) if related else 0, measure(memory))
+            if not keep:
+                related = None
+            if allowed < measure(memory):
+                ratio = allowed / max(1, measure(memory))
+                memory = recall.memory_block(list(room_memories), list(user_memories),
+                                             int(settings.memory_chars * ratio))
+            if tokens:
+                tokens = history
+            else:
+                chars = history
+        elif related is not None:
+            # The reference shares the history budget instead of adding to it.
+            if tokens:
+                tokens = max(1, tokens - estimate_tokens(related.content))
+            else:
+                chars = max(1, chars - len(related.content))
         return to_chat(entries, member_id, count, chars, block=settings.context_block,
-                       max_tokens=tokens), related
+                       max_tokens=tokens), related, memory
+
+    async def _knowledge_note(self, room_id, parent_room_id, payer_user_id, query):
+        """Source-labelled chunks from the room's ready documents that match
+        the newest message; None when off, empty or on any failure."""
+        settings = self.settings
+        if not (settings.knowledge_enabled and self.vectors and self.pool is not None and query.strip()):
+            return None
+        rooms = [room_id] + ([parent_room_id] if parent_room_id else [])
+        try:
+            async with asyncio.timeout(5):
+                if not await knowledge.has_ready_documents(self.pool, rooms):
+                    return None
+                provider = self.providers.create(settings.embedding_provider)
+                key = await self.keys.get(payer_user_id, settings.embedding_provider)
+                if key is None or not hasattr(provider, 'embed'):
+                    return None
+                vector = (await provider.embed(model=settings.embedding_model, texts=[query[:2000]],
+                                               api_key=key, dimensions=settings.embedding_dimensions))[0]
+                ids = await self.vectors.search(rooms, vector, settings.knowledge_top_k)
+                hits = await knowledge.load_hits(self.pool, ids)
+                return knowledge.knowledge_note(knowledge.pick_hits(hits, settings.knowledge_chars))
+        except Exception as error:  # noqa: BLE001 - search never blocks a reply
+            log.warning('knowledge search in room %s failed: %s', room_id, type(error).__name__)
+            return None
+
+    async def sweep_knowledge(self):
+        """Ingests pending documents and clears deleted ones, one worker per
+        document at a time across AI instances."""
+        if not (self.settings.knowledge_enabled and self.vectors and self.pool is not None):
+            return
+        for document_id, status in await knowledge.documents_to_process(self.pool):
+            lock = f'ai:knowledge:lock:{document_id}'
+            if not await self.cache.set(lock, '1', nx=True, ex=600):
+                continue
+            try:
+                if status == 'deleted':
+                    await self.vectors.delete_document(document_id)
+                    await knowledge.drop_document(self.pool, document_id)
+                else:
+                    await self._ingest(document_id)
+            except Exception:
+                # Left as it was (pending or deleted); the next sweep retries.
+                log.exception('knowledge document %s', document_id)
+            finally:
+                await self.cache.delete(lock)
+
+    async def _ingest(self, document_id):
+        """Chunks a document, embeds it with the uploader's key and makes it
+        searchable. Without a usable key it stays not_ready and the uploader
+        is told why."""
+        settings = self.settings
+        document = await knowledge.load_document(self.pool, document_id)
+        if document is None or document['status'] != 'pending':
+            return
+        chunks = knowledge.chunk_document(document['kind'], document['content'])
+        if not chunks:
+            await knowledge.set_status(self.pool, document_id, 'failed', '没有可检索的内容')
+            return
+        ids = await knowledge.replace_chunks(self.pool, document, chunks)
+        provider = self.providers.create(settings.embedding_provider)
+        key = await self.keys.get(document['user_id'], settings.embedding_provider)
+        name = PROVIDER_NAMES.get(settings.embedding_provider, settings.embedding_provider)
+
+        async def not_ready(reason):
+            await knowledge.set_status(self.pool, document_id, 'not_ready', reason)
+            self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
+                room_id=document['room_id'], notify_member_id=document['member_id'],
+                code='embedding_key_required', provider=settings.embedding_provider,
+                message=f"资料「{document['name']}」未就绪：{reason}")))
+
+        if key is None or not hasattr(provider, 'embed'):
+            await not_ready(f'请先在设置里填写 {name} 的 API key，用于资料向量化')
+            return
+        rows = []
+        try:
+            for start in range(0, len(chunks), 64):
+                batch = [content for _, content in chunks[start:start + 64]]
+                vectors = await provider.embed(model=settings.embedding_model, texts=batch,
+                                               api_key=key, dimensions=settings.embedding_dimensions)
+                rows += [(ids[start + i], document_id, document['room_id'], v) for i, v in enumerate(vectors)]
+        except KeyRejected:
+            await not_ready(f'{name} 拒绝了你的 API key，请在设置里更新')
+            return
+        except ProviderError as error:
+            await knowledge.set_status(self.pool, document_id, 'failed', f'向量化失败：{error.kind}')
+            return
+        await self.vectors.upsert(rows)
+        await knowledge.set_status(self.pool, document_id, 'ready', None, len(chunks))
 
     async def _fail_classified(self, room_id, job, ai, error):
         backoff = self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1)
@@ -714,9 +1460,18 @@ class Engine:
 
 
 def _apply_snapshot(state, snapshot):
-    state.humans = [rules.Human(h.member_id, h.user_id) for h in snapshot.humans]
+    state.humans = [rules.Human(h.member_id, h.user_id, h.name) for h in snapshot.humans]
     state.ais = [rules.RoomAi(a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy or not a.model_slug) for a in snapshot.ais]
+    state.collaboration_enabled = snapshot.collaboration_enabled
+    state.room_name = snapshot.room_name
+    state.parent_room_id = snapshot.parent_room_id
+    state.fork_seq = snapshot.fork_seq
     state.pending = [j for j in state.pending if any(a.member_id==j.get('member_id') and a.admission_id==j.get('admission_id',a.admission_id) for a in state.ais)]
     if state.target is not None and (len(state.humans) != 1 or state.ai(state.target) is None):
         state.target = None
         state.timer_due = None
+
+
+def _human_names(state):
+    """user_id -> name for the humans in the room's latest snapshot."""
+    return {h.user_id: h.name or f"成员{h.member_id}" for h in state.humans}

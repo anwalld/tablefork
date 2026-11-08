@@ -15,6 +15,14 @@ class RoomService
 {
   public:
     static drogon::Task<Json::Value> create(Session session, std::string name);
+    // Splits a breakout off `parentRoomId`. The caller and each member in
+    // `memberIds` join; `memberIds` must name humans or AIs already in the
+    // parent, and nesting is bounded. The breakout inherits the parent's
+    // history only up to the fork point.
+    static drogon::Task<Json::Value> createBreakout(Session session,
+                                                    int64_t parentRoomId,
+                                                    std::string topic,
+                                                    std::vector<int64_t> memberIds);
     static drogon::Task<Json::Value> list(Session session,
                                           int64_t limit,
                                           int64_t offset);
@@ -58,5 +66,9 @@ class RoomService
         std::vector<std::string> allowed);
     // The room's last_seq, or ApiError::roomNotFound() for a non-member.
     static drogon::Task<int64_t> requireMember(int64_t memberId, int64_t roomId);
+    // The room's last_seq, or ApiError::roomNotFound() when the member cannot
+    // see the room: a caller sees a room they joined, or any breakout below a
+    // room they can see, so a root room's members can read every child.
+    static drogon::Task<int64_t> requireVisible(int64_t memberId, int64_t roomId);
 };
 }  // namespace chat

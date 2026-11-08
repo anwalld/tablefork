@@ -7,6 +7,7 @@
 #include "buffering/reconcile_result.h"
 #include "buffering/external_request.h"
 #include "services/ai_service.h"
+#include "services/table_templates.h"
 #include "services/session_store.h"
 #include "ws/room_hub.h"
 
@@ -245,5 +246,51 @@ AiController::Response AiController::deleteKey(drogon::HttpRequestPtr req, std::
     const auto session = co_await SessionStore::require(req);
     co_await AiService::deleteKey(session, provider);
     co_return jsonResponse(Json::objectValue);
+}
+AiController::Response AiController::tableTemplates(drogon::HttpRequestPtr req)
+{
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiController::tableTemplates")) co_return queued;
+    co_await SessionStore::require(req);
+    Json::Value body;
+    body["templates"] = Json::arrayValue;
+    for (const auto &table : TableTemplates::all()) body["templates"].append(TableTemplates::toJson(table));
+    co_return jsonResponse(body);
+}
+
+AiController::Response AiController::launchTemplate(drogon::HttpRequestPtr req, std::string roomId)
+{
+    std::vector<std::string> bufferArgs{roomId};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiController::launchTemplate", std::move(bufferArgs))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(roomId);
+    const auto result = co_await AiService::launchTemplate(session, id, stringField(jsonBody(req), "template"));
+    if (session.request && session.request->replayed)
+    {
+        co_await reconcileResult(id, session.request);
+        co_return jsonResponse(result);
+    }
+    if (!result["joined"].empty())
+    {
+        co_await membersChanged(id, session.request);
+        co_await reportControlChanged(id, session.request);
+        Json::Value event;
+        event["type"] = "collaboration_changed";
+        event["enabled"] = true;
+        co_await publish(id, std::move(event), session.request);
+    }
+    if (!result["skipped"].empty())
+    {
+        // Only the operator hears which AIs were left out and why.
+        std::string names;
+        for (const auto &item : result["skipped"])
+            names += (names.empty() ? "" : "、") + item["name"].asString() + "（" + item["provider"].asString() + "）";
+        Json::Value event;
+        event["type"] = "ai_notice";
+        event["code"] = "api_key_required";
+        event["message"] = "缺少对应服务商的 API key，以下 AI 没有加入：" + names;
+        event["only_member_ids"].append(Json::Int64(session.memberId));
+        co_await publish(id, std::move(event), session.request);
+    }
+    co_return jsonResponse(result);
 }
 }  // namespace chat

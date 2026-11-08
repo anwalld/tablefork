@@ -104,9 +104,14 @@ class Harness:
 
     async def ai_saved(self, final, ai, humans, ais):
         """The chat server stored a Final and reports it back."""
-        await self.cache_message(ai[0], ai[3], final.content)
+        room_id = final.room_id or 1
+        await self.cache_message(ai[0], ai[3], final.content, room_id=room_id)
+        room = self.snapshot(humans, ais, room_id=room_id)
+        state = await self.engine._load(room_id)
+        room.parent_room_id, room.room_name = state.parent_room_id, state.room_name
+        room.collaboration_enabled = state.collaboration_enabled
         saved = ai_pb2.MessageSaved(
-            room=self.snapshot(humans, ais), seq=self.seq,
+            room=room, seq=self.seq,
             sender=ai_pb2.Sender(member_id=ai[0], is_ai=True, slug=ai[1], name=ai[3]),
             content=final.content, generation_id=final.generation_id,
         )
@@ -114,7 +119,7 @@ class Harness:
 
     async def settle(self):
         while True:
-            if self.engine.tasks:
+            while self.engine.tasks:  # tasks may start more tasks
                 await asyncio.gather(*list(self.engine.tasks))
             unsaved = [f for f in self.of('final') if f.generation_id not in self.saved_ids]
             if not self.auto_save or not unsaved:
@@ -635,3 +640,92 @@ async def test_too_long_context_is_halved_once():
     await h.engine.recover_work(); await h.settle()
     # Half the window is under the fake provider's 100 character limit.
     assert len(h.of("final")) == 1 and h.of("notice") == []
+
+
+# --- breakouts: budget, conclusion, cascade -------------------------------
+
+async def _enter_breakout(h, room_id, parent_room_id, humans, ais, name="小会议题"):
+    snapshot = ai_pb2.RoomSnapshot(
+        room_id=room_id, room_name=name, parent_room_id=parent_room_id, fork_seq=0,
+        humans=[ai_pb2.Human(member_id=m, user_id=u) for m, u in humans],
+        ais=[ai_pb2.AiMember(member_id=m, slug=s, provider=p, name=n) for m, s, p, n in ais])
+    await h.send_event({"members_changed": ai_pb2.MembersChanged(room=snapshot)})
+    return snapshot
+
+
+async def _say_in(h, snapshot, human, content):
+    await h.cache_message(human[0], "alice", content, room_id=snapshot.room_id)
+    await h.send_event({"message_saved": ai_pb2.MessageSaved(
+        room=snapshot, seq=h.seq, content=content,
+        sender=ai_pb2.Sender(member_id=human[0], user_id=human[1], name="alice"))})
+
+
+async def test_breakout_concludes_once_its_budget_is_spent():
+    h = Harness(breakout_reply_budget=2)
+    room = await _enter_breakout(h, 5, 1, [ALICE], [CLAUDE])
+    for text in ("一", "二", "三", "四"):
+        await _say_in(h, room, ALICE, text)
+        await h.settle()
+    assert len(h.of("final")) == 2  # the third request found the budget spent
+    concluded = h.of("breakout_concluded")
+    assert len(concluded) == 1      # later messages do not post it again
+    assert concluded[0].room_id == 5
+    assert "【小会】小会议题" in concluded[0].content
+    assert "Claude" in concluded[0].content
+
+
+async def test_child_breakout_spend_counts_against_its_parent_breakout_only():
+    h = Harness(breakout_reply_budget=5)
+    await _enter_breakout(h, 2, 1, [ALICE], [CLAUDE])      # breakout of root 1
+    child = await _enter_breakout(h, 3, 2, [ALICE], [CLAUDE])
+    await _say_in(h, child, ALICE, "hi")
+    await h.settle()
+    assert await h.cache.get("ai:budget:3") == "4"
+    assert await h.cache.get("ai:budget:2") == "4"
+    assert await h.cache.get("ai:budget:1") is None        # the root has no budget
+
+
+async def test_spent_parent_breakout_stops_the_child():
+    h = Harness(breakout_reply_budget=5)
+    await _enter_breakout(h, 2, 1, [ALICE], [CLAUDE])
+    child = await _enter_breakout(h, 3, 2, [ALICE], [CLAUDE])
+    await h.cache.set("ai:budget:2", 0)
+    await _say_in(h, child, ALICE, "hi")
+    await h.settle()
+    assert h.of("final") == []
+    assert await h.cache.get("ai:budget:3") is None         # nothing charged
+    assert [c.room_id for c in h.of("breakout_concluded")] == [3]
+
+
+async def test_a_generation_is_charged_once():
+    h = Harness(breakout_reply_budget=5)
+    await _enter_breakout(h, 2, 1, [ALICE], [CLAUDE])
+    state = await h.engine._load(2)
+    assert await h.engine._charge(2, state, "g1")
+    assert await h.engine._charge(2, state, "g1")
+    assert await h.cache.get("ai:budget:2") == "4"
+
+
+async def test_closed_breakout_wraps_up_with_a_summary_once():
+    h = Harness()
+    room = await _enter_breakout(h, 4, 1, [ALICE], [CLAUDE])
+    await h.cache_message(CLAUDE[0], "Claude", "结论是先查日志", room_id=4)
+    closed = ai_pb2.BreakoutClosed(room_id=4, closed_by_member_id=ALICE[0], closed_by_user_id=ALICE[1])
+    await h.send_event({"breakout_closed": closed})
+    await h.send_event({"breakout_closed": closed})
+    await h.settle()
+    concluded = h.of("breakout_concluded")
+    assert len(concluded) == 1
+    assert "结论是先查日志" in concluded[0].content   # summarized by the fake model
+    await _say_in(h, room, ALICE, "还在吗")
+    await h.settle()
+    assert h.of("final") == []
+
+
+async def test_root_rooms_ignore_breakout_closed():
+    h = Harness()
+    await h.human_says(ALICE, "你好", [ALICE], [CLAUDE])
+    await h.settle()
+    await h.send_event({"breakout_closed": ai_pb2.BreakoutClosed(room_id=1)})
+    await h.settle()
+    assert h.of("breakout_concluded") == []

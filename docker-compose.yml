@@ -283,11 +283,49 @@ services:
       AI_RETRIEVAL_TOP_K: ${AI_RETRIEVAL_TOP_K:-5}
       AI_RETRIEVAL_CHARS: ${AI_RETRIEVAL_CHARS:-1500}
       AI_CLASSIFIED_RETRY: ${AI_CLASSIFIED_RETRY:-0}
+      # Collaboration rooms (all off or at their defaults unless set in .env).
+      AI_HOST_PROVIDER: ${AI_HOST_PROVIDER:-deepseek}
+      AI_HOST_MODEL: ${AI_HOST_MODEL:-deepseek-flash}
+      AI_ROUND_MAX_REPLIES: ${AI_ROUND_MAX_REPLIES:-12}
+      AI_COUNCIL_TIMEOUT_SECONDS: ${AI_COUNCIL_TIMEOUT_SECONDS:-180}
+      AI_BREAKOUT_REPLY_BUDGET: ${AI_BREAKOUT_REPLY_BUDGET:-20}
+      AI_SUMMARY_ENABLED: ${AI_SUMMARY_ENABLED:-0}
+      AI_MEMORY_ENABLED: ${AI_MEMORY_ENABLED:-0}
+      AI_RECALL_PROVIDER: ${AI_RECALL_PROVIDER:-deepseek}
+      AI_RECALL_MODEL: ${AI_RECALL_MODEL:-deepseek-flash}
+      AI_SUMMARY_BLOCK: ${AI_SUMMARY_BLOCK:-20}
+      AI_MEMORY_CHARS: ${AI_MEMORY_CHARS:-1500}
+      AI_KNOWLEDGE_ENABLED: ${AI_KNOWLEDGE_ENABLED:-0}
+      AI_PGVECTOR_DSN: ${AI_PGVECTOR_DSN:-postgresql://knowledge:${PGVECTOR_PASSWORD:-knowledge}@pgvector:5432/knowledge}
+      AI_EMBEDDING_PROVIDER: ${AI_EMBEDDING_PROVIDER:-openai}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-text-embedding-3-small}
+      AI_EMBEDDING_DIMENSIONS: ${AI_EMBEDDING_DIMENSIONS:-1536}
+      AI_TOOLS_ENABLED: ${AI_TOOLS_ENABLED:-0}
     depends_on:
       db-users:
         condition: service_completed_successfully
       redis-proxy:
         condition: service_healthy
+
+  # Vectors for the room knowledge base. Only started with
+  # `docker compose --profile knowledge up`; without it the AI service simply
+  # finds no knowledge.
+  pgvector:
+    logging: *bounded-logging
+    image: pgvector/pgvector:pg16
+    profiles: ["knowledge"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: knowledge
+      POSTGRES_PASSWORD: ${PGVECTOR_PASSWORD:-knowledge}
+      POSTGRES_DB: knowledge
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowledge -d knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   web-1: &web
     logging: *bounded-logging
@@ -373,6 +411,7 @@ volumes:
   sentinel-1-data:
   sentinel-2-data:
   sentinel-3-data:
+  pgvector-data:
 
 networks:
   default:

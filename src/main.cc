@@ -1,3 +1,4 @@
+#include "services/table_templates.h"
 #include <arpa/inet.h>
 #include <drogon/drogon.h>
 #include <netdb.h>
@@ -58,9 +59,14 @@ int main()
         drogon::app().createRedisClient(resolveIpv4(queueHost ? queueHost : "queue-redis"),
             6379, "queue", queuePassword, 4, false, 2.0);
     }
+    // A broken table template file stops the server here, not on first use;
+    // a missing one just means no templates.
+    chat::TableTemplates::all();
     drogon::app()
         .addListener("0.0.0.0", 8000)
         .setThreadNum(0)
+        // Knowledge uploads are the largest bodies (5 MB of text plus JSON).
+        .setClientMaxBodySize(8 * 1024 * 1024)
         .createDbClient("mysql",
                         config.mysqlHost,
                         config.mysqlPort,

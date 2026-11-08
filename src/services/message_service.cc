@@ -1,10 +1,12 @@
 #include "services/message_service.h"
 
 #include <algorithm>
+#include <map>
 #include <drogon/drogon.h>
 #include <sstream>
 #include <set>
 
+#include "ai/ai_events.h"
 #include "common/config.h"
 #include "common/trace.h"
 #include "buffering/guarded_transaction.h"
@@ -186,15 +188,34 @@ drogon::Task<StoredMessage> store(Author author,
     uint32_t contentAttempt = attempt;
     auto tx = co_await newGuardedTransaction(context);
     const auto rooms = co_await tx->execSqlCoro(
-        "SELECT last_seq FROM rooms WHERE id = ? FOR UPDATE", roomId);
+        "SELECT last_seq, status FROM rooms WHERE id = ? FOR UPDATE", roomId);
     if (rooms.empty())
     {
         throw ApiError::roomNotFound();
     }
+    // A closed breakout takes no new talk, but may still receive the
+    // conclusion of a breakout below it that ended in the same cascade.
+    if (author.type == "human" && rooms[0]["status"].as<std::string>() == "closed" &&
+        clientMsgId.rfind("breakout-conclusion-", 0) != 0)
+        throw ApiError::invalidArgument("breakout has ended");
+    // Speaking in a breakout is allowed for a joining member, or for an
+    // owner/admin of any ancestor room (the parent splits the group).
     const auto membership = co_await tx->execSqlCoro(
-        "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?",
+        "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?"
+        " UNION "
+        "SELECT 1 FROM room_members m JOIN rooms r ON r.id = m.room_id "
+        "WHERE m.member_id = ? AND m.role IN ('owner','admin') "
+        "AND r.id IN ("
+        "  WITH RECURSIVE chain AS ("
+        "    SELECT parent_room_id AS id FROM rooms WHERE id = ?"
+        "    UNION ALL"
+        "    SELECT r2.parent_room_id FROM rooms r2 JOIN chain c ON r2.id = c.id"
+        "  ) SELECT id FROM chain"
+        ")",
         roomId,
-        author.memberId);
+        author.memberId,
+        author.memberId,
+        roomId);
     if (membership.empty())
     {
         throw ApiError::roomNotFound();
@@ -335,15 +356,169 @@ drogon::Task<StoredMessage> store(Author author,
 }
 }  // namespace
 
+namespace
+{
+// /pause, /resume, /end inside a breakout. Allowed for the breakout's
+// initiator (its owner) and for owners/admins of any room above it; anyone
+// else's command stays an ordinary message.
+drogon::Task<> controlBreakout(const Session &session, int64_t roomId, const std::string &command)
+{
+    auto db = drogon::app().getDbClient();
+    const auto allowed = co_await db->execSqlCoro(
+        "SELECT 1 FROM rooms b JOIN room_members m ON m.member_id = ? "
+        "WHERE b.id = ? AND b.parent_room_id IS NOT NULL AND b.status <> 'closed' AND ("
+        "  (m.room_id = b.id AND m.role = 'owner') OR"
+        "  (m.role IN ('owner','admin') AND m.room_id IN ("
+        "    WITH RECURSIVE chain AS ("
+        "      SELECT parent_room_id AS id FROM rooms WHERE id = ?"
+        "      UNION ALL SELECT r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.id"
+        "    ) SELECT id FROM chain))) LIMIT 1",
+        session.memberId, roomId, roomId);
+    if (allowed.empty()) co_return;
+    if (command == "end")
+    {
+        // The breakout and everything below it end; each wraps up with the
+        // conclusion it has so far.
+        const auto tree = co_await db->execSqlCoro(
+            "WITH RECURSIVE tree AS (SELECT ? AS id UNION ALL "
+            "  SELECT r.id FROM rooms r JOIN tree t ON r.parent_room_id = t.id) "
+            "SELECT r.id FROM rooms r JOIN tree t ON t.id = r.id WHERE r.status <> 'closed'", roomId);
+        for (const auto &row : tree)
+        {
+            const auto id = row["id"].as<int64_t>();
+            co_await db->execSqlCoro("UPDATE rooms SET status = 'closed' WHERE id = ?", id);
+            reportBreakoutClosed(id, session.memberId, session.userId);
+        }
+        co_return;
+    }
+    // Pausing freezes AI turns in the breakout (the running reply finishes);
+    // resuming lets them continue, as cgroup freezing does.
+    const bool paused = command == "pause";
+    co_await db->execSqlCoro("INSERT IGNORE INTO room_ai_controls (room_id) VALUES (?)", roomId);
+    co_await db->execSqlCoro(
+        "UPDATE room_ai_controls c JOIN rooms r ON r.id = c.room_id "
+        "SET c.ignore_through_seq = r.last_seq, c.paused = ?, c.revision = c.revision + 1 "
+        "WHERE c.room_id = ? AND c.paused <> ?", paused, roomId, paused);
+    co_await reportControlChanged(roomId, session.request);
+    Json::Value event;
+    event["type"] = "ai_state_changed";
+    event["room_id"] = Json::Int64(roomId);
+    co_await RoomHub::instance().publish(roomId, toJsonString(event), session.request);
+}
+}  // namespace
+
 drogon::Task<StoredMessage> MessageService::save(const Session &session,
                                                  int64_t roomId,
                                                  std::string clientMsgId,
                                                  std::string content, Json::Value mentionIds)
 {
-    co_return co_await store(Author{session.memberId, session.username, "human"},
-                             roomId,
-                             std::move(clientMsgId),
-                             std::move(content), session.request, session.userId, std::move(mentionIds));
+    // Text commands. The command is the first word; English names, with the
+    // Chinese ones kept as aliases. They act only in collaboration rooms
+    // (breakout controls only inside a breakout); elsewhere they are text.
+    static const std::map<std::string, std::string> kCommands{
+        {"/vote", "vote"}, {"/表决", "vote"},
+        {"/veto", "veto"}, {"/否决", "veto"},
+        {"/force-pass", "force_pass"}, {"/强制通过", "force_pass"},
+        {"/breakout", "breakout"}, {"/小会", "breakout"},
+        {"/pause", "pause"}, {"/暂停小会", "pause"},
+        {"/resume", "resume"}, {"/恢复小会", "resume"},
+        {"/end", "end"}, {"/结束小会", "end"},
+    };
+    std::string command, argument;
+    if (!content.empty() && content[0] == '/')
+    {
+        const auto space = content.find_first_of(" \t\r\n");
+        const auto found = kCommands.find(content.substr(0, space));
+        if (found != kCommands.end())
+        {
+            command = found->second;
+            if (space != std::string::npos)
+            {
+                argument = content.substr(space + 1);
+                const auto first = argument.find_first_not_of(" \t\r\n");
+                argument = first == std::string::npos ? "" : argument.substr(first);
+            }
+        }
+    }
+    std::string response;
+    if (content == "继续" || content == "/continue") response = "continue";
+    else if (content == "否决" || content == "/cancel") response = "cancel";
+    bool collaborating = false, inBreakout = false;
+    if (!command.empty() || !response.empty())
+    {
+        const auto mode = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT collaboration_enabled, status, parent_room_id FROM rooms WHERE id = ?", roomId);
+        if (!mode.empty() && mode[0]["status"].as<std::string>() == "active")
+        {
+            collaborating = mode[0]["collaboration_enabled"].as<bool>();
+            inBreakout = !mode[0]["parent_room_id"].isNull();
+        }
+    }
+    if (!collaborating) response.clear();
+    const bool councilStart = collaborating && command == "vote" && !argument.empty();
+    std::string councilVerdict;
+    if (collaborating && (command == "veto" || command == "force_pass")) councilVerdict = command;
+    const bool breakoutStart = collaborating && command == "breakout";
+    std::vector<int64_t> breakoutMembers;
+    std::string breakoutTopic;
+    if (breakoutStart)
+    {
+        for (const auto &id : mentionIds) if (id.isInt64()) breakoutMembers.push_back(id.asInt64());
+        // The topic is the argument without the @mentions.
+        std::string cleaned;
+        std::istringstream stream(argument);
+        std::string word;
+        while (stream >> word)
+            if (word[0] != '@') { if (!cleaned.empty()) cleaned += ' '; cleaned += word; }
+        breakoutTopic = cleaned.empty() ? "小会" : cleaned;
+    }
+    // Breakout controls, typed inside the breakout itself.
+    std::string breakoutControl;
+    if (inBreakout && (command == "pause" || command == "resume" || command == "end")) breakoutControl = command;
+    auto message = co_await store(Author{session.memberId, session.username, "human"},
+                              roomId,
+                              std::move(clientMsgId),
+                              std::move(content), session.request, session.userId, std::move(mentionIds));
+    if (breakoutStart)
+    {
+        const auto breakout = co_await RoomService::createBreakout(session, roomId, breakoutTopic, std::move(breakoutMembers));
+        // Everyone in the parent sees the breakout start; it is listed for
+        // them right away (read-only for those who did not join).
+        Json::Value event;
+        event["type"] = "breakout_started";
+        event["room_id"] = Json::Int64(roomId);
+        event["breakout_id"] = breakout["id"];
+        event["topic"] = breakout["name"];
+        event["content"] = "已开小会「" + breakout["name"].asString() + "」，房间里的人都可以打开旁观。";
+        co_await RoomHub::instance().publish(roomId, toJsonString(event), session.request);
+    }
+    if (!breakoutControl.empty())
+        co_await controlBreakout(session, roomId, breakoutControl);
+    if (!response.empty())
+    {
+        const auto role = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+            roomId, session.memberId);
+        const bool privileged = !role.empty() &&
+            (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
+        co_await reportConfirmationInput(roomId, session.memberId, response, privileged);
+    }
+    if (councilStart)
+    {
+        co_await reportCouncilStart(roomId, argument, session.memberId);
+    }
+    else if (!councilVerdict.empty())
+    {
+        const auto role = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+            roomId, session.memberId);
+        const bool privileged = !role.empty() &&
+            (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
+        // Only owners and admins can overrule a ballot; anyone else's
+        // command stays an ordinary message.
+        if (privileged) co_await reportCouncilOverride(roomId, councilVerdict, session.memberId, privileged);
+    }
+    co_return message;
 }
 
 drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
@@ -369,6 +544,31 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
         roomId,
         std::move(generationId),
         std::move(content), std::move(context),0,Json::nullValue,std::move(admissionId),attempt);
+}
+
+drogon::Task<StoredMessage> MessageService::saveBreakoutConclusion(int64_t breakoutId, std::string content)
+{
+    auto context = RequestBuffer::instance().backgroundContext();
+    // The conclusion goes into the parent under the breakout's initiator (its
+    // owner, always a parent member), labelled by the content itself. One
+    // client_msg_id per breakout makes a resent conclusion a duplicate.
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT r.parent_room_id, m.id, m.display_name FROM rooms r "
+        "JOIN room_members rm ON rm.room_id = r.id AND rm.role = 'owner' "
+        "JOIN members m ON m.id = rm.member_id "
+        "WHERE r.id = ? AND r.parent_room_id IS NOT NULL ORDER BY rm.joined_at LIMIT 1",
+        breakoutId);
+    if (rows.empty()) throw ApiError::roomNotFound();
+    if (const auto length = utf8Length(content); length && *length > kMaxContentLength)
+        content = utf8Prefix(content, kMaxContentLength);
+    auto message = co_await store(
+        Author{rows[0]["id"].as<int64_t>(), rows[0]["display_name"].as<std::string>(), "human"},
+        rows[0]["parent_room_id"].as<int64_t>(),
+        "breakout-conclusion-" + std::to_string(breakoutId),
+        std::move(content), context);
+    co_await drogon::app().getDbClient()->execSqlCoro(
+        "UPDATE rooms SET status = 'closed' WHERE id = ?", breakoutId);
+    co_return message;
 }
 
 drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestContextPtr context)
@@ -420,7 +620,7 @@ drogon::Task<Json::Value> MessageService::history(Session session,
         throw ApiError::invalidArgument("use either before or after");
     }
     const auto lastSeq =
-        co_await RoomService::requireMember(session.memberId, roomId);
+        co_await RoomService::requireVisible(session.memberId, roomId);
     const auto [low, high] = resolveRange(query, lastSeq);
 
     Json::Value body;
@@ -472,7 +672,7 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
     std::string keyword, std::optional<int64_t> sender, std::optional<int64_t> from,
     std::optional<int64_t> to, std::optional<int64_t> before, int64_t limit)
 {
-    co_await RoomService::requireMember(session.memberId, roomId);
+    co_await RoomService::requireVisible(session.memberId, roomId);
     const auto length = utf8Length(keyword);
     if (!length || *length > 200 || (from && to && *from > *to))
         throw ApiError::invalidArgument("invalid search filter");
@@ -497,15 +697,18 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
             ? "AND MATCH(msg.content) AGAINST (? IN BOOLEAN MODE) "
             : "AND ? = '' ";
         co_return co_await drogon::app().getDbClient()->execSqlCoro(
-            "SELECT msg.seq, msg.member_id, msg.client_msg_id, msg.content,msg.stopped,msg.generation_outcome,msg.generation_attempt, "
+            "WITH RECURSIVE scope AS ("
+            "  SELECT ? AS id UNION ALL "
+            "  SELECT c.id FROM rooms c JOIN scope s ON c.parent_room_id = s.id"
+            ") "
+            "SELECT msg.room_id, msg.seq, msg.member_id, msg.client_msg_id, msg.content, msg.stopped, msg.generation_outcome, msg.generation_attempt, "
             "msg.created_at_ms, m.display_name, m.type AS member_type "
             "FROM messages msg JOIN members m ON m.id = msg.member_id "
-            "JOIN room_members rm ON rm.room_id = msg.room_id AND rm.member_id = ? "
-            "WHERE msg.room_id = ? " + predicate +
+            "WHERE msg.room_id IN (SELECT id FROM scope) " + predicate +
             "AND (? = '' OR LOCATE(?, msg.content) > 0) "
             "AND (? = 0 OR msg.member_id = ?) AND msg.created_at_ms >= ? AND msg.created_at_ms <= ? "
             "AND msg.seq < ? ORDER BY msg.seq DESC LIMIT ?",
-            session.memberId, roomId, indexed ? candidate : std::string(), keyword, keyword,
+            roomId, indexed ? candidate : std::string(), keyword, keyword,
             sender.value_or(0), sender.value_or(0), from.value_or(0), to.value_or(INT64_MAX),
             before.value_or(INT64_MAX), limit);
     };
@@ -523,7 +726,7 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
     const auto &rows = *loaded;
     Json::Value result;
     result["messages"] = Json::arrayValue;
-    for (const auto &row : rows) result["messages"].append(rowJson(roomId, row));
+    for (const auto &row : rows) result["messages"].append(rowJson(row["room_id"].as<int64_t>(), row));
     result["next_before"] = rows.empty() ? Json::Value() : Json::Value(Json::Int64(rows[rows.size()-1]["seq"].as<int64_t>()));
     co_return result;
 }

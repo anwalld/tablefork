@@ -4,7 +4,7 @@ from typing import AsyncIterator
 
 import anthropic
 
-from .base import ChatMessage, KeyRejected, ProviderError, alternate, classify, retry_after
+from .base import ChatMessage, ToolCall, ToolTurn, KeyRejected, ProviderError, alternate, classify, retry_after
 
 _CACHE = {"type": "ephemeral"}
 
@@ -59,6 +59,33 @@ class AnthropicProvider:
                                 retry_after(e.response.headers)) from e
         except anthropic.APIError as e:
             raise ProviderError(str(e)) from e
+
+    async def complete(self, *, model: str, system: str, messages: list[ChatMessage], exchanges: list,
+                       tools: list[dict], api_key: str, max_tokens: int) -> ToolTurn:
+        """One non-streamed turn with tools (Anthropic tool use)."""
+        turns = [{"role": m.role, "content": m.content} for m in alternate(messages)]
+        for exchange in exchanges:
+            turns.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": c.id, "name": c.name, "input": c.arguments} for c in exchange.calls]})
+            turns.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": call_id, "content": text}
+                for call_id, text in exchange.results]})
+        definitions = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+                       for t in tools]
+        try:
+            response = await self._client(api_key).messages.create(
+                model=model, system=system, messages=turns, max_tokens=max_tokens, tools=definitions)
+        except anthropic.AuthenticationError as e:
+            raise KeyRejected(str(e)) from e
+        except anthropic.APIStatusError as e:
+            raise ProviderError(str(e), classify(e.status_code, str(e)),
+                                retry_after(e.response.headers)) from e
+        except anthropic.APIError as e:
+            raise ProviderError(str(e)) from e
+        text = "".join(block.text for block in response.content if block.type == "text")
+        calls = tuple(ToolCall(block.id, block.name, dict(block.input or {}))
+                      for block in response.content if block.type == "tool_use")
+        return ToolTurn(text, calls)
 
     async def validate(self, api_key: str) -> None:
         try:

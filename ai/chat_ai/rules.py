@@ -6,6 +6,7 @@ The probabilities follow openspec/specs/ai-replies.
 
 import random
 import re
+import time
 from dataclasses import dataclass, field
 
 
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 class Human:
     member_id: int
     user_id: int
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,19 +50,40 @@ class RoomState:
     epoch: int = 0
     last_trigger_seq: int = 0
     last_trigger_id: str = ""
+    # Room-level collaboration mode, reported by the chat server's snapshot.
+    collaboration_enabled: bool = False
+    room_name: str = ""
+    # For a breakout: the parent room and the fork point, so its context can
+    # include the parent's history only up to fork_seq.
+    parent_room_id: int = 0
+    fork_seq: int = 0
+    # A step waiting for a human "继续"/"否决", when collaboration is on.
+    # {id, kind, risk, initiator, deadline, status}
+    # risk is "discuss"|"readonly"|"side_effect"; status is
+    # "pending"|"done"|"cancelled"|"paused".
+    pending_step: dict | None = None
+    # A breakout that is wrapping up: {payer, content, delivered}. While set the
+    # room schedules no AI replies; the conclusion is resent until stored.
+    conclusion: dict | None = None
 
     def ai(self, slug: str) -> RoomAi | None:
         return next((a for a in self.ais if a.slug == slug), None)
 
     def to_json(self) -> dict:
         return {
-            "humans": [[h.member_id, h.user_id] for h in self.humans],
+            "humans": [[h.member_id, h.user_id, h.name] for h in self.humans],
             "ais": [[a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy] for a in self.ais],
             "target": self.target,
             "proactive_mask": self.proactive_mask,
             "timer_due": self.timer_due, "pending": self.pending,
             "active": self.active, "deleted": self.deleted,
             "epoch": self.epoch, "last_trigger_seq": self.last_trigger_seq, "last_trigger_id": self.last_trigger_id,
+            "collaboration_enabled": self.collaboration_enabled,
+            "room_name": self.room_name,
+            "parent_room_id": self.parent_room_id,
+            "fork_seq": self.fork_seq,
+            "pending_step": self.pending_step,
+            "conclusion": self.conclusion,
         }
 
     @classmethod
@@ -74,6 +97,12 @@ class RoomState:
             active=data.get("active"), deleted=data.get("deleted", False),
             epoch=data.get("epoch", 0), last_trigger_seq=data.get("last_trigger_seq", 0),
             last_trigger_id=data.get("last_trigger_id", ""),
+            collaboration_enabled=data.get("collaboration_enabled", False),
+            room_name=data.get("room_name", ""),
+            parent_room_id=data.get("parent_room_id", 0),
+            fork_seq=data.get("fork_seq", 0),
+            pending_step=data.get("pending_step"),
+            conclusion=data.get("conclusion"),
         )
 
 
@@ -238,3 +267,62 @@ def on_proactive_saved(state: RoomState, epoch: int, slot: int) -> None:
     state.proactive_mask |= 1 << slot
     if state.proactive_mask == 7:
         state.target = None
+
+
+def slug_for_name(state: RoomState, name: str) -> str | None:
+    """The slug of the AI whose display name matches `name`, when unambiguous."""
+    matches = [a.slug for a in state.ais if a.name.lower() == name.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def on_host_decision(
+    state: RoomState,
+    speakers: list[str],
+    end: bool,
+    payer: Human,
+    keys: set[str],
+    mentioned: list[str],
+    max_replies: int,
+    kind: str = "reply",
+    hop: int = 1,
+) -> Decision:
+    """Turns the host's speaker list into requests.
+
+    Mentioned AIs always lead the round; the host's other picks follow if they
+    are still in the room and hold a key. The round never exceeds max_replies.
+    """
+    decision = Decision()
+    if end:
+        return decision
+    order: list[str] = []
+    for name in speakers:
+        slug = slug_for_name(state, name)
+        if slug is None or slug in order or state.ai(slug) is None:
+            continue
+        order.append(slug)
+    for slug in mentioned:
+        if state.ai(slug) is None:
+            continue
+        if slug not in order:
+            order.insert(0, slug)
+    for slug in order[:max_replies]:
+        _request(decision, state, Request(slug, payer, kind, hop), keys)
+    return decision
+
+
+def confirmation_text(step: dict) -> str:
+    """The "still there?" prompt for a step awaiting human confirmation."""
+    remaining = (step.get("deadline") or 0) - time.time()
+    minutes = max(1, round(remaining / 60)) if remaining > 0 else 1
+    action = step.get("description") or step.get("kind") or "继续下一步"
+    if not deadline_auto_continues(step.get("risk", "discuss")):
+        # Side effects never run on a timeout, so do not threaten to.
+        return (f"下一步要{action}，这一步有副作用，需要发起人或群主、管理员回复“继续”才会执行，"
+                "不回复不会执行。回复“否决”取消。")
+    return (f"你还在吗？{minutes} 分钟内不回复，我就{action}。"
+            "回复“继续”立即执行，回复“否决”取消。")
+
+
+def deadline_auto_continues(risk: str) -> bool:
+    """Discuss and readonly steps continue on timeout; side effects do not."""
+    return risk in ("discuss", "readonly")

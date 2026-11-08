@@ -10,6 +10,27 @@ class ChatMessage:
     content: str
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class ToolTurn:
+    """One model turn in a tool loop: final text, or tool calls to run."""
+    text: str
+    calls: tuple = ()
+
+
+@dataclass(frozen=True)
+class ToolExchange:
+    """Calls the model made and their results, replayed on the next turn."""
+    calls: tuple   # ToolCall
+    results: tuple  # (call id, result text)
+
+
 class KeyRejected(Exception):
     """The provider refused the API key."""
 

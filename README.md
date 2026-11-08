@@ -79,7 +79,7 @@ HTTP 入口 `http://localhost:8080` 仅做 301 跳转，不处理登录或 WebSo
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
-修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V13__add_message_reactions.sql`（当前最新为 V12）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V18__add_message_reactions.sql`（当前最新为 V17）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
 
 查看迁移状态，或在修正后清理失败记录：
 

@@ -200,26 +200,91 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
     co_return body;
 }
 
+drogon::Task<Json::Value> RoomService::createBreakout(Session session,
+                                                       int64_t parentRoomId,
+                                                       std::string topic,
+                                                       std::vector<int64_t> memberIds)
+{
+    constexpr uint64_t kMaxDepth = 3;
+    if (topic.empty() || !utf8Length(topic) || *utf8Length(topic) > 64)
+        throw ApiError::invalidArgument("breakout topic must be 1 to 64 characters");
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.breakout"))
+        co_return *prior;
+    const auto parent = co_await tx->execSqlCoro(
+        "SELECT depth, last_seq FROM rooms WHERE id = ? FOR UPDATE", parentRoomId);
+    if (parent.empty()) throw ApiError::roomNotFound();
+    const auto depth = parent[0]["depth"].as<uint64_t>();
+    if (depth >= kMaxDepth) throw ApiError::invalidArgument("breakout depth limit reached");
+    const auto forkSeq = parent[0]["last_seq"].as<int64_t>();
+    // The caller must be a member of the parent, the breakout participants too.
+    co_await requireMember(session.memberId, parentRoomId);
+    std::vector<int64_t> participants;
+    for (const auto memberId : memberIds)
+    {
+        if (memberId == session.memberId) continue;
+        const auto rows = co_await tx->execSqlCoro(
+            "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?",
+            parentRoomId, memberId);
+        if (rows.empty()) throw ApiError::invalidArgument("breakout members must be in the parent room");
+        if (std::find(participants.begin(), participants.end(), memberId) == participants.end())
+            participants.push_back(memberId);
+    }
+    const auto room = co_await tx->execSqlCoro(
+        "INSERT INTO rooms (name, parent_room_id, fork_seq, depth, topic, status) "
+        "VALUES (?, ?, ?, ?, ?, 'active')",
+        topic, parentRoomId, forkSeq, depth + 1, topic);
+    const auto roomId = static_cast<int64_t>(room.insertId());
+    co_await tx->execSqlCoro("INSERT INTO room_members (room_id, member_id, role) VALUES (?, ?, 'owner')",
+                             roomId, session.memberId);
+    for (const auto memberId : participants)
+        co_await tx->execSqlCoro("INSERT INTO room_members (room_id, member_id) VALUES (?, ?)", roomId, memberId);
+    Json::Value body;
+    body["id"] = Json::Int64(roomId);
+    body["name"] = topic;
+    body["parent_room_id"] = Json::Int64(parentRoomId);
+    body["fork_seq"] = Json::Int64(forkSeq);
+    body["status"] = "active";
+    co_await RequestMemo::finish(tx, session.request, actor, body);
+    checkRequest(session.request);
+    co_await commit(std::move(tx));
+    co_return body;
+}
+
 drogon::Task<Json::Value> RoomService::list(Session session,
                                             int64_t limit,
                                             int64_t offset)
 {
+    // A room a caller may read: one they joined, or any breakout below a room
+    // they can read. Breakouts they did not join are listed read-only.
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT r.id, r.name, r.last_seq, m.member_id, "
+        "WITH RECURSIVE visible AS ("
+        "  SELECT r.id, r.parent_room_id FROM rooms r "
+        "  JOIN room_members m ON m.room_id = r.id WHERE m.member_id = ?"
+        "  UNION ALL"
+        "  SELECT c.id, c.parent_room_id FROM rooms c JOIN visible v ON c.parent_room_id = v.id"
+        "), listed AS ("
+        // Rooms the caller was invited to but has not joined are listed too.
+        "  SELECT id FROM visible UNION SELECT room_id FROM room_invites WHERE user_id = ?"
+        ") "
+        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, m.member_id, "
         "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
         "(SELECT COUNT(*) FROM messages msg WHERE msg.room_id = r.id "
-        " AND msg.seq > m.read_seq AND msg.member_id <> m.member_id) AS unread_count, "
+        " AND msg.seq > COALESCE(m.read_seq, r.last_seq) AND msg.member_id <> ?) AS unread_count, "
         "(SELECT MIN(mm.seq) FROM message_mentions mm WHERE mm.room_id = r.id "
-        " AND mm.member_id = m.member_id AND mm.seq > m.read_seq) AS mention_seq, "
+        " AND mm.member_id = ? AND mm.seq > COALESCE(m.read_seq, r.last_seq)) AS mention_seq, "
         "       (SELECT COUNT(*) FROM room_members c WHERE c.room_id = r.id) "
         "           AS member_count "
-        "FROM rooms r "
+        "FROM listed v "
+        "JOIN rooms r ON r.id = v.id "
         "LEFT JOIN room_members m ON m.room_id = r.id AND m.member_id = ? "
-        "LEFT JOIN room_invites i ON i.room_id = r.id AND i.user_id = ? "
-        "WHERE m.member_id IS NOT NULL OR i.user_id IS NOT NULL "
         "ORDER BY r.id DESC LIMIT ? OFFSET ?",
         session.memberId,
         session.userId,
+        session.memberId,
+        session.memberId,
+        session.memberId,
         limit,
         offset);
     Json::Value rooms(Json::arrayValue);
@@ -229,11 +294,17 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         room["id"] = Json::Int64(row["id"].as<int64_t>());
         room["name"] = row["name"].as<std::string>();
         room["member_count"] = Json::Int64(row["member_count"].as<int64_t>());
-        room["status"] = row["member_id"].isNull() ? "invited" : "joined";
+        if (!row["member_id"].isNull())
+            room["status"] = "joined";
+        else if (!row["parent_room_id"].isNull())
+            room["status"] = "readonly";
+        else
+            room["status"] = "invited";
         room["last_seq"] = Json::Int64(row["last_seq"].as<int64_t>());
         room["read_seq"] = Json::Int64(row["read_seq"].as<int64_t>());
         room["unread_count"] = Json::Int64(row["unread_count"].as<int64_t>());
         room["mention_seq"] = row["mention_seq"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["mention_seq"].as<int64_t>()));
+        room["parent_room_id"] = row["parent_room_id"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["parent_room_id"].as<int64_t>()));
         rooms.append(std::move(room));
     }
     Json::Value body;
@@ -389,7 +460,7 @@ drogon::Task<bool> RoomService::leave(Session session,
 
 drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
 {
-    co_await requireMember(session.memberId, roomId);
+    co_await requireVisible(session.memberId, roomId);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT m.id,m.type,m.display_name,rm.role,p.slug,p.provider,p.model_slug,p.creator_user_id,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
@@ -613,5 +684,28 @@ drogon::Task<int64_t> RoomService::requireMember(int64_t memberId, int64_t roomI
         throw ApiError::roomNotFound();
     }
     co_return rows[0]["last_seq"].as<int64_t>();
+}
+
+drogon::Task<int64_t> RoomService::requireVisible(int64_t memberId, int64_t roomId)
+{
+    // A caller can see the room itself, or any ancestor room they are a member
+    // of, so members of a root room can read everything in its breakout tree.
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "WITH RECURSIVE chain AS ("
+        "  SELECT id, parent_room_id FROM rooms WHERE id = ?"
+        "  UNION ALL"
+        "  SELECT r.id, r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.parent_room_id"
+        ") "
+        "SELECT 1 FROM chain c "
+        "JOIN room_members m ON m.room_id = c.id AND m.member_id = ? LIMIT 1",
+        roomId,
+        memberId);
+    if (rows.empty())
+    {
+        throw ApiError::roomNotFound();
+    }
+    const auto lastSeq = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT last_seq FROM rooms WHERE id = ?", roomId);
+    co_return lastSeq[0]["last_seq"].as<int64_t>();
 }
 }  // namespace chat

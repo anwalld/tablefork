@@ -1,0 +1,27 @@
+# Tools the AIs may call in collaboration rooms (AI_TOOLS_ENABLED=1).
+# Nothing outside this file can be called. Each tool is "readonly" (runs at
+# once and is recorded in the reply) or "side_effect" (runs only after the
+# initiator or an owner/admin replies "继续"; never on a timeout, never retried).
+
+[[builtin]]
+name = "current_time"
+risk = "readonly"
+
+[[builtin]]
+name = "search_messages"
+risk = "readonly"
+
+[[builtin]]
+name = "search_knowledge"
+risk = "readonly"
+
+# An MCP server over stdio (or set url = "http://host:port/mcp" instead).
+# Only the tools listed under [mcp.tools] are exposed.
+#
+# [[mcp]]
+# server = "files"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+# [mcp.tools]
+# read_text_file = "readonly"
+# write_file = "side_effect"

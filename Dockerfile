@@ -62,6 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libmariadb3 libhiredis1.1.0 libgrpc++1.51t64 libprotobuf32t64 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/chat-server /usr/local/bin/chat-server
-COPY data/common-passwords.txt /usr/local/share/chat/common-passwords.txt
+COPY data/common-passwords.txt data/table-templates.json /usr/local/share/chat/
 EXPOSE 8000
 CMD ["chat-server"]

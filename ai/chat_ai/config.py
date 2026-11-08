@@ -50,6 +50,35 @@ class Settings:
     retrieval_top_k: int = 5
     retrieval_chars: int = 1500
     classified_retry: bool = False
+    # Collaboration host (group supervisor). Uses the round trigger's key.
+    host_provider: str = "deepseek"
+    host_model: str = "deepseek-flash"
+    round_max_replies: int = 12
+    # Council ballots time out when no new vote arrives for this long.
+    council_timeout_seconds: float = 180.0
+    # AI replies a breakout may spend per level; exhausted breakouts conclude.
+    breakout_reply_budget: int = 20
+    # History summary and memories (collaboration rooms only). Both use one
+    # cheap model, paid by the reply that triggers the work.
+    summary_enabled: bool = False
+    memory_enabled: bool = False
+    recall_provider: str = "deepseek"
+    recall_model: str = "deepseek-flash"
+    summary_block: int = 20
+    memory_chars: int = 1500
+    # Room knowledge base (pgvector). Embeddings are paid by the uploader at
+    # import and by the reply's payer at search time.
+    knowledge_enabled: bool = False
+    pgvector_dsn: str = ""
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    knowledge_top_k: int = 5
+    knowledge_chars: int = 2000
+    # Tools and MCP servers registered in tools.toml (collaboration rooms only).
+    tools_enabled: bool = False
+    tools_file: str = "/app/tools.toml"
+    tool_timeout: float = 15.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -92,4 +121,25 @@ class Settings:
             retrieval_top_k=max(1, min(20, _int("AI_RETRIEVAL_TOP_K", 5))),
             retrieval_chars=max(100, _int("AI_RETRIEVAL_CHARS", 1500)),
             classified_retry=os.environ.get("AI_CLASSIFIED_RETRY", "") == "1",
+            host_provider=os.environ.get("AI_HOST_PROVIDER", "deepseek"),
+            host_model=os.environ.get("AI_HOST_MODEL", "deepseek-flash"),
+            round_max_replies=max(1, _int("AI_ROUND_MAX_REPLIES", 12)),
+            council_timeout_seconds=max(10.0, _float("AI_COUNCIL_TIMEOUT_SECONDS", 180)),
+            breakout_reply_budget=max(0, _int("AI_BREAKOUT_REPLY_BUDGET", 20)),
+            summary_enabled=os.environ.get("AI_SUMMARY_ENABLED", "") == "1",
+            memory_enabled=os.environ.get("AI_MEMORY_ENABLED", "") == "1",
+            recall_provider=os.environ.get("AI_RECALL_PROVIDER", os.environ.get("AI_HOST_PROVIDER", "deepseek")),
+            recall_model=os.environ.get("AI_RECALL_MODEL", os.environ.get("AI_HOST_MODEL", "deepseek-flash")),
+            summary_block=max(1, _int("AI_SUMMARY_BLOCK", 20)),
+            memory_chars=max(0, _int("AI_MEMORY_CHARS", 1500)),
+            knowledge_enabled=os.environ.get("AI_KNOWLEDGE_ENABLED", "") == "1",
+            pgvector_dsn=os.environ.get("AI_PGVECTOR_DSN", ""),
+            embedding_provider=os.environ.get("AI_EMBEDDING_PROVIDER", "openai"),
+            embedding_model=os.environ.get("AI_EMBEDDING_MODEL", "text-embedding-3-small"),
+            embedding_dimensions=max(8, _int("AI_EMBEDDING_DIMENSIONS", 1536)),
+            knowledge_top_k=max(1, min(20, _int("AI_KNOWLEDGE_TOP_K", 5))),
+            knowledge_chars=max(200, _int("AI_KNOWLEDGE_CHARS", 2000)),
+            tools_enabled=os.environ.get("AI_TOOLS_ENABLED", "") == "1",
+            tools_file=os.environ.get("AI_TOOLS_FILE", "/app/tools.toml"),
+            tool_timeout=max(1.0, _float("AI_TOOL_TIMEOUT", 15)),
         )

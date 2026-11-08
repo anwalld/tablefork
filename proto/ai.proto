@@ -16,6 +16,7 @@ service AiGateway {
 message Human {
   int64 member_id = 1;
   int64 user_id = 2;
+  string name = 3;
 }
 
 message AiMember {
@@ -36,6 +37,11 @@ message RoomSnapshot {
   int64 room_id = 1;
   repeated Human humans = 2;
   repeated AiMember ais = 3;
+  bool collaboration_enabled = 4;
+  string room_name = 5;
+  // A breakout inherits its parent's history only up to fork_seq.
+  int64 parent_room_id = 6;
+  int64 fork_seq = 7;
 }
 
 message Sender {
@@ -78,7 +84,45 @@ message GatewayEvent {
     RoomDeleted room_deleted = 5;
     GenerationRejected generation_rejected = 6;
     ControlChanged control_changed = 7;
+    ConfirmationInput confirmation_input = 8;
+    CouncilStart council_start = 9;
+    CouncilOverride council_override = 10;
+    BreakoutClosed breakout_closed = 11;
   }
+}
+
+// A human responded to a confirmation request. `response` is "continue"
+// (the step runs), "cancel" (the step is abandoned), or "other" (an ordinary
+// message that only cancels the countdown). The C++ server checks who may
+// confirm, so the AI service can trust it.
+message ConfirmationInput {
+  int64 room_id = 1;
+  string response = 2;
+  int64 member_id = 3;   // who responded
+  bool privileged = 4;   // owner or admin, checked by the chat server
+}
+
+// A human sent "/表决 <topic>"; the chat server parsed it and checked that
+// the room has enough chairs.
+message CouncilStart {
+  int64 room_id = 1;
+  string topic = 2;
+  int64 proposer_member_id = 3;
+}
+
+// A privileged human sent "/否决" or "/强制通过".
+message CouncilOverride {
+  int64 room_id = 1;
+  string verdict = 2;  // "veto" | "force_pass"
+  int64 member_id = 3;
+}
+
+// A breakout's parent stopped collaborating or was removed, so the breakout
+// must wrap up and stop.
+message BreakoutClosed {
+  int64 room_id = 1;
+  int64 closed_by_member_id = 2;  // pays for the closing summary
+  int64 closed_by_user_id = 3;
 }
 
 message ControlChanged {
@@ -146,7 +190,25 @@ message AiAction {
     Final final = 3;
     Failed failed = 4;
     Notice notice = 5;
+    SystemNotice system_notice = 6;
+    BreakoutConcluded breakout_concluded = 7;
   }
+}
+
+// A breakout's conclusion. The chat server stores it in the parent room as a
+// durable, searchable message (deduplicated per breakout) and closes the
+// breakout. The AI service resends until the message exists.
+message BreakoutConcluded {
+  int64 room_id = 1;  // the breakout
+  string content = 2;
+}
+
+// A message the AI service asks the chat server to show the whole room, such
+// as a confirmation request ("still there?"). The chat server stores it and
+// pushes it like an ordinary message.
+message SystemNotice {
+  int64 room_id = 1;
+  string content = 2;
 }
 
 message StoreKeyRequest {

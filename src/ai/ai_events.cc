@@ -10,6 +10,20 @@ namespace
 {
 drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
 {
+    const auto collaboration = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT collaboration_enabled, name, parent_room_id, fork_seq FROM rooms WHERE id = ?", roomId);
+    snapshot->set_collaboration_enabled(
+        !collaboration.empty() && collaboration[0]["collaboration_enabled"].as<bool>());
+    if (!collaboration.empty())
+    {
+        snapshot->set_room_name(collaboration[0]["name"].as<std::string>());
+        if (!collaboration[0]["parent_room_id"].isNull())
+        {
+            snapshot->set_parent_room_id(collaboration[0]["parent_room_id"].as<int64_t>());
+            snapshot->set_fork_seq(collaboration[0]["fork_seq"].isNull()
+                                       ? 0 : collaboration[0]["fork_seq"].as<int64_t>());
+        }
+    }
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT m.id,m.type,m.user_id,m.display_name,p.slug,p.provider,p.model_slug,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
@@ -26,6 +40,7 @@ drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
             auto *human = snapshot->add_humans();
             human->set_member_id(row["id"].as<int64_t>());
             human->set_user_id(row["user_id"].as<int64_t>());
+            human->set_name(row["display_name"].as<std::string>());
         }
         else if (!row["slug"].isNull())
         {
@@ -164,6 +179,61 @@ drogon::Task<> reportControlChanged(int64_t roomId, RequestContextPtr context)
     catch (const std::exception &)
     {
         LOG_WARN << "AI control notification deferred";
+    }
+}
+
+drogon::Task<> reportConfirmationInput(int64_t roomId, int64_t memberId,
+                                       const std::string &response, bool privileged)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *input = event.mutable_confirmation_input();
+        input->set_room_id(roomId);
+        input->set_member_id(memberId);
+        input->set_response(response);
+        input->set_privileged(privileged);
+        gateway->send(std::move(event));
+    }
+}
+
+drogon::Task<> reportCouncilStart(int64_t roomId, const std::string &topic, int64_t proposerMemberId)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *start = event.mutable_council_start();
+        start->set_room_id(roomId);
+        start->set_topic(topic);
+        start->set_proposer_member_id(proposerMemberId);
+        gateway->send(std::move(event));
+    }
+}
+
+drogon::Task<> reportCouncilOverride(int64_t roomId, const std::string &verdict,
+                                     int64_t memberId, bool privileged)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *override_ = event.mutable_council_override();
+        override_->set_room_id(roomId);
+        override_->set_verdict(verdict);
+        override_->set_member_id(memberId);
+        gateway->send(std::move(event));
+    }
+}
+
+void reportBreakoutClosed(int64_t roomId, int64_t closedByMemberId, int64_t closedByUserId)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *closed = event.mutable_breakout_closed();
+        closed->set_room_id(roomId);
+        closed->set_closed_by_member_id(closedByMemberId);
+        closed->set_closed_by_user_id(closedByUserId);
+        gateway->send(std::move(event));
     }
 }
 }

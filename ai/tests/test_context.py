@@ -1,4 +1,5 @@
-from chat_ai.context import to_chat
+from chat_ai.context import build_system_prompt, to_chat
+from chat_ai.rules import Human, RoomAi
 
 
 def entry(member_id, name, content):
@@ -108,3 +109,55 @@ async def test_related_lookup_failures_return_nothing():
 
     assert await related_messages(Broken(), 1, 50, "火锅店", 5, 1500) == []
     assert await related_messages(None, 1, 50, "火锅店", 5, 1500) == []
+
+
+def _ai(member_id, slug, provider, name, persona, creator_name=""):
+    return RoomAi(member_id, slug, provider, name, persona=persona, creator_name=creator_name, is_legacy=False)
+
+
+def test_build_system_prompt_injects_room_and_roles_when_collaborating():
+    analyst = _ai(100, "analyst", "deepseek", "分析者", "负责分析报错", "alice")
+    reviewer = _ai(101, "reviewer", "deepseek", "审查者", "复核结论")
+    others = [Human(1, 1, "alice")]
+    prompt = build_system_prompt(analyst, analyst.persona, collaboration=True,
+                                 room_name="作战室", humans=others,
+                                 ais=[analyst, reviewer], now=0)
+    assert "房间：作战室" in prompt
+    assert "在场的人类成员：alice" in prompt
+    assert "审查者：复核结论" in prompt
+    # The speaking AI's own role is still there (it appears once, in the base).
+    assert "你是 分析者" in prompt
+
+
+def test_build_system_prompt_unchanged_without_collaboration():
+    ai = _ai(100, "claude", "anthropic", "Claude", "你好")
+    others = [Human(1, 1, "alice")]
+    prompt = build_system_prompt(ai, ai.persona, collaboration=False,
+                                 room_name="作战室", humans=others, ais=[ai], now=0)
+    assert "房间：作战室" not in prompt
+    assert "alice" not in prompt
+    assert prompt == "你是 Claude，聊天室中的独立AI角色，created by 。只以自己的身份说话。\n你好"
+
+
+from chat_ai.context import fork_filter
+
+
+def test_fork_filter_keeps_history_only_up_to_the_fork_point():
+    entries = [entry(1, "alice", f"msg {n}") | {"seq": n} for n in range(118, 123)]
+    kept = fork_filter(entries, 120)
+    assert [e["seq"] for e in kept] == [118, 119, 120]
+
+
+def test_fork_filter_missing_seq_counts_as_before_the_fork():
+    entries = [entry(1, "alice", "hi")]
+    assert fork_filter(entries, 120) == entries
+    assert fork_filter(entries, 0) == entries
+
+
+def test_collaboration_prompt_names_the_humans_from_the_snapshot():
+    from chat_ai.context import build_system_prompt
+    from chat_ai.rules import Human, RoomAi
+    ai = RoomAi(100, "claude", "anthropic", "Claude", persona="分析日志")
+    prompt = build_system_prompt(ai, "人设", collaboration=True, room_name="排障",
+                                 humans=[Human(10, 1, "alice")], ais=[ai])
+    assert "在场的人类成员：alice" in prompt

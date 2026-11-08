@@ -1,0 +1,173 @@
+"""Breakouts (visibility, search, cascade) and memory management."""
+
+import time
+
+from conftest import error_code
+
+
+def _collaborate(owner, room):
+    assert owner.request("PUT", f"/api/rooms/{room}/collaboration", json={"enabled": True}).status_code == 200
+
+
+def _breakout(socket, db, room, topic):
+    frame = socket.post(room, f"/breakout {topic}")
+    assert frame["type"] == "ack", frame
+    with db.cursor() as cursor:
+        cursor.execute("SELECT id FROM rooms WHERE parent_room_id=%s AND topic=%s", (room, topic))
+        row = cursor.fetchone()
+    assert row, "breakout was not created"
+    return row[0]
+
+
+def test_breakout_needs_collaboration(make_user, make_room, make_socket, db):
+    owner = make_user()
+    room = make_room(owner)
+    socket = make_socket(owner)
+    assert socket.post(room, "/breakout 不该创建")["type"] == "ack"
+    with db.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE parent_room_id=%s", (room,))
+        assert cursor.fetchone()[0] == 0
+
+
+def test_parent_members_can_read_and_search_but_not_speak(make_user, make_room, make_socket, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    _collaborate(owner, room)
+    owner_socket = make_socket(owner)
+    child = _breakout(owner_socket, db, room, "核对日志")
+    assert owner_socket.post(child, "只在小会里出现的词zq9")["type"] == "ack"
+
+    # The non-participant sees the breakout read-only in the room list.
+    listed = {r["id"]: r for r in member.get("/api/rooms").json()["rooms"]}
+    assert listed[child]["status"] == "readonly"
+    history = member.get(f"/api/rooms/{child}/messages").json()["messages"]
+    assert any("zq9" in m["content"] for m in history)
+    found = member.get(f"/api/rooms/{room}/search", params={"q": "zq9"}).json()["messages"]
+    assert [m["room_id"] for m in found] == [child]
+
+    member_socket = make_socket(member)
+    frame = member_socket.post(child, "我能插话吗")
+    assert frame["type"] == "error"
+
+
+def test_closing_collaboration_ends_the_whole_breakout_tree(make_user, make_room, make_socket, db):
+    owner = make_user()
+    room = make_room(owner)
+    _collaborate(owner, room)
+    socket = make_socket(owner)
+    child = _breakout(socket, db, room, "一级")
+    with db.cursor() as cursor:
+        cursor.execute("UPDATE rooms SET collaboration_enabled=1 WHERE id=%s", (child,))
+    grandchild = _breakout(socket, db, child, "二级")
+
+    assert owner.request("PUT", f"/api/rooms/{room}/collaboration", json={"enabled": False}).status_code == 200
+    with db.cursor() as cursor:
+        cursor.execute("SELECT status FROM rooms WHERE id IN (%s,%s)", (child, grandchild))
+        assert {row[0] for row in cursor.fetchall()} == {"closed"}
+    frame = socket.post(grandchild, "还能说话吗")
+    assert frame["type"] == "error"
+
+
+def _room_memory(db, room, content):
+    with db.cursor() as cursor:
+        cursor.execute("INSERT INTO room_memories (room_id, layer, content, created_at_ms) "
+                       "VALUES (%s,'conclusion',%s,%s)", (room, content, int(time.time() * 1000)))
+        return cursor.lastrowid
+
+
+def test_room_memories_listed_by_members_deleted_by_admins(make_user, make_room, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    memory = _room_memory(db, room, "数据库选用 MySQL")
+    listed = member.get(f"/api/rooms/{room}/memories").json()["memories"]
+    assert [m["content"] for m in listed] == ["数据库选用 MySQL"]
+
+    response = member.request("DELETE", f"/api/rooms/{room}/memories/{memory}")
+    assert response.status_code == 403 and error_code(response) == "forbidden"
+    assert owner.request("DELETE", f"/api/rooms/{room}/memories/{memory}").status_code == 200
+    assert member.get(f"/api/rooms/{room}/memories").json()["memories"] == []
+
+
+def test_user_memories_are_private_to_their_user(make_user, db):
+    alice, bob = make_user(), make_user()
+    with db.cursor() as cursor:
+        cursor.execute("SELECT id FROM users WHERE username=%s", (alice.username,))
+        alice_id = cursor.fetchone()[0]
+        cursor.execute("INSERT INTO user_memories (user_id, layer, content, created_at_ms) "
+                       "VALUES (%s,'preference','回答尽量简短',%s)", (alice_id, int(time.time() * 1000)))
+        memory = cursor.lastrowid
+    assert bob.get("/api/me/memories").json()["memories"] == []
+    assert bob.request("DELETE", f"/api/me/memories/{memory}").status_code == 200   # no effect
+    assert [m["content"] for m in alice.get("/api/me/memories").json()["memories"]] == ["回答尽量简短"]
+    assert alice.request("DELETE", f"/api/me/memories/{memory}").status_code == 200
+    assert alice.get("/api/me/memories").json()["memories"] == []
+
+
+# --- knowledge base ------------------------------------------------------------
+
+def test_two_megabyte_log_is_imported_and_listed(make_user, make_room):
+    owner = make_user()
+    room = make_room(owner)
+    content = ("2026-11-08 14:02:00 INFO request handled in 12ms\n" * 50000)[: 2 * 1024 * 1024]
+    response = owner.post(f"/api/rooms/{room}/knowledge", json={"name": "app.log", "content": content})
+    assert response.status_code == 201, response.text
+    listed = owner.get(f"/api/rooms/{room}/knowledge").json()["documents"]
+    assert [(d["name"], d["kind"], d["size_bytes"]) for d in listed] == [("app.log", "log", len(content))]
+
+
+def test_oversized_and_unsupported_files_are_rejected(make_user, make_room):
+    owner = make_user()
+    room = make_room(owner)
+    big = owner.post(f"/api/rooms/{room}/knowledge",
+                     json={"name": "huge.log", "content": "x" * (5 * 1024 * 1024 + 1)})
+    assert big.status_code == 413 and error_code(big) == "file_too_large"
+    pdf = owner.post(f"/api/rooms/{room}/knowledge", json={"name": "a.pdf", "content": "%PDF"})
+    assert pdf.status_code == 415 and error_code(pdf) == "unsupported_file_type"
+
+
+def test_knowledge_is_room_private_and_deletable_by_uploader_or_admin(make_user, make_room):
+    owner, member, outsider = make_user(), make_user(), make_user()
+    room = make_room(owner, member)
+    document = owner.post(f"/api/rooms/{room}/knowledge",
+                          json={"name": "notes.md", "content": "# 部署\n用 compose"}).json()["id"]
+    assert outsider.get(f"/api/rooms/{room}/knowledge").status_code == 404
+    response = member.request("DELETE", f"/api/rooms/{room}/knowledge/{document}")
+    assert response.status_code == 403
+    assert owner.request("DELETE", f"/api/rooms/{room}/knowledge/{document}").status_code == 200
+    assert member.get(f"/api/rooms/{room}/knowledge").json()["documents"] == []
+
+
+def test_parent_sees_breakout_start(make_user, make_room, make_socket, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    _collaborate(owner, room)
+    watcher = make_socket(member)
+    watcher.subscribe(room)
+    child = _breakout(make_socket(owner), db, room, "看日志")
+    event = watcher.expect("breakout_started", timeout=5)
+    assert event["breakout_id"] == child and event["topic"] == "看日志"
+
+
+def test_breakout_controls_need_initiator_or_parent_admin(make_user, make_room, make_socket, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    _collaborate(owner, room)
+    member_socket = make_socket(member)
+    child = _breakout(member_socket, db, room, "成员发起")       # member is the initiator
+    owner_socket = make_socket(owner)
+
+    def paused():
+        with db.cursor() as cursor:
+            cursor.execute("SELECT paused FROM room_ai_controls WHERE room_id=%s", (child,))
+            row = cursor.fetchone()
+            return bool(row and row[0])
+
+    assert member_socket.post(child, "/pause")["type"] == "ack"
+    assert paused()
+    # The parent's owner is not in the breakout but may still resume and end it.
+    assert owner_socket.post(child, "/resume")["type"] == "ack"
+    assert not paused()
+    assert owner_socket.post(child, "/end")["type"] == "ack"
+    with db.cursor() as cursor:
+        cursor.execute("SELECT status FROM rooms WHERE id=%s", (child,))
+        assert cursor.fetchone()[0] == "closed"
