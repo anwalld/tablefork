@@ -34,3 +34,18 @@ def test_empty_parent_blocks_the_child():
     chain = [5, 0]
     assert deduct(chain) == chain
     assert exhausted(chain) is True
+
+from chat_ai.breakout import conclusion_content
+
+
+def test_conclusion_content_lists_topic_participants_and_summary():
+    content = conclusion_content("核对日志", ["分析者", "审查者"], "14:02 的报错是空指针")
+    assert "核对日志" in content
+    assert "分析者" in content and "审查者" in content
+    assert "空指针" in content
+
+
+def test_conclusion_content_allows_an_empty_summary():
+    content = conclusion_content("回顾", ["分析者"], "")
+    assert "【小会】回顾" in content
+    assert "结论：" not in content

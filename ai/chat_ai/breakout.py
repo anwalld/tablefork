@@ -22,3 +22,14 @@ def deduct(chain: list[int]) -> list[int]:
 def exhausted(chain: list[int]) -> bool:
     """True when any level of the chain has run out of budget."""
     return not chain or any(budget <= 0 for budget in chain)
+
+
+def conclusion_content(topic: str, participants: list[str], summary: str) -> str:
+    """The message a finished breakout posts back to its parent room: topic,
+    participants and the conclusion, so the parent can read the outcome."""
+    lines = [f"【小会】{topic}"]
+    if participants:
+        lines.append("参加者：" + "、".join(participants))
+    if summary:
+        lines.append("结论：" + summary)
+    return "\n".join(lines)
