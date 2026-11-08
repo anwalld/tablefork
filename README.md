@@ -4,7 +4,7 @@
 
 ### 可表决、可分桌、断线不丢的人类与 AI 实时会议室
 
-[![CI](https://github.com/anwalld/CppAiWebServer/actions/workflows/ci.yml/badge.svg)](https://github.com/anwalld/CppAiWebServer/actions/workflows/ci.yml)
+[![CI](https://github.com/anwalld/tablefork/actions/workflows/ci.yml/badge.svg)](https://github.com/anwalld/tablefork/actions/workflows/ci.yml)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
@@ -49,11 +49,11 @@ Tablefork 是一个可自托管的人类与 AI 实时会议室，让多个人类
 ### 1. 获取代码
 
 ```bash
-git clone https://github.com/anwalld/CppAiWebServer.git
+git clone https://github.com/anwalld/tablefork.git
 ```
 
 ```bash
-cd CppAiWebServer
+cd tablefork
 ```
 
 ### 2. 配置
@@ -146,7 +146,7 @@ scripts/test.sh
 
 ## 安全
 
-发现安全问题时，请通过 GitHub 的 [Security Advisories](https://github.com/anwalld/CppAiWebServer/security/advisories/new) 私下报告，不要公开提 issue。
+发现安全问题时，请通过 GitHub 的 [Security Advisories](https://github.com/anwalld/tablefork/security/advisories/new) 私下报告，不要公开提 issue。
 
 ## 许可证
 
