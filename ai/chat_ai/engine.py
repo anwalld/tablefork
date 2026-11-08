@@ -86,7 +86,7 @@ class Engine:
         value = getattr(event, body) if body else None
         if body in ('message_saved', 'members_changed'):
             room_id = value.room.room_id
-        elif body in ('room_deleted', 'generation_rejected', 'control_changed'):
+        elif body in ('room_deleted', 'generation_rejected', 'control_changed', 'confirmation_input'):
             room_id = value.room_id
         else:
             await ack()
@@ -94,6 +94,18 @@ class Engine:
 
         if body == 'control_changed':
             self.sync_controls()
+            await ack()
+            return
+
+        if body == 'confirmation_input':
+            # The chat server checked the owner/admin role; here the step's own
+            # initiator is also allowed. Only those responses touch the step.
+            async with self._room(room_id, seen) as state:
+                if state is not None and state.pending_step is not None:
+                    step = state.pending_step
+                    allowed = value.privileged or value.member_id == step.get('initiator')
+                    if allowed:
+                        step['status'] = 'done' if value.response == 'continue' else 'cancelled'
             await ack()
             return
 
@@ -215,6 +227,10 @@ class Engine:
             decision = rules.Decision()
             async with self._room(room_id) as state:
                 if state.deleted or state.timer_due is None or state.timer_due > self.clock():
+                    continue
+                if state.collaboration_enabled:
+                    # No idle chat: only a timed-out confirmation request runs.
+                    await self._pending_deadline(room_id, state)
                     continue
                 if human is None or state.humans != [human]:
                     continue
@@ -563,6 +579,29 @@ class Engine:
             room_id=room_id, notify_member_id=payer.member_id,
             code='host_unavailable', message='主持人暂时不可用，已按原规则回复')))
         return rules.on_human_message(state, payer, content, available, self.rng, mention_ids)
+
+    def _post_pending_step(self, room_id, step):
+        """Asks the chat server to show the room a confirmation request."""
+        self.send(ai_pb2.AiAction(system_notice=ai_pb2.SystemNotice(
+            room_id=room_id, content=rules.confirmation_text(step))))
+
+    async def _pending_deadline(self, room_id, state):
+        """Runs on a collaboration room's timer when a step waits for a human.
+
+        Discuss/readonly steps continue automatically; side effects stay paused
+        and the room is reminded again instead.
+        """
+        step = state.pending_step
+        if step is None or step.get('status') != 'pending':
+            state.timer_due = None
+            return
+        if rules.deadline_auto_continues(step.get('risk', 'discuss')):
+            step['status'] = 'done'
+            state.timer_due = None
+        else:
+            step['status'] = 'paused'
+            state.timer_due = self._next_timer(state)
+            self._post_pending_step(room_id, step)
 
     async def _context(self, room_id, job, member_id):
         """Recent messages, plus related older ones when retrieval is on."""

@@ -172,4 +172,19 @@ drogon::Task<> reportControlChanged(int64_t roomId, RequestContextPtr context)
         LOG_WARN << "AI control notification deferred";
     }
 }
+
+drogon::Task<> reportConfirmationInput(int64_t roomId, int64_t memberId,
+                                       const std::string &response, bool privileged)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *input = event.mutable_confirmation_input();
+        input->set_room_id(roomId);
+        input->set_member_id(memberId);
+        input->set_response(response);
+        input->set_privileged(privileged);
+        gateway->send(std::move(event));
+    }
+}
 }

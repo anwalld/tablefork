@@ -5,6 +5,7 @@
 #include <sstream>
 #include <set>
 
+#include "ai/ai_events.h"
 #include "common/config.h"
 #include "common/trace.h"
 #include "buffering/guarded_transaction.h"
@@ -340,10 +341,23 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
                                                  std::string clientMsgId,
                                                  std::string content, Json::Value mentionIds)
 {
-    co_return co_await store(Author{session.memberId, session.username, "human"},
-                             roomId,
-                             std::move(clientMsgId),
-                             std::move(content), session.request, session.userId, std::move(mentionIds));
+    std::string response;
+    if (content == "继续") response = "continue";
+    else if (content == "否决") response = "cancel";
+    auto message = co_await store(Author{session.memberId, session.username, "human"},
+                              roomId,
+                              std::move(clientMsgId),
+                              std::move(content), session.request, session.userId, std::move(mentionIds));
+    if (!response.empty())
+    {
+        const auto role = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+            roomId, session.memberId);
+        const bool privileged = !role.empty() &&
+            (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
+        co_await reportConfirmationInput(roomId, session.memberId, response, privileged);
+    }
+    co_return message;
 }
 
 drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,

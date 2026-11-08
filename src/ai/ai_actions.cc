@@ -145,6 +145,14 @@ drogon::Task<> onNotice(ai::Notice notice)
                      noticeEvent(notice.notify_member_id(), notice.code(), notice.provider(),
                                  notice.message()));
 }
+drogon::Task<> onSystemNotice(ai::SystemNotice notice)
+{
+    Json::Value event;
+    event["type"] = "confirmation_request";
+    event["room_id"] = Json::Int64(notice.room_id());
+    event["content"] = notice.content();
+    co_await publish(notice.room_id(), std::move(event));
+}
 }  // namespace
 
 void handleAiAction(ai::AiAction action)
@@ -167,6 +175,9 @@ void handleAiAction(ai::AiAction action)
                     break;
                 case ai::AiAction::kNotice:
                     co_await onNotice(action.notice());
+                    break;
+                case ai::AiAction::kSystemNotice:
+                    co_await onSystemNotice(action.system_notice());
                     break;
                 default:
                     break;

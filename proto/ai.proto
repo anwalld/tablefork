@@ -81,7 +81,19 @@ message GatewayEvent {
     RoomDeleted room_deleted = 5;
     GenerationRejected generation_rejected = 6;
     ControlChanged control_changed = 7;
+    ConfirmationInput confirmation_input = 8;
   }
+}
+
+// A human responded to a confirmation request. `response` is "continue"
+// (the step runs), "cancel" (the step is abandoned), or "other" (an ordinary
+// message that only cancels the countdown). The C++ server checks who may
+// confirm, so the AI service can trust it.
+message ConfirmationInput {
+  int64 room_id = 1;
+  string response = 2;
+  int64 member_id = 3;   // who responded
+  bool privileged = 4;   // owner or admin, checked by the chat server
 }
 
 message ControlChanged {
@@ -149,7 +161,16 @@ message AiAction {
     Final final = 3;
     Failed failed = 4;
     Notice notice = 5;
+    SystemNotice system_notice = 6;
   }
+}
+
+// A message the AI service asks the chat server to show the whole room, such
+// as a confirmation request ("still there?"). The chat server stores it and
+// pushes it like an ordinary message.
+message SystemNotice {
+  int64 room_id = 1;
+  string content = 2;
 }
 
 message StoreKeyRequest {

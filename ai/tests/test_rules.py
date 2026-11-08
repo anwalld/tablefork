@@ -229,3 +229,25 @@ def test_host_decision_reports_missing_keys():
     decision = rules.on_host_decision(two_ais(), ["GPT"], False, ALICE, {"anthropic"}, [], 5)
     assert decision.requests == []
     assert [m.provider for m in decision.missing] == ["openai"]
+
+
+def test_pending_step_round_trips():
+    state = RoomState(pending_step={"id": "x", "kind": "tool", "risk": "side_effect",
+                                    "initiator": 10, "deadline": 9999.0, "status": "pending"})
+    assert RoomState.from_json(state.to_json()).pending_step == state.pending_step
+
+
+def test_confirmation_text_names_the_action_and_deadline():
+    import time
+    step = {"kind": "tool", "risk": "side_effect", "description": "执行方案 A",
+            "initiator": 10, "deadline": time.time() + 180}
+    text = rules.confirmation_text(step)
+    assert "你还在吗" in text
+    assert "方案 A" in text
+    assert "继续" in text and "否决" in text
+
+
+def test_deadline_auto_continues_only_discuss_and_readonly():
+    assert rules.deadline_auto_continues("discuss")
+    assert rules.deadline_auto_continues("readonly")
+    assert not rules.deadline_auto_continues("side_effect")

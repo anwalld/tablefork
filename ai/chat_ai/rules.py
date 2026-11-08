@@ -6,6 +6,7 @@ The probabilities follow openspec/specs/ai-replies.
 
 import random
 import re
+import time
 from dataclasses import dataclass, field
 
 
@@ -52,6 +53,11 @@ class RoomState:
     # Room-level collaboration mode, reported by the chat server's snapshot.
     collaboration_enabled: bool = False
     room_name: str = ""
+    # A step waiting for a human "继续"/"否决", when collaboration is on.
+    # {id, kind, risk, initiator, deadline, status}
+    # risk is "discuss"|"readonly"|"side_effect"; status is
+    # "pending"|"done"|"cancelled"|"paused".
+    pending_step: dict | None = None
 
     def ai(self, slug: str) -> RoomAi | None:
         return next((a for a in self.ais if a.slug == slug), None)
@@ -67,6 +73,7 @@ class RoomState:
             "epoch": self.epoch, "last_trigger_seq": self.last_trigger_seq, "last_trigger_id": self.last_trigger_id,
             "collaboration_enabled": self.collaboration_enabled,
             "room_name": self.room_name,
+            "pending_step": self.pending_step,
         }
 
     @classmethod
@@ -82,6 +89,7 @@ class RoomState:
             last_trigger_id=data.get("last_trigger_id", ""),
             collaboration_enabled=data.get("collaboration_enabled", False),
             room_name=data.get("room_name", ""),
+            pending_step=data.get("pending_step"),
         )
 
 
@@ -287,3 +295,17 @@ def on_host_decision(
     for slug in order[:max_replies]:
         _request(decision, state, Request(slug, payer, kind, hop), keys)
     return decision
+
+
+def confirmation_text(step: dict) -> str:
+    """The "still there?" prompt for a step awaiting human confirmation."""
+    remaining = (step.get("deadline") or 0) - time.time()
+    minutes = max(1, round(remaining / 60)) if remaining > 0 else 1
+    action = step.get("description") or step.get("kind") or "继续下一步"
+    return (f"你还在吗？{minutes} 分钟内不回复，我就{action}。"
+            "回复“继续”立即执行，回复“否决”取消。")
+
+
+def deadline_auto_continues(risk: str) -> bool:
+    """Discuss and readonly steps continue on timeout; side effects do not."""
+    return risk in ("discuss", "readonly")
