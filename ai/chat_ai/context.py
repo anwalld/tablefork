@@ -221,6 +221,26 @@ def build_system_prompt(ai, persona: str, *, collaboration: bool,
     return base + "\n\n" + injected if injected else base
 
 
+def allocate(budget: int, fixed: int, related: int, memory: int,
+             floor: float = 0.5) -> tuple[bool, int, int]:
+    """Shares one context budget between injected material and history.
+
+    `fixed` (the summary) is always kept. Recent history should keep at least
+    `floor` of the budget; to get there, retrieval is dropped first, then
+    memory is cut, and only then does history shrink.
+    Returns (keep_related, memory_allowed, history_budget).
+    """
+    minimum = int(budget * floor)
+    history = budget - fixed - related - memory
+    if history >= minimum:
+        return True, memory, max(1, history)
+    history += related
+    if history >= minimum:
+        return False, memory, history
+    cut = min(memory, minimum - history)
+    return False, memory - cut, max(1, history + cut)
+
+
 def fork_filter(entries: list[dict], fork_seq: int) -> list[dict]:
     """The parent's history up to the fork point, for a breakout's context.
 

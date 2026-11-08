@@ -58,6 +58,14 @@ class Settings:
     council_timeout_seconds: float = 180.0
     # AI replies a breakout may spend per level; exhausted breakouts conclude.
     breakout_reply_budget: int = 20
+    # History summary and memories (collaboration rooms only). Both use one
+    # cheap model, paid by the reply that triggers the work.
+    summary_enabled: bool = False
+    memory_enabled: bool = False
+    recall_provider: str = "deepseek"
+    recall_model: str = "deepseek-flash"
+    summary_block: int = 20
+    memory_chars: int = 1500
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -105,4 +113,10 @@ class Settings:
             round_max_replies=max(1, _int("AI_ROUND_MAX_REPLIES", 12)),
             council_timeout_seconds=max(10.0, _float("AI_COUNCIL_TIMEOUT_SECONDS", 180)),
             breakout_reply_budget=max(0, _int("AI_BREAKOUT_REPLY_BUDGET", 20)),
+            summary_enabled=os.environ.get("AI_SUMMARY_ENABLED", "") == "1",
+            memory_enabled=os.environ.get("AI_MEMORY_ENABLED", "") == "1",
+            recall_provider=os.environ.get("AI_RECALL_PROVIDER", os.environ.get("AI_HOST_PROVIDER", "deepseek")),
+            recall_model=os.environ.get("AI_RECALL_MODEL", os.environ.get("AI_HOST_MODEL", "deepseek-flash")),
+            summary_block=max(1, _int("AI_SUMMARY_BLOCK", 20)),
+            memory_chars=max(0, _int("AI_MEMORY_CHARS", 1500)),
         )

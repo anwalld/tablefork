@@ -16,9 +16,10 @@ from . import rules
 from . import host
 from . import council
 from . import breakout
+from . import recall
 from .council_state import Ballot
 from .controls import GenerationControls
-from .context import build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
+from .context import allocate, build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
 from .providers.base import ChatMessage, KeyRejected, ProviderError
 
@@ -494,13 +495,20 @@ class Engine:
             return
         job['parent_room_id'] = state.parent_room_id
         job['fork_seq'] = state.fork_seq
-        messages, related = await self._context(room_id, job, ai.member_id)
+        summary, room_memories, user_memories = await self._recall(room_id, state)
+        messages, related, memory = await self._context(
+            room_id, job, ai.member_id, summary, room_memories, user_memories)
         if 'persona_snapshot' not in job:
             job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
         system = build_system_prompt(ai, job['persona_snapshot'],
                                      collaboration=state.collaboration_enabled,
                                      room_name=state.room_name,
                                      humans=state.humans, ais=state.ais)
+        # Order per ai-context: system prompt, history summary, memory. Both
+        # change only at segment boundaries, so the cached prefix holds.
+        for block in (recall.summary_block(summary), memory):
+            if block:
+                system += "\n\n" + block
         if job['kind'] in ('proactive', 'goodbye'):
             prompt = GOODBYE_PROMPT if job['kind'] == 'goodbye' else PROACTIVE_PROMPT
             messages.append(ChatMessage('user', prompt))
@@ -598,6 +606,95 @@ class Engine:
                                 retry_at=self.clock() + self.settings.retry_base_seconds)
             final = copy.deepcopy(state.active)
         self._send_final(room_id, final)
+        if state.collaboration_enabled and job.get('window_start'):
+            self._spawn(self._process_segment(room_id, job['payer'][1], job['window_start']))
+
+    async def _recall(self, room_id, state):
+        """The summary and memories to inject; empty when off or on error."""
+        settings = self.settings
+        if (not state.collaboration_enabled or self.pool is None
+                or not (settings.summary_enabled or settings.memory_enabled)):
+            return '', [], []
+        try:
+            summary = ''
+            if settings.summary_enabled:
+                cached = await self.cache.get(f'ai:summary:{room_id}')
+                summary = (json.loads(cached)['content'] if cached
+                           else (await recall.load_summary(self.pool, room_id))[1])
+            room_memories, user_memories = [], []
+            if settings.memory_enabled:
+                rooms = [room_id] + ([state.parent_room_id] if state.parent_room_id else [])
+                room_memories = await recall.load_room_memories(self.pool, rooms)
+                # Only current members' memories: they never leave their rooms.
+                humans = await recall.room_humans(self.pool, room_id)
+                user_memories = await recall.load_user_memories(self.pool, humans)
+            return summary, room_memories, user_memories
+        except Exception as error:  # noqa: BLE001 - recall never blocks a reply
+            log.warning('recall for room %s failed: %s', room_id, type(error).__name__)
+            return '', [], []
+
+    async def _recall_call(self, key, system, user, max_tokens):
+        """One call to the recall model; None on any failure."""
+        try:
+            parts = []
+            async with asyncio.timeout(self.settings.generation_timeout):
+                async for piece in self.providers.create(self.settings.recall_provider).stream(
+                        model=self.settings.recall_model, system=system,
+                        messages=[ChatMessage('user', user)], api_key=key, max_tokens=max_tokens):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return None
+        return ''.join(parts).strip() or None
+
+    async def _process_segment(self, room_id, payer_user_id, window_start):
+        """Folds messages that left the context window into the room summary
+        and extracts memories from them, one block at a time. Best effort:
+        on failure the cursor does not move and the next reply tries again."""
+        settings = self.settings
+        if self.pool is None or not (settings.summary_enabled or settings.memory_enabled):
+            return
+        lock = f'ai:segment:lock:{room_id}'
+        if not await self.cache.set(lock, '1', nx=True, ex=300):
+            return
+        try:
+            upto, existing = await recall.load_summary(self.pool, room_id)
+            if window_start - 1 - upto < settings.summary_block:
+                return
+            rows = await recall.messages_between(self.pool, room_id, upto, window_start, 200)
+            key = await self.keys.get(payer_user_id, settings.recall_provider) if rows else None
+            if key is None:
+                return
+            text = recall.transcript(rows)
+            summary = existing
+            if settings.summary_enabled:
+                summary = await self._recall_call(key, recall.SUMMARY_SYSTEM,
+                                                  recall.summary_input(existing, text), 1500)
+                if summary is None:
+                    return
+            if settings.memory_enabled:
+                await self._extract_memories(room_id, text, rows[-1]['seq'], key)
+            await recall.save_summary(self.pool, room_id, rows[-1]['seq'], summary)
+            await self.cache.set(f'ai:summary:{room_id}',
+                                 json.dumps({'upto': rows[-1]['seq'], 'content': summary}), ex=86400)
+        except Exception:
+            log.exception('segment for room %s', room_id)
+        finally:
+            await self.cache.delete(lock)
+
+    async def _extract_memories(self, room_id, text, source_seq, key):
+        """Gatekeeper first; extraction only for the layers it lets through."""
+        humans = await recall.room_humans(self.pool, room_id)
+        existing = recall.existing_text(await recall.load_room_memories(self.pool, [room_id]),
+                                        await recall.load_user_memories(self.pool, humans))
+        gate = await self._recall_call(key, recall.gate_system(existing), text, 400)
+        layers = recall.parse_gate(gate or '')
+        if not layers:
+            return []
+        out = await self._recall_call(key, recall.extract_system(layers, existing), text, 1500)
+        memories = recall.parse_memories(out or '', layers, {name: uid for uid, name in humans.items()})
+        if memories:
+            await recall.save_memories(self.pool, room_id, source_seq, memories)
+        return memories
 
     async def _host_pick(self, room_id, state, payer_user_id):
         """Asks the host who should speak next; (None, False) on any failure."""
@@ -711,6 +808,13 @@ class Engine:
         if rejects:
             content += " 少数派意见：" + "；".join(rejects)
         self._post_system(room_id, content)
+        if self.settings.memory_enabled and self.pool is not None and result.outcome != 'invalid':
+            try:
+                await recall.save_memories(self.pool, room_id, 0, [{
+                    'layer': 'conclusion', 'user_id': None,
+                    'content': recall.council_memory(ballot.topic, label, rejects)}])
+            except Exception as error:  # noqa: BLE001 - memory is best effort
+                log.warning('council memory failed: %s', type(error).__name__)
         if result.outcome == 'pass':
             async with self._room(room_id) as state:
                 deadline = self.clock() + self.settings.council_timeout_seconds
@@ -879,13 +983,19 @@ class Engine:
             state.timer_due = self._next_timer(state)
             self._post_pending_step(room_id, step)
 
-    async def _context(self, room_id, job, member_id):
-        """Recent messages, plus related older ones when retrieval is on."""
+    async def _context(self, room_id, job, member_id, summary='', room_memories=(), user_memories=()):
+        """Recent messages, plus related older ones when retrieval is on, and
+        the memory block, all sharing one budget (ai-context: retrieval is
+        dropped first, then memory is cut, then older history)."""
         settings = self.settings
         count, chars, tokens = settings.context_messages, settings.context_chars, settings.context_tokens
         if job.get('context_halved'):
             count, chars, tokens = max(1, count // 2), max(1, chars // 2), tokens // 2
         entries = await recent_messages(self.cache, self.pool, room_id, count + settings.context_block)
+        own = [int(e['seq']) for e in entries if 'seq' in e]
+        if own:
+            # Messages before this have aged out and belong to the summary.
+            job['window_start'] = min(own)
         if job.get('parent_room_id'):
             # A breakout inherits the parent's history only up to the fork, then
             # its own messages on top.
@@ -900,14 +1010,29 @@ class Engine:
                                            trigger.get('content', ''), settings.retrieval_top_k,
                                            settings.retrieval_chars)
             related = related_note(items)
-            if related is not None:
-                # The reference shares the history budget instead of adding to it.
-                if tokens:
-                    tokens = max(1, tokens - estimate_tokens(related.content))
-                else:
-                    chars = max(1, chars - len(related.content))
+        memory = recall.memory_block(list(room_memories), list(user_memories), settings.memory_chars)
+        if summary or memory:
+            measure = estimate_tokens if tokens else len
+            keep, allowed, history = allocate(tokens or chars, measure(summary),
+                                              measure(related.content) if related else 0, measure(memory))
+            if not keep:
+                related = None
+            if allowed < measure(memory):
+                ratio = allowed / max(1, measure(memory))
+                memory = recall.memory_block(list(room_memories), list(user_memories),
+                                             int(settings.memory_chars * ratio))
+            if tokens:
+                tokens = history
+            else:
+                chars = history
+        elif related is not None:
+            # The reference shares the history budget instead of adding to it.
+            if tokens:
+                tokens = max(1, tokens - estimate_tokens(related.content))
+            else:
+                chars = max(1, chars - len(related.content))
         return to_chat(entries, member_id, count, chars, block=settings.context_block,
-                       max_tokens=tokens), related
+                       max_tokens=tokens), related, memory
 
     async def _fail_classified(self, room_id, job, ai, error):
         backoff = self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1)

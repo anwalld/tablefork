@@ -364,7 +364,15 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
     std::string councilVerdict;
     if (content == "/否决") councilVerdict = "veto";
     else if (content == "/强制通过") councilVerdict = "force_pass";
-    const bool breakoutStart = content.rfind("/小会", 0) == 0;
+    // Breakouts are a collaboration feature; elsewhere "/小会" is just text.
+    bool breakoutStart = content.rfind("/小会", 0) == 0;
+    if (breakoutStart)
+    {
+        const auto mode = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT collaboration_enabled, status FROM rooms WHERE id = ?", roomId);
+        breakoutStart = !mode.empty() && mode[0]["collaboration_enabled"].as<bool>() &&
+                        mode[0]["status"].as<std::string>() == "active";
+    }
     std::vector<int64_t> breakoutMembers;
     std::string breakoutTopic;
     if (breakoutStart)

@@ -15,6 +15,18 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
         co_return co_await AiControlController().pause(req, args[0]);
     if(route=="AiControlController::stop" && args.size()==2)
         co_return co_await AiControlController().stop(req, args[0], args[1]);
+    if(route=="AiControlController::collaboration" && args.size()==1)
+        co_return co_await AiControlController().collaboration(req, args[0]);
+    if(route=="AiControlController::council" && args.size()==1)
+        co_return co_await AiControlController().council(req, args[0]);
+    if(route=="AiControlController::roomMemories" && args.size()==1)
+        co_return co_await AiControlController().roomMemories(req, args[0]);
+    if(route=="AiControlController::deleteRoomMemory" && args.size()==2)
+        co_return co_await AiControlController().deleteRoomMemory(req, args[0], args[1]);
+    if(route=="AiControlController::myMemories" && args.empty())
+        co_return co_await AiControlController().myMemories(req);
+    if(route=="AiControlController::deleteMyMemory" && args.size()==1)
+        co_return co_await AiControlController().deleteMyMemory(req, args[0]);
     if(route=="AuthController::registerUser" && args.size()==0)
         co_return co_await AuthController().registerUser(req);
     if(route=="AuthController::login" && args.size()==0)

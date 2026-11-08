@@ -22,6 +22,12 @@ GRANT SELECT ON chat.ai_profiles TO 'ai'@'%';
 GRANT SELECT ON chat.ai_model_types TO 'ai'@'%';
 GRANT SELECT ON chat.room_ai_personas TO 'ai'@'%';
 GRANT SELECT ON chat.messages TO 'ai'@'%';
-GRANT SELECT (id, type, display_name) ON chat.members TO 'ai'@'%';
+GRANT SELECT (id, type, user_id, display_name) ON chat.members TO 'ai'@'%';
+GRANT SELECT ON chat.room_members TO 'ai'@'%';
+GRANT SELECT (id, name, parent_room_id, fork_seq, depth, topic, status) ON chat.rooms TO 'ai'@'%';
+GRANT SELECT ON chat.room_council TO 'ai'@'%';
+GRANT SELECT, INSERT, UPDATE ON chat.room_summaries TO 'ai'@'%';
+GRANT SELECT, INSERT ON chat.room_memories TO 'ai'@'%';
+GRANT SELECT, INSERT ON chat.user_memories TO 'ai'@'%';
 SQL
 echo "ai account is up to date"

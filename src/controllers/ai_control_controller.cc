@@ -249,4 +249,86 @@ AiControlController::Response AiControlController::council(drogon::HttpRequestPt
     co_return jsonResponse(Json::Value(Json::objectValue));
 }
 
+
+namespace
+{
+int64_t parseMemoryId(const std::string &text)
+{
+    try
+    {
+        std::size_t used = 0;
+        const auto id = std::stoll(text, &used);
+        if (used == text.size() && id > 0) return id;
+    }
+    catch (const std::exception &) {}
+    throw ApiError(drogon::k404NotFound, "not_found", "memory not found");
+}
+
+Json::Value memoryRows(const drogon::orm::Result &rows)
+{
+    Json::Value list(Json::arrayValue);
+    for (const auto &row : rows)
+    {
+        Json::Value item;
+        item["id"] = Json::Int64(row["id"].as<int64_t>());
+        item["layer"] = row["layer"].as<std::string>();
+        item["content"] = row["content"].as<std::string>();
+        item["created_at_ms"] = Json::Int64(row["created_at_ms"].as<int64_t>());
+        list.append(item);
+    }
+    Json::Value body;
+    body["memories"] = list;
+    return body;
+}
+}  // namespace
+
+AiControlController::Response AiControlController::roomMemories(drogon::HttpRequestPtr req, std::string room)
+{
+    std::vector<std::string> args{room};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::roomMemories", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    co_await RoomService::requireVisible(session.memberId, id);
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT id, layer, content, created_at_ms FROM room_memories WHERE room_id = ? "
+        "ORDER BY id DESC LIMIT 200", id);
+    co_return jsonResponse(memoryRows(rows));
+}
+
+AiControlController::Response AiControlController::deleteRoomMemory(drogon::HttpRequestPtr req, std::string room,
+                                                                    std::string memory)
+{
+    std::vector<std::string> args{room, memory};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::deleteRoomMemory", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    const auto memoryId = parseMemoryId(memory);
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto role = co_await lockActor(tx, id, session.memberId);
+    if (role != "owner" && role != "admin") throw ApiError::forbidden();
+    // Deleting twice is fine: the second delete finds nothing.
+    co_await tx->execSqlCoro("DELETE FROM room_memories WHERE id = ? AND room_id = ?", memoryId, id);
+    co_await commit(std::move(tx));
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
+
+AiControlController::Response AiControlController::myMemories(drogon::HttpRequestPtr req)
+{
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::myMemories", {})) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT id, layer, content, created_at_ms FROM user_memories WHERE user_id = ? "
+        "ORDER BY id DESC LIMIT 200", session.userId);
+    co_return jsonResponse(memoryRows(rows));
+}
+
+AiControlController::Response AiControlController::deleteMyMemory(drogon::HttpRequestPtr req, std::string memory)
+{
+    std::vector<std::string> args{memory};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::deleteMyMemory", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    co_await drogon::app().getDbClient()->execSqlCoro(
+        "DELETE FROM user_memories WHERE id = ? AND user_id = ?", parseMemoryId(memory), session.userId);
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
 }
