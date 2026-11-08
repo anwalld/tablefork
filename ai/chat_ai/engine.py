@@ -17,7 +17,7 @@ from . import host
 from . import council
 from .council_state import Ballot
 from .controls import GenerationControls
-from .context import build_system_prompt, estimate_tokens, recent_messages, related_messages, related_note, to_chat
+from .context import build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
 from .providers.base import ChatMessage, KeyRejected, ProviderError
 
@@ -452,6 +452,8 @@ class Engine:
             await self._fail_job(room_id, job, 'api_key_required',
                                  f'请先填写 {PROVIDER_NAMES[ai.provider]} 的 API key', False)
             return
+        job['parent_room_id'] = state.parent_room_id
+        job['fork_seq'] = state.fork_seq
         messages, related = await self._context(room_id, job, ai.member_id)
         if 'persona_snapshot' not in job:
             job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
@@ -739,6 +741,12 @@ class Engine:
         if job.get('context_halved'):
             count, chars, tokens = max(1, count // 2), max(1, chars // 2), tokens // 2
         entries = await recent_messages(self.cache, self.pool, room_id, count + settings.context_block)
+        if job.get('parent_room_id'):
+            # A breakout inherits the parent's history only up to the fork, then
+            # its own messages on top.
+            inherited = await parent_messages_until(self.pool, job['parent_room_id'],
+                                                   job.get('fork_seq', 0), count)
+            entries = inherited + entries
         trigger = job.get('trigger')
         related = None
         if (settings.retrieval_enabled and job['kind'] == 'reply' and trigger and entries
@@ -945,6 +953,8 @@ def _apply_snapshot(state, snapshot):
     state.ais = [rules.RoomAi(a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy or not a.model_slug) for a in snapshot.ais]
     state.collaboration_enabled = snapshot.collaboration_enabled
     state.room_name = snapshot.room_name
+    state.parent_room_id = snapshot.parent_room_id
+    state.fork_seq = snapshot.fork_seq
     state.pending = [j for j in state.pending if any(a.member_id==j.get('member_id') and a.admission_id==j.get('admission_id',a.admission_id) for a in state.ais)]
     if state.target is not None and (len(state.humans) != 1 or state.ai(state.target) is None):
         state.target = None

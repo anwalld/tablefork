@@ -229,3 +229,21 @@ def fork_filter(entries: list[dict], fork_seq: int) -> list[dict]:
     are fetched separately and appended after these.
     """
     return [entry for entry in entries if entry.get("seq", 0) <= fork_seq]
+
+
+async def parent_messages_until(pool: aiomysql.Pool, parent_room_id: int,
+                                fork_seq: int, count: int) -> list[dict]:
+    """The parent's newest messages at or before `fork_seq`, oldest first."""
+    if pool is None or parent_room_id <= 0:
+        return []
+    async with pool.acquire() as connection, connection.cursor() as cursor:
+        await cursor.execute(
+            "SELECT m.member_id, mem.display_name, m.content, m.seq FROM messages m "
+            "JOIN members mem ON mem.id = m.member_id "
+            "WHERE m.room_id = %s AND m.seq <= %s AND m.generation_outcome <> 'failed' "
+            "ORDER BY m.seq DESC LIMIT %s",
+            (parent_room_id, fork_seq, count),
+        )
+        rows = await cursor.fetchall()
+    return [{"member": {"id": row[0], "name": row[1]}, "content": row[2], "seq": row[3]}
+            for row in reversed(rows)]

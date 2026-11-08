@@ -39,6 +39,9 @@ message RoomSnapshot {
   repeated AiMember ais = 3;
   bool collaboration_enabled = 4;
   string room_name = 5;
+  // A breakout inherits its parent's history only up to fork_seq.
+  int64 parent_room_id = 6;
+  int64 fork_seq = 7;
 }
 
 message Sender {

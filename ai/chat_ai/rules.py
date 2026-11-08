@@ -53,6 +53,10 @@ class RoomState:
     # Room-level collaboration mode, reported by the chat server's snapshot.
     collaboration_enabled: bool = False
     room_name: str = ""
+    # For a breakout: the parent room and the fork point, so its context can
+    # include the parent's history only up to fork_seq.
+    parent_room_id: int = 0
+    fork_seq: int = 0
     # A step waiting for a human "继续"/"否决", when collaboration is on.
     # {id, kind, risk, initiator, deadline, status}
     # risk is "discuss"|"readonly"|"side_effect"; status is
@@ -73,6 +77,8 @@ class RoomState:
             "epoch": self.epoch, "last_trigger_seq": self.last_trigger_seq, "last_trigger_id": self.last_trigger_id,
             "collaboration_enabled": self.collaboration_enabled,
             "room_name": self.room_name,
+            "parent_room_id": self.parent_room_id,
+            "fork_seq": self.fork_seq,
             "pending_step": self.pending_step,
         }
 
@@ -89,6 +95,8 @@ class RoomState:
             last_trigger_id=data.get("last_trigger_id", ""),
             collaboration_enabled=data.get("collaboration_enabled", False),
             room_name=data.get("room_name", ""),
+            parent_room_id=data.get("parent_room_id", 0),
+            fork_seq=data.get("fork_seq", 0),
             pending_step=data.get("pending_step"),
         )
 
