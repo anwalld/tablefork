@@ -137,3 +137,18 @@ def test_build_system_prompt_unchanged_without_collaboration():
     assert "房间：作战室" not in prompt
     assert "alice" not in prompt
     assert prompt == "你是 Claude，聊天室中的独立AI角色，created by 。只以自己的身份说话。\n你好"
+
+
+from chat_ai.context import fork_filter
+
+
+def test_fork_filter_keeps_history_only_up_to_the_fork_point():
+    entries = [entry(1, "alice", f"msg {n}") | {"seq": n} for n in range(118, 123)]
+    kept = fork_filter(entries, 120)
+    assert [e["seq"] for e in kept] == [118, 119, 120]
+
+
+def test_fork_filter_missing_seq_counts_as_before_the_fork():
+    entries = [entry(1, "alice", "hi")]
+    assert fork_filter(entries, 120) == entries
+    assert fork_filter(entries, 0) == entries

@@ -219,3 +219,13 @@ def build_system_prompt(ai, persona: str, *, collaboration: bool,
         return base
     injected = "\n".join(part for part in (date_text(now), room_members_text(room_name, humans, ais)) if part)
     return base + "\n\n" + injected if injected else base
+
+
+def fork_filter(entries: list[dict], fork_seq: int) -> list[dict]:
+    """The parent's history up to the fork point, for a breakout's context.
+
+    A breakout inherits its parent's history only through `fork_seq`; later
+    parent messages do not enter the breakout, and the breakout's own messages
+    are fetched separately and appended after these.
+    """
+    return [entry for entry in entries if entry.get("seq", 0) <= fork_seq]
