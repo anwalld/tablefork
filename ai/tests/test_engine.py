@@ -527,3 +527,111 @@ async def test_queued_reply_targets_the_new_human_message_after_previous_final()
     await h.ai_saved(first, CLAUDE, [ALICE], [CLAUDE]); await h.settle()
     assert seen[-1][-1].role == 'user'
     assert 'new question' in seen[-1][-1].content
+
+
+def test_strip_self_name():
+    from chat_ai.engine import strip_self_name
+    assert strip_self_name("Claude：你好", "Claude") == "你好"
+    assert strip_self_name("  Claude: hi Claude: x", "Claude") == "hi Claude: x"
+    assert strip_self_name("Claudette: hi", "Claude") == "Claudette: hi"
+    assert strip_self_name("我是 Claude：hi", "Claude") == "我是 Claude：hi"
+
+
+async def test_own_name_prefix_is_removed_from_drafts_and_final_when_enabled():
+    h = Harness(strip_self_name=True)
+    await h.human_says(ALICE, "你好", [ALICE], [CLAUDE])
+    await h.settle()
+    final = h.of("final")[0]
+    assert final.content == "alice：你好"
+    chunks = h.of("chunk")
+    assert all(not c.snapshot.startswith("Claude") for c in chunks)
+    assert chunks[-1].snapshot == final.content
+    assert "".join(c.text for c in chunks) == final.content
+
+
+async def test_retrieved_messages_are_placed_before_the_newest_turn():
+    h = Harness(retrieval_enabled=True)
+    seen = {}
+
+    class Recording:
+        async def stream(self, **kwargs):
+            seen["messages"] = kwargs["messages"]
+            seen["cache_prefix"] = kwargs["cache_prefix"]
+            yield "ok"
+
+    async def related(pool, room_id, before_seq, text, top_k, max_chars):
+        seen["lookup"] = (room_id, before_seq, text, top_k, max_chars)
+        return [{"seq": 1, "name": "bob", "content": "火锅店在春熙路", "created_at_ms": 0}]
+
+    import chat_ai.engine as engine_module
+    original = engine_module.related_messages
+    engine_module.related_messages = related
+    h.engine.providers.create = lambda _: Recording()
+    try:
+        await h.cache_message(BOB[0], "bob", "older")
+        await h.human_says(ALICE, "上次那家火锅店叫什么", [ALICE], [CLAUDE])
+        await h.settle()
+    finally:
+        engine_module.related_messages = original
+    assert seen["lookup"] == (1, 1, "上次那家火锅店叫什么", 5, 1500)
+    contents = [m.content for m in seen["messages"]]
+    assert contents[-1] == "alice：上次那家火锅店叫什么"
+    assert contents[-2].startswith("（以下是本房间更早的相关聊天记录")
+    assert "bob：火锅店在春熙路" in contents[-2]
+    assert seen["cache_prefix"] is False
+
+
+async def test_retrieval_is_off_by_default():
+    h = Harness()
+
+    async def related(*args):
+        raise AssertionError("retrieval must stay off")
+
+    import chat_ai.engine as engine_module
+    original = engine_module.related_messages
+    engine_module.related_messages = related
+    try:
+        await h.human_says(ALICE, "上次那家火锅店", [ALICE], [CLAUDE])
+        await h.settle()
+    finally:
+        engine_module.related_messages = original
+    assert h.of("final")[0].content == "Claude: alice：上次那家火锅店"
+
+
+async def test_classified_refusal_is_not_retried():
+    h = Harness(classified_retry=True, generation_max_attempts=3)
+    await h.human_says(ALICE, "#refuse this", [ALICE], [CLAUDE])
+    await h.settle()
+    assert [n.code for n in h.of("notice")] == ["content_refused"]
+
+
+async def test_unclassified_refusal_keeps_the_old_retry():
+    h = Harness(generation_max_attempts=3)
+    await h.human_says(ALICE, "#refuse this", [ALICE], [CLAUDE])
+    await h.settle()
+    assert h.of("notice") == []
+    state = await h.engine._load(1)
+    assert state.active["status"] == "queued" and "context_halved" not in state.active
+
+
+async def test_rate_limit_waits_for_the_provider_hint():
+    h = Harness(classified_retry=True, generation_max_attempts=3, retry_base_seconds=0.1)
+    await h.human_says(ALICE, "#ratelimit", [ALICE], [CLAUDE])
+    await h.settle()
+    state = await h.engine._load(1)
+    assert state.active["status"] == "queued"
+    assert state.active["retry_at"] == pytest.approx(h.clock.now + 0.2)
+
+
+async def test_too_long_context_is_halved_once():
+    h = Harness(classified_retry=True, generation_max_attempts=3, context_messages=8)
+    for index in range(8):
+        await h.cache_message(BOB[0], "bob", f"old message number {index}")
+    await h.human_says(ALICE, "#toolong", [ALICE], [CLAUDE])
+    await h.settle()
+    state = await h.engine._load(1)
+    assert state.active["status"] == "queued" and state.active["context_halved"] is True
+    h.clock.now += 10
+    await h.engine.recover_work(); await h.settle()
+    # Half the window is under the fake provider's 100 character limit.
+    assert len(h.of("final")) == 1 and h.of("notice") == []

@@ -5,7 +5,7 @@ from typing import AsyncIterator
 import httpx
 import openai
 
-from .base import ChatMessage, KeyRejected, ProviderError
+from .base import ChatMessage, KeyRejected, ProviderError, classify, retry_after
 
 
 class OpenAiCompatible:
@@ -26,7 +26,8 @@ class OpenAiCompatible:
         )
 
     async def stream(
-        self, *, model: str, system: str, messages: list[ChatMessage], api_key: str, max_tokens: int
+        self, *, model: str, system: str, messages: list[ChatMessage], api_key: str, max_tokens: int,
+        cache_prefix: bool = False,
     ) -> AsyncIterator[str]:
         payload = [{"role": "system", "content": system}] + [
             {"role": m.role, "content": m.content} for m in messages
@@ -42,6 +43,9 @@ class OpenAiCompatible:
                     yield chunk.choices[0].delta.content
         except openai.AuthenticationError as e:
             raise KeyRejected(str(e)) from e
+        except openai.APIStatusError as e:
+            raise ProviderError(str(e), classify(e.status_code, str(e)),
+                                retry_after(e.response.headers)) from e
         except openai.APIError as e:
             raise ProviderError(str(e)) from e
 

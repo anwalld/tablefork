@@ -42,6 +42,14 @@ class Settings:
     generation_max_attempts: int = 3
     retry_base_seconds: float = 1.0
     work_lease_seconds: float = 10.0
+    # Optional context and retry behavior. Every default keeps the original.
+    strip_self_name: bool = False
+    context_block: int = 0
+    context_tokens: int = 0
+    retrieval_enabled: bool = False
+    retrieval_top_k: int = 5
+    retrieval_chars: int = 1500
+    classified_retry: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -77,4 +85,11 @@ class Settings:
             generation_max_attempts=max(1, _int("AI_GENERATION_MAX_ATTEMPTS", 3)),
             retry_base_seconds=max(0.1, _float("AI_RETRY_BASE_SECONDS", 1)),
             work_lease_seconds=max(1.0, _float("AI_WORK_LEASE_SECONDS", 10)),
+            strip_self_name=os.environ.get("AI_STRIP_SELF_NAME", "") == "1",
+            context_block=max(0, _int("AI_CONTEXT_BLOCK", 0)),
+            context_tokens=max(0, _int("AI_CONTEXT_TOKENS", 0)),
+            retrieval_enabled=os.environ.get("AI_RETRIEVAL_ENABLED", "") == "1",
+            retrieval_top_k=max(1, min(20, _int("AI_RETRIEVAL_TOP_K", 5))),
+            retrieval_chars=max(100, _int("AI_RETRIEVAL_CHARS", 1500)),
+            classified_retry=os.environ.get("AI_CLASSIFIED_RETRY", "") == "1",
         )

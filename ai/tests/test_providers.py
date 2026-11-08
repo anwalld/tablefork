@@ -189,3 +189,76 @@ async def test_factory_uses_non_thinking_only_for_deepseek(name, thinking):
         provider.http_client = transport
         assert await collect(provider) == ["好"]
     assert seen.get("thinking") == thinking
+
+
+async def test_openai_rate_limit_is_classified_with_retry_after():
+    def handler(request):
+        return httpx.Response(429, headers={"retry-after": "7"},
+                              json={"error": {"message": "slow down", "type": "rate_limit"}})
+
+    provider = OpenAiCompatible("https://api.openai.com/v1", 10, client(handler))
+    with pytest.raises(ProviderError) as raised:
+        await collect(provider)
+    assert raised.value.kind == "rate_limit"
+    assert raised.value.retry_after == 7
+
+
+async def test_openai_context_too_long_is_classified():
+    def handler(request):
+        return httpx.Response(400, json={"error": {"message": "This model's maximum context length is 8192 tokens",
+                                                   "code": "context_length_exceeded"}})
+
+    provider = OpenAiCompatible("https://api.openai.com/v1", 10, client(handler))
+    with pytest.raises(ProviderError) as raised:
+        await collect(provider)
+    assert raised.value.kind == "context_too_long"
+
+
+async def test_anthropic_overload_is_a_rate_limit():
+    def handler(request):
+        return httpx2.Response(529, json={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})
+
+    provider = AnthropicProvider(10, http_client=client2(handler))
+    with pytest.raises(ProviderError) as raised:
+        await collect(provider)
+    assert raised.value.kind == "rate_limit"
+
+
+async def test_gemini_blocked_prompt_is_refused():
+    provider = GeminiProvider(10)
+
+    async def generate(**kwargs):
+        async def pieces():
+            yield SimpleNamespace(text=None, prompt_feedback=SimpleNamespace(block_reason="SAFETY"))
+        return pieces()
+
+    fake = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=generate)))
+    provider._client = lambda api_key: fake
+    with pytest.raises(ProviderError) as raised:
+        await collect(provider)
+    assert raised.value.kind == "refused"
+
+
+def test_classify_and_retry_after():
+    from chat_ai.providers.base import classify, retry_after
+    assert classify(429, "") == "rate_limit"
+    assert classify(400, "prompt is too long: 300000 tokens") == "context_too_long"
+    assert classify(400, "blocked by content_filter") == "refused"
+    assert classify(400, "bad request") == "other"
+    assert classify(500, "context length") == "other"
+    assert retry_after({"retry-after": "2.5"}) == 2.5
+    assert retry_after({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}) is None
+    assert retry_after(None) is None
+
+
+def test_anthropic_cache_marks_system_and_history_before_the_newest_turn():
+    from chat_ai.providers.anthropic_provider import request_parts
+    messages = [ChatMessage("user", "a：1"), ChatMessage("assistant", "2"), ChatMessage("user", "a：3")]
+    system, turns = request_parts("s", messages, False)
+    assert system == "s" and all(isinstance(t["content"], str) for t in turns)
+    system, turns = request_parts("s", messages, True)
+    assert system == [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]
+    assert turns[1]["content"] == [{"type": "text", "text": "2", "cache_control": {"type": "ephemeral"}}]
+    assert turns[0]["content"] == "a：1" and turns[2]["content"] == "a：3"
+    _, single = request_parts("s", messages[:1], True)
+    assert single == [{"role": "user", "content": "a：1"}]

@@ -4,7 +4,21 @@ from typing import AsyncIterator
 
 import anthropic
 
-from .base import ChatMessage, KeyRejected, ProviderError, alternate
+from .base import ChatMessage, KeyRejected, ProviderError, alternate, classify, retry_after
+
+_CACHE = {"type": "ephemeral"}
+
+
+def request_parts(system: str, messages: list[ChatMessage], cache_prefix: bool):
+    """System and messages for the API; with cache_prefix, marks the stable prefix."""
+    turns = [{"role": m.role, "content": m.content} for m in alternate(messages)]
+    if not cache_prefix:
+        return system, turns
+    if len(turns) >= 2:
+        # Everything before the newest turn repeats on the next request.
+        turns[-2] = {"role": turns[-2]["role"],
+                     "content": [{"type": "text", "text": turns[-2]["content"], "cache_control": _CACHE}]}
+    return [{"type": "text", "text": system, "cache_control": _CACHE}], turns
 
 
 class AnthropicProvider:
@@ -23,13 +37,15 @@ class AnthropicProvider:
         )
 
     async def stream(
-        self, *, model: str, system: str, messages: list[ChatMessage], api_key: str, max_tokens: int
+        self, *, model: str, system: str, messages: list[ChatMessage], api_key: str, max_tokens: int,
+        cache_prefix: bool = False,
     ) -> AsyncIterator[str]:
         try:
+            system_part, turns = request_parts(system, messages, cache_prefix)
             response = await self._client(api_key).messages.create(
                 model=model,
-                system=system,
-                messages=[{"role": m.role, "content": m.content} for m in alternate(messages)],
+                system=system_part,
+                messages=turns,
                 max_tokens=max_tokens,
                 stream=True,
             )
@@ -38,6 +54,9 @@ class AnthropicProvider:
                     yield event.delta.text
         except anthropic.AuthenticationError as e:
             raise KeyRejected(str(e)) from e
+        except anthropic.APIStatusError as e:
+            raise ProviderError(str(e), classify(e.status_code, str(e)),
+                                retry_after(e.response.headers)) from e
         except anthropic.APIError as e:
             raise ProviderError(str(e)) from e
 
