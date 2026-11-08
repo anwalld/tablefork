@@ -298,12 +298,3 @@ async def save_memories(pool, room_id: int, source_seq: int, memories: list[dict
                     "INSERT INTO user_memories (user_id, layer, content, source_room_id, created_at_ms) "
                     "VALUES (%s,%s,%s,%s,%s)", (m["user_id"], m["layer"], m["content"], room_id, now))
         await conn.commit()
-
-
-async def room_humans(pool, room_id: int) -> dict[int, str]:
-    """Current human members: user_id -> display name."""
-    async with pool.acquire() as conn, conn.cursor() as cur:
-        await cur.execute(
-            "SELECT m.user_id, m.display_name FROM room_members rm JOIN members m ON m.id=rm.member_id "
-            "WHERE rm.room_id=%s AND m.type='human'", (room_id,))
-        return {int(r[0]): r[1] for r in await cur.fetchall()}

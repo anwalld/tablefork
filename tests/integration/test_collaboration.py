@@ -6,7 +6,7 @@ def test_collaboration_switch_requires_owner_or_admin(make_user, make_room):
     member = make_user()
     admin = make_user()
     room = make_room(owner, member, admin)
-    assert owner.request("PUT", f"/api/rooms/{room}/owner", json={"username": admin.username}).status_code == 200
+    assert owner.request("PUT", f"/api/rooms/{room}/admins/{admin.username}").status_code == 200
 
     # 普通成员无权切换
     response = member.request("PUT", f"/api/rooms/{room}/collaboration", json={"enabled": True})

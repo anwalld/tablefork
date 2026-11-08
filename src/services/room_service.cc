@@ -264,6 +264,9 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         "  JOIN room_members m ON m.room_id = r.id WHERE m.member_id = ?"
         "  UNION ALL"
         "  SELECT c.id, c.parent_room_id FROM rooms c JOIN visible v ON c.parent_room_id = v.id"
+        "), listed AS ("
+        // Rooms the caller was invited to but has not joined are listed too.
+        "  SELECT id FROM visible UNION SELECT room_id FROM room_invites WHERE user_id = ?"
         ") "
         "SELECT r.id, r.name, r.last_seq, r.parent_room_id, m.member_id, "
         "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
@@ -273,11 +276,12 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         " AND mm.member_id = ? AND mm.seq > COALESCE(m.read_seq, r.last_seq)) AS mention_seq, "
         "       (SELECT COUNT(*) FROM room_members c WHERE c.room_id = r.id) "
         "           AS member_count "
-        "FROM visible v "
+        "FROM listed v "
         "JOIN rooms r ON r.id = v.id "
         "LEFT JOIN room_members m ON m.room_id = r.id AND m.member_id = ? "
         "ORDER BY r.id DESC LIMIT ? OFFSET ?",
         session.memberId,
+        session.userId,
         session.memberId,
         session.memberId,
         session.memberId,

@@ -1,6 +1,7 @@
 #include "services/message_service.h"
 
 #include <algorithm>
+#include <map>
 #include <drogon/drogon.h>
 #include <sstream>
 #include <set>
@@ -192,7 +193,10 @@ drogon::Task<StoredMessage> store(Author author,
     {
         throw ApiError::roomNotFound();
     }
-    if (author.type == "human" && rooms[0]["status"].as<std::string>() == "closed")
+    // A closed breakout takes no new talk, but may still receive the
+    // conclusion of a breakout below it that ended in the same cascade.
+    if (author.type == "human" && rooms[0]["status"].as<std::string>() == "closed" &&
+        clientMsgId.rfind("breakout-conclusion-", 0) != 0)
         throw ApiError::invalidArgument("breakout has ended");
     // Speaking in a breakout is allowed for a joining member, or for an
     // owner/admin of any ancestor room (the parent splits the group).
@@ -352,47 +356,144 @@ drogon::Task<StoredMessage> store(Author author,
 }
 }  // namespace
 
+namespace
+{
+// /pause, /resume, /end inside a breakout. Allowed for the breakout's
+// initiator (its owner) and for owners/admins of any room above it; anyone
+// else's command stays an ordinary message.
+drogon::Task<> controlBreakout(const Session &session, int64_t roomId, const std::string &command)
+{
+    auto db = drogon::app().getDbClient();
+    const auto allowed = co_await db->execSqlCoro(
+        "SELECT 1 FROM rooms b JOIN room_members m ON m.member_id = ? "
+        "WHERE b.id = ? AND b.parent_room_id IS NOT NULL AND b.status <> 'closed' AND ("
+        "  (m.room_id = b.id AND m.role = 'owner') OR"
+        "  (m.role IN ('owner','admin') AND m.room_id IN ("
+        "    WITH RECURSIVE chain AS ("
+        "      SELECT parent_room_id AS id FROM rooms WHERE id = ?"
+        "      UNION ALL SELECT r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.id"
+        "    ) SELECT id FROM chain))) LIMIT 1",
+        session.memberId, roomId, roomId);
+    if (allowed.empty()) co_return;
+    if (command == "end")
+    {
+        // The breakout and everything below it end; each wraps up with the
+        // conclusion it has so far.
+        const auto tree = co_await db->execSqlCoro(
+            "WITH RECURSIVE tree AS (SELECT ? AS id UNION ALL "
+            "  SELECT r.id FROM rooms r JOIN tree t ON r.parent_room_id = t.id) "
+            "SELECT r.id FROM rooms r JOIN tree t ON t.id = r.id WHERE r.status <> 'closed'", roomId);
+        for (const auto &row : tree)
+        {
+            const auto id = row["id"].as<int64_t>();
+            co_await db->execSqlCoro("UPDATE rooms SET status = 'closed' WHERE id = ?", id);
+            reportBreakoutClosed(id, session.memberId, session.userId);
+        }
+        co_return;
+    }
+    // Pausing freezes AI turns in the breakout (the running reply finishes);
+    // resuming lets them continue, as cgroup freezing does.
+    const bool paused = command == "pause";
+    co_await db->execSqlCoro("INSERT IGNORE INTO room_ai_controls (room_id) VALUES (?)", roomId);
+    co_await db->execSqlCoro(
+        "UPDATE room_ai_controls c JOIN rooms r ON r.id = c.room_id "
+        "SET c.ignore_through_seq = r.last_seq, c.paused = ?, c.revision = c.revision + 1 "
+        "WHERE c.room_id = ? AND c.paused <> ?", paused, roomId, paused);
+    co_await reportControlChanged(roomId, session.request);
+    Json::Value event;
+    event["type"] = "ai_state_changed";
+    event["room_id"] = Json::Int64(roomId);
+    co_await RoomHub::instance().publish(roomId, toJsonString(event), session.request);
+}
+}  // namespace
+
 drogon::Task<StoredMessage> MessageService::save(const Session &session,
                                                  int64_t roomId,
                                                  std::string clientMsgId,
                                                  std::string content, Json::Value mentionIds)
 {
+    // Text commands. The command is the first word; English names, with the
+    // Chinese ones kept as aliases. They act only in collaboration rooms
+    // (breakout controls only inside a breakout); elsewhere they are text.
+    static const std::map<std::string, std::string> kCommands{
+        {"/vote", "vote"}, {"/表决", "vote"},
+        {"/veto", "veto"}, {"/否决", "veto"},
+        {"/force-pass", "force_pass"}, {"/强制通过", "force_pass"},
+        {"/breakout", "breakout"}, {"/小会", "breakout"},
+        {"/pause", "pause"}, {"/暂停小会", "pause"},
+        {"/resume", "resume"}, {"/恢复小会", "resume"},
+        {"/end", "end"}, {"/结束小会", "end"},
+    };
+    std::string command, argument;
+    if (!content.empty() && content[0] == '/')
+    {
+        const auto space = content.find_first_of(" \t\r\n");
+        const auto found = kCommands.find(content.substr(0, space));
+        if (found != kCommands.end())
+        {
+            command = found->second;
+            if (space != std::string::npos)
+            {
+                argument = content.substr(space + 1);
+                const auto first = argument.find_first_not_of(" \t\r\n");
+                argument = first == std::string::npos ? "" : argument.substr(first);
+            }
+        }
+    }
     std::string response;
-    if (content == "继续") response = "continue";
-    else if (content == "否决") response = "cancel";
-    const bool councilStart = content.rfind("/表决", 0) == 0;
-    std::string councilVerdict;
-    if (content == "/否决") councilVerdict = "veto";
-    else if (content == "/强制通过") councilVerdict = "force_pass";
-    // Breakouts are a collaboration feature; elsewhere "/小会" is just text.
-    bool breakoutStart = content.rfind("/小会", 0) == 0;
-    if (breakoutStart)
+    if (content == "继续" || content == "/continue") response = "continue";
+    else if (content == "否决" || content == "/cancel") response = "cancel";
+    bool collaborating = false, inBreakout = false;
+    if (!command.empty() || !response.empty())
     {
         const auto mode = co_await drogon::app().getDbClient()->execSqlCoro(
-            "SELECT collaboration_enabled, status FROM rooms WHERE id = ?", roomId);
-        breakoutStart = !mode.empty() && mode[0]["collaboration_enabled"].as<bool>() &&
-                        mode[0]["status"].as<std::string>() == "active";
+            "SELECT collaboration_enabled, status, parent_room_id FROM rooms WHERE id = ?", roomId);
+        if (!mode.empty() && mode[0]["status"].as<std::string>() == "active")
+        {
+            collaborating = mode[0]["collaboration_enabled"].as<bool>();
+            inBreakout = !mode[0]["parent_room_id"].isNull();
+        }
     }
+    if (!collaborating) response.clear();
+    const bool councilStart = collaborating && command == "vote" && !argument.empty();
+    std::string councilVerdict;
+    if (collaborating && (command == "veto" || command == "force_pass")) councilVerdict = command;
+    const bool breakoutStart = collaborating && command == "breakout";
     std::vector<int64_t> breakoutMembers;
     std::string breakoutTopic;
     if (breakoutStart)
     {
         for (const auto &id : mentionIds) if (id.isInt64()) breakoutMembers.push_back(id.asInt64());
-        breakoutTopic = content.size() > 3 ? content.substr(3) : "";
-        // 去掉 @提及，只留议题文本。
+        // The topic is the argument without the @mentions.
         std::string cleaned;
-        std::istringstream stream(breakoutTopic);
+        std::istringstream stream(argument);
         std::string word;
         while (stream >> word)
             if (word[0] != '@') { if (!cleaned.empty()) cleaned += ' '; cleaned += word; }
         breakoutTopic = cleaned.empty() ? "小会" : cleaned;
     }
+    // Breakout controls, typed inside the breakout itself.
+    std::string breakoutControl;
+    if (inBreakout && (command == "pause" || command == "resume" || command == "end")) breakoutControl = command;
     auto message = co_await store(Author{session.memberId, session.username, "human"},
                               roomId,
                               std::move(clientMsgId),
                               std::move(content), session.request, session.userId, std::move(mentionIds));
     if (breakoutStart)
-        co_await RoomService::createBreakout(session, roomId, breakoutTopic, std::move(breakoutMembers));
+    {
+        const auto breakout = co_await RoomService::createBreakout(session, roomId, breakoutTopic, std::move(breakoutMembers));
+        // Everyone in the parent sees the breakout start; it is listed for
+        // them right away (read-only for those who did not join).
+        Json::Value event;
+        event["type"] = "breakout_started";
+        event["room_id"] = Json::Int64(roomId);
+        event["breakout_id"] = breakout["id"];
+        event["topic"] = breakout["name"];
+        event["content"] = "已开小会「" + breakout["name"].asString() + "」，房间里的人都可以打开旁观。";
+        co_await RoomHub::instance().publish(roomId, toJsonString(event), session.request);
+    }
+    if (!breakoutControl.empty())
+        co_await controlBreakout(session, roomId, breakoutControl);
     if (!response.empty())
     {
         const auto role = co_await drogon::app().getDbClient()->execSqlCoro(
@@ -404,8 +505,7 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
     }
     if (councilStart)
     {
-        // "表决 议题" → topic is everything after the command.
-        co_await reportCouncilStart(roomId, message.json["content"].asString(), session.memberId);
+        co_await reportCouncilStart(roomId, argument, session.memberId);
     }
     else if (!councilVerdict.empty())
     {
@@ -414,7 +514,9 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
             roomId, session.memberId);
         const bool privileged = !role.empty() &&
             (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
-        co_await reportCouncilOverride(roomId, councilVerdict, session.memberId, privileged);
+        // Only owners and admins can overrule a ballot; anyone else's
+        // command stays an ordinary message.
+        if (privileged) co_await reportCouncilOverride(roomId, councilVerdict, session.memberId, privileged);
     }
     co_return message;
 }

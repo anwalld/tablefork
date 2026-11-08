@@ -5,6 +5,7 @@ import fakeredis
 from chat_ai import recall
 from chat_ai.context import allocate
 from chat_ai.engine import Engine
+from chat_ai.rules import Human, RoomState
 
 from test_engine import MemoryKeys, settings
 
@@ -111,18 +112,24 @@ class Store:
         async def save_memories(pool, room_id, seq, memories):
             for m in memories:
                 (self.room if m["user_id"] is None else self.users).append(m)
-        async def room_humans(pool, room_id): return dict(self.humans)
-
         for name, fn in list(locals().items()):
             if callable(fn) and name != "self":
                 monkeypatch.setattr(recall, name, fn)
 
 
-def engine_with(replies, **overrides):
+def engine_with(replies, humans=((10, 1, "alice"),), **overrides):
     provider = Scripted(replies)
     engine = Engine(settings(summary_enabled=True, memory_enabled=True, summary_block=5, **overrides),
                     fakeredis.FakeAsyncRedis(decode_responses=True), object(),
                     MemoryKeys({(1, "deepseek"): "fake-d"}), {}, provider, lambda action: None)
+    engine.humans = [Human(*h) for h in humans]
+    real_load = engine._load
+
+    async def load(room_id):
+        state = await real_load(room_id)
+        state.humans = list(engine.humans)
+        return state
+    engine._load = load
     return engine, provider
 
 
@@ -173,12 +180,11 @@ async def test_failed_summary_keeps_the_cursor_for_next_time(monkeypatch):
 async def test_recall_is_off_outside_collaboration(monkeypatch):
     Store(monkeypatch, [], {1: "alice"})
     engine, _ = engine_with([])
-    from chat_ai.rules import RoomState
     assert await engine._recall(1, RoomState(collaboration_enabled=False)) == ("", [], [])
 
 
 async def test_recall_injects_only_current_members_memories(monkeypatch):
-    store = Store(monkeypatch, [], {1: "alice"})       # bob (user 2) is not in the room
+    Store(monkeypatch, [], {1: "alice"})
     calls = []
 
     async def load_user_memories(pool, users, per_user=10):
@@ -186,6 +192,6 @@ async def test_recall_injects_only_current_members_memories(monkeypatch):
         return []
     monkeypatch.setattr(recall, "load_user_memories", load_user_memories)
     engine, _ = engine_with([])
-    from chat_ai.rules import RoomState
-    await engine._recall(1, RoomState(collaboration_enabled=True))
+    # bob (user 2) has memories somewhere, but only alice is in this room.
+    await engine._recall(1, RoomState(collaboration_enabled=True, humans=[Human(10, 1, "alice")]))
     assert calls == [{1: "alice"}]

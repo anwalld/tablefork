@@ -10,7 +10,7 @@ def _collaborate(owner, room):
 
 
 def _breakout(socket, db, room, topic):
-    frame = socket.post(room, f"/小会 {topic}")
+    frame = socket.post(room, f"/breakout {topic}")
     assert frame["type"] == "ack", frame
     with db.cursor() as cursor:
         cursor.execute("SELECT id FROM rooms WHERE parent_room_id=%s AND topic=%s", (room, topic))
@@ -23,7 +23,7 @@ def test_breakout_needs_collaboration(make_user, make_room, make_socket, db):
     owner = make_user()
     room = make_room(owner)
     socket = make_socket(owner)
-    assert socket.post(room, "/小会 不该创建")["type"] == "ack"
+    assert socket.post(room, "/breakout 不该创建")["type"] == "ack"
     with db.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM rooms WHERE parent_room_id=%s", (room,))
         assert cursor.fetchone()[0] == 0
@@ -135,3 +135,39 @@ def test_knowledge_is_room_private_and_deletable_by_uploader_or_admin(make_user,
     assert response.status_code == 403
     assert owner.request("DELETE", f"/api/rooms/{room}/knowledge/{document}").status_code == 200
     assert member.get(f"/api/rooms/{room}/knowledge").json()["documents"] == []
+
+
+def test_parent_sees_breakout_start(make_user, make_room, make_socket, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    _collaborate(owner, room)
+    watcher = make_socket(member)
+    watcher.subscribe(room)
+    child = _breakout(make_socket(owner), db, room, "看日志")
+    event = watcher.expect("breakout_started", timeout=5)
+    assert event["breakout_id"] == child and event["topic"] == "看日志"
+
+
+def test_breakout_controls_need_initiator_or_parent_admin(make_user, make_room, make_socket, db):
+    owner, member = make_user(), make_user()
+    room = make_room(owner, member)
+    _collaborate(owner, room)
+    member_socket = make_socket(member)
+    child = _breakout(member_socket, db, room, "成员发起")       # member is the initiator
+    owner_socket = make_socket(owner)
+
+    def paused():
+        with db.cursor() as cursor:
+            cursor.execute("SELECT paused FROM room_ai_controls WHERE room_id=%s", (child,))
+            row = cursor.fetchone()
+            return bool(row and row[0])
+
+    assert member_socket.post(child, "/pause")["type"] == "ack"
+    assert paused()
+    # The parent's owner is not in the breakout but may still resume and end it.
+    assert owner_socket.post(child, "/resume")["type"] == "ack"
+    assert not paused()
+    assert owner_socket.post(child, "/end")["type"] == "ack"
+    with db.cursor() as cursor:
+        cursor.execute("SELECT status FROM rooms WHERE id=%s", (child,))
+        assert cursor.fetchone()[0] == "closed"

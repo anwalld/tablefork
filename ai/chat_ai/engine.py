@@ -33,6 +33,7 @@ GOODBYE_PROMPT = "（对方很久没有回复了。请简短、自然地道个�
 MAX_RETRY_AFTER = 60
 # How long to wait before checking that a sent breakout conclusion was stored.
 CONCLUSION_RECHECK = 30
+CONCLUSION_MAX_SENDS = 20
 
 
 def strip_self_name(text: str, name: str) -> str:
@@ -770,9 +771,9 @@ class Engine:
             if settings.memory_enabled:
                 rooms = [room_id] + ([state.parent_room_id] if state.parent_room_id else [])
                 room_memories = await recall.load_room_memories(self.pool, rooms)
-                # Only current members' memories: they never leave their rooms.
-                humans = await recall.room_humans(self.pool, room_id)
-                user_memories = await recall.load_user_memories(self.pool, humans)
+                # Only the humans in the current snapshot: a user's memories
+                # never reach a room they are not in.
+                user_memories = await recall.load_user_memories(self.pool, _human_names(state))
             return summary, room_memories, user_memories
         except Exception as error:  # noqa: BLE001 - recall never blocks a reply
             log.warning('recall for room %s failed: %s', room_id, type(error).__name__)
@@ -828,7 +829,7 @@ class Engine:
 
     async def _extract_memories(self, room_id, text, source_seq, key):
         """Gatekeeper first; extraction only for the layers it lets through."""
-        humans = await recall.room_humans(self.pool, room_id)
+        humans = _human_names(await self._load(room_id))
         existing = recall.existing_text(await recall.load_room_memories(self.pool, [room_id]),
                                         await recall.load_user_memories(self.pool, humans))
         gate = await self._recall_call(key, recall.gate_system(existing), text, 400)
@@ -1048,7 +1049,12 @@ class Engine:
             names = await self._participant_names(room_id, state)
             content = breakout.conclusion_content(state.room_name or '小会', names, summary)
             content += f"\n（小会 #{room_id} 的全过程可在房间列表中打开查看）"
-        elif await self._conclusion_stored(room_id, state.parent_room_id):
+        elif (await self._conclusion_stored(room_id, state.parent_room_id)
+              or conclusion.get('sends', 0) >= CONCLUSION_MAX_SENDS):
+            # Stored, or the parent keeps refusing it (say the initiator left):
+            # stop resending either way; the breakout stays readable.
+            if conclusion.get('sends', 0) >= CONCLUSION_MAX_SENDS:
+                log.warning('breakout %s conclusion was never stored', room_id)
             async with self._room(room_id) as current:
                 if current.conclusion is not None:
                     current.conclusion['delivered'] = True
@@ -1060,6 +1066,7 @@ class Engine:
             if not current.conclusion.get('content'):
                 current.conclusion['content'] = content
             content = current.conclusion['content']
+            current.conclusion['sends'] = current.conclusion.get('sends', 0) + 1
             # Without SQL there is nothing to confirm against.
             current.conclusion['delivered'] = self.pool is None
             current.timer_due = None if self.pool is None else self.clock() + CONCLUSION_RECHECK
@@ -1075,14 +1082,7 @@ class Engine:
             return await cur.fetchone() is not None
 
     async def _participant_names(self, room_id, state):
-        names = []
-        if self.pool is not None:
-            async with self.pool.acquire() as conn, conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT m.display_name FROM room_members rm JOIN members m ON m.id=rm.member_id "
-                    "WHERE rm.room_id=%s AND m.type='human' ORDER BY rm.joined_at", (room_id,))
-                names = [row[0] for row in await cur.fetchall()]
-        return names + [ai.name for ai in state.ais]
+        return [h.name for h in state.humans if h.name] + [ai.name for ai in state.ais]
 
     async def _summarize(self, room_id, state, payer):
         """One model call over the breakout's own messages, paid by `payer`.
@@ -1460,7 +1460,7 @@ class Engine:
 
 
 def _apply_snapshot(state, snapshot):
-    state.humans = [rules.Human(h.member_id, h.user_id) for h in snapshot.humans]
+    state.humans = [rules.Human(h.member_id, h.user_id, h.name) for h in snapshot.humans]
     state.ais = [rules.RoomAi(a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy or not a.model_slug) for a in snapshot.ais]
     state.collaboration_enabled = snapshot.collaboration_enabled
     state.room_name = snapshot.room_name
@@ -1470,3 +1470,8 @@ def _apply_snapshot(state, snapshot):
     if state.target is not None and (len(state.humans) != 1 or state.ai(state.target) is None):
         state.target = None
         state.timer_due = None
+
+
+def _human_names(state):
+    """user_id -> name for the humans in the room's latest snapshot."""
+    return {h.user_id: h.name or f"成员{h.member_id}" for h in state.humans}

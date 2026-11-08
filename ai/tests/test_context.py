@@ -152,3 +152,12 @@ def test_fork_filter_missing_seq_counts_as_before_the_fork():
     entries = [entry(1, "alice", "hi")]
     assert fork_filter(entries, 120) == entries
     assert fork_filter(entries, 0) == entries
+
+
+def test_collaboration_prompt_names_the_humans_from_the_snapshot():
+    from chat_ai.context import build_system_prompt
+    from chat_ai.rules import Human, RoomAi
+    ai = RoomAi(100, "claude", "anthropic", "Claude", persona="分析日志")
+    prompt = build_system_prompt(ai, "人设", collaboration=True, room_name="排障",
+                                 humans=[Human(10, 1, "alice")], ais=[ai])
+    assert "在场的人类成员：alice" in prompt

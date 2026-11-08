@@ -57,7 +57,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == [str(version) for version in range(1, 12)]
+    assert [version for version, _ in rows] == [str(version) for version in range(1, 17)]
     assert all(success for _, success in rows)
 
 
@@ -126,6 +126,12 @@ def ai_db():
         "SELECT COUNT(*) FROM ai_profiles",
         "SELECT COUNT(*) FROM messages",
         "SELECT id, type, display_name FROM members LIMIT 1",
+        "SELECT COUNT(*) FROM room_council",
+        "SELECT COUNT(*) FROM room_summaries",
+        "SELECT COUNT(*) FROM room_memories",
+        "SELECT COUNT(*) FROM user_memories",
+        "SELECT COUNT(*) FROM knowledge_documents",
+        "SELECT COUNT(*) FROM knowledge_chunks",
     ],
 )
 def test_ai_account_reads_what_it_needs(ai_db, query):
@@ -139,6 +145,9 @@ def test_ai_account_reads_what_it_needs(ai_db, query):
         "SELECT COUNT(*) FROM users",
         "SELECT user_id FROM members LIMIT 1",
         "SELECT COUNT(*) FROM rooms",
+        "SELECT COUNT(*) FROM room_members",
+        "DELETE FROM room_memories",
+        "INSERT INTO knowledge_documents (room_id) VALUES (1)",
         "DELETE FROM user_api_keys",
         "UPDATE messages SET content = content WHERE 1 = 0",
     ],
