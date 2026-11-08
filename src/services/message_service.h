@@ -44,6 +44,10 @@ class MessageService
                                                      std::string generationId,
                                                      std::string content, std::string admissionId = "", uint32_t attempt = 0);
 
+    // Stores a breakout's conclusion in its parent room (once per breakout)
+    // and closes the breakout.
+    static drogon::Task<StoredMessage> saveBreakoutConclusion(int64_t breakoutId, std::string content);
+
     // Updates the hot cache and publishes. The message is already durable, so
     // failures are only logged; clients backfill by seq.
     static drogon::Task<> distribute(const StoredMessage &message, RequestContextPtr context = {});

@@ -28,6 +28,8 @@ MAX_CONTENT = 4000
 PROACTIVE_PROMPT = "（对方有一阵子没说话了。请你自然地主动说点什么，比如接着刚才的话题，或者问候一下。）"
 GOODBYE_PROMPT = "（对方很久没有回复了。请简短、自然地道个别，说下次再聊。）"
 MAX_RETRY_AFTER = 60
+# How long to wait before checking that a sent breakout conclusion was stored.
+CONCLUSION_RECHECK = 30
 
 
 def strip_self_name(text: str, name: str) -> str:
@@ -124,8 +126,12 @@ class Engine:
             return
 
         if body == 'breakout_closed':
-            await self._conclude_breakout(room_id)
+            payer = [value.closed_by_member_id, value.closed_by_user_id]
+            async with self._room(room_id, seen) as state:
+                if state is not None and not state.deleted:
+                    self._begin_conclusion(state, payer)
             await ack()
+            await self._advance_conclusion(room_id)
             return
 
         # This can fail. No receipt has been recorded, so resending is safe.
@@ -156,6 +162,11 @@ class Engine:
                         self._finish_failed(state, state.active)
                 elif body == 'members_changed':
                     _apply_snapshot(state, value.room)
+                elif state.conclusion is not None:
+                    # A wrapping-up breakout schedules nothing new; a reply
+                    # that was already running just finishes.
+                    if value.sender.is_ai and state.active and state.active['id'] == value.generation_id:
+                        state.active = None
                 elif body == 'message_saved' and not value.sender.is_ai and (paused or (cutoff and value.seq <= cutoff)):
                     state.pending.clear()
                     state.timer_due = None
@@ -233,6 +244,9 @@ class Engine:
             # Fetching keys may take time. Recheck the timer under the same
             # room lock used by human messages before accepting this firing.
             state = await self._load(room_id)
+            if state.conclusion is not None:
+                await self._advance_conclusion(room_id)
+                continue
             if self.controls:
                 paused, cutoff = await self.controls.room(room_id)
                 if paused or (cutoff and state.last_trigger_seq <= cutoff):
@@ -282,6 +296,15 @@ class Engine:
         task.add_done_callback(self.tasks.discard)
 
     async def _claim(self, room_id):
+        concluding = []
+        try:
+            return await self._claim_inner(room_id, concluding)
+        finally:
+            # After the room lock is released, so it sees the committed state.
+            if concluding:
+                self._spawn(self._advance_conclusion(room_id))
+
+    async def _claim_inner(self, room_id, concluding):
         job = None
         exhausted = None
         paused, cutoff = await self.controls.room(room_id) if self.controls else (False, 0)
@@ -305,10 +328,8 @@ class Engine:
                 if paused:
                     state.timer_due = None
                     state.target = None
-            if state.active is None and state.pending and state.parent_room_id:
-                if not await self._spend_budget(room_id):
-                    state.pending.clear()
-                    return None
+            if state.conclusion is not None:
+                state.pending.clear()
             if state.active is None:
                 # Messages queued before generation starts share one reply
                 # per AI. The latest trigger supplies the payer and epoch.
@@ -321,6 +342,15 @@ class Engine:
                 state.active = pending.pop(0) if pending else None
                 state.pending = pending
             active = state.active
+            if (active and active['attempt'] == 0 and active['status'] == 'queued'
+                    and active['kind'] != 'vote' and state.parent_room_id
+                    and not await self._charge(room_id, state, active['id'])):
+                # Out of budget at some level: no more AI turns, wrap up.
+                self._begin_conclusion(state, active['payer'])
+                state.active = None
+                state.pending.clear()
+                active = None
+                concluding.append(room_id)
             if active and active['id'] == durable_id and durable:
                 active['attempt'] = max(active['attempt'], durable.attempt)
             if active and active['id'] == durable_id and durable and durable.phase != 'generating':
@@ -726,46 +756,110 @@ class Engine:
         if ballot.complete():
             await self._finish_ballot(room_id, ballot)
 
-    async def _budget_chain(self, room_id):
-        """room_id -> ... -> root, innermost first, for cgroup-style spend."""
-        async with self.pool.acquire() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "WITH RECURSIVE chain AS ("
-                "  SELECT id, parent_room_id FROM rooms WHERE id=%s"
-                "  UNION ALL"
-                "  SELECT r.id, r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.parent_room_id"
-                ") SELECT id FROM chain", (room_id,))
-            rows = await cur.fetchall()
-        return [row[0] for row in rows]
+    def _spawn(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
-    async def _spend_budget(self, room_id) -> bool:
-        """Charges one reply to every level of a breakout's chain.
-
-        Returns False and concludes the breakout when any level is exhausted.
-        """
+    async def _charge(self, room_id, state, generation_id) -> bool:
+        """Charges one AI reply to every breakout level above and including
+        this room (the root room has no budget). False when any is spent."""
         if not self.settings.breakout_reply_budget:
             return True
-        chain = await self._budget_chain(room_id)
-        budgets = []
-        for rid in chain:
-            raw = await self.cache.get(f'budget:{rid}')
-            budgets.append(int(raw) if raw else self.settings.breakout_reply_budget)
-        after = breakout.deduct(budgets)
-        if after == budgets:
-            await self._conclude_breakout(room_id)
-            return False
-        for rid, value in zip(chain, after):
-            await self.cache.set(f'budget:{rid}', value)
-        return True
+        chain = [room_id]
+        parent = state.parent_room_id
+        while parent and len(chain) < 16:
+            upper = await self._load(parent)
+            if not upper.parent_room_id:
+                break  # the root
+            chain.append(parent)
+            parent = upper.parent_room_id
+        keys = [f'ai:budget:charged:{generation_id}'] + [f'ai:budget:{rid}' for rid in chain]
+        return bool(await self.cache.eval(breakout.CHARGE, len(keys), *keys,
+                                          str(self.settings.breakout_reply_budget)))
 
-    async def _conclude_breakout(self, room_id):
-        """Posts a conclusion back to the parent and stops the breakout."""
-        state = await self._load(room_id)
-        if not state.parent_room_id:
+    def _begin_conclusion(self, state, payer):
+        """Marks a breakout as wrapping up; the timer drives the rest."""
+        if not state.parent_room_id or state.conclusion is not None:
             return
-        names = [ai.name for ai in state.ais]
-        content = breakout.conclusion_content(state.room_name or "小会", names, "讨论已结束")
-        self._post_system(state.parent_room_id, content)
+        state.conclusion = {'payer': list(payer), 'content': '', 'delivered': False}
+        state.pending.clear()
+        state.timer_due = self.clock()
+
+    async def _advance_conclusion(self, room_id):
+        """Writes the conclusion once, then sends it until the chat server
+        has stored it in the parent room. Safe to run any number of times."""
+        state = await self._load(room_id)
+        conclusion = state.conclusion
+        if conclusion is None or conclusion.get('delivered'):
+            return
+        content = conclusion.get('content', '')
+        if not content:
+            summary = await self._summarize(room_id, state, conclusion['payer'])
+            names = await self._participant_names(room_id, state)
+            content = breakout.conclusion_content(state.room_name or '小会', names, summary)
+            content += f"\n（小会 #{room_id} 的全过程可在房间列表中打开查看）"
+        elif await self._conclusion_stored(room_id, state.parent_room_id):
+            async with self._room(room_id) as current:
+                if current.conclusion is not None:
+                    current.conclusion['delivered'] = True
+                    current.timer_due = None
+            return
+        async with self._room(room_id) as current:
+            if current.conclusion is None:
+                return
+            if not current.conclusion.get('content'):
+                current.conclusion['content'] = content
+            content = current.conclusion['content']
+            # Without SQL there is nothing to confirm against.
+            current.conclusion['delivered'] = self.pool is None
+            current.timer_due = None if self.pool is None else self.clock() + CONCLUSION_RECHECK
+        self.send(ai_pb2.AiAction(breakout_concluded=ai_pb2.BreakoutConcluded(
+            room_id=room_id, content=content[:MAX_CONTENT])))
+
+    async def _conclusion_stored(self, room_id, parent_room_id):
+        if self.pool is None or not parent_room_id:
+            return False
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT 1 FROM messages WHERE room_id=%s AND client_msg_id=%s LIMIT 1",
+                              (parent_room_id, breakout.conclusion_message_id(room_id)))
+            return await cur.fetchone() is not None
+
+    async def _participant_names(self, room_id, state):
+        names = []
+        if self.pool is not None:
+            async with self.pool.acquire() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT m.display_name FROM room_members rm JOIN members m ON m.id=rm.member_id "
+                    "WHERE rm.room_id=%s AND m.type='human' ORDER BY rm.joined_at", (room_id,))
+                names = [row[0] for row in await cur.fetchall()]
+        return names + [ai.name for ai in state.ais]
+
+    async def _summarize(self, room_id, state, payer):
+        """One model call over the breakout's own messages, paid by `payer`.
+        Falls back to a fixed note so a conclusion is always posted."""
+        entries = await recent_messages(self.cache, self.pool, room_id, self.settings.context_messages)
+        transcript = "\n".join(f"{e['member']['name']}：{e['content']}" for e in entries)
+        if transcript:
+            for ai in state.ais:
+                agent = self.agents.get(ai.model_slug or ai.slug)
+                key = await self.keys.get(payer[1], ai.provider) if agent else None
+                if key is None:
+                    continue
+                try:
+                    parts = []
+                    async with asyncio.timeout(self.settings.generation_timeout):
+                        async for piece in self.providers.create(ai.provider).stream(
+                                model=agent.model, system=breakout.SUMMARY_PROMPT,
+                                messages=[ChatMessage('user', transcript)],
+                                api_key=key, max_tokens=400):
+                            parts.append(piece)
+                    summary = ''.join(parts).strip()
+                    if summary:
+                        return summary
+                except (KeyRejected, ProviderError, TimeoutError):
+                    continue
+        return '（没能自动生成总结，请打开小会查看全过程）'
 
     async def _pending_deadline(self, room_id, state):
         """Runs on a collaboration room's timer when a step waits for a human.

@@ -187,11 +187,13 @@ drogon::Task<StoredMessage> store(Author author,
     uint32_t contentAttempt = attempt;
     auto tx = co_await newGuardedTransaction(context);
     const auto rooms = co_await tx->execSqlCoro(
-        "SELECT last_seq FROM rooms WHERE id = ? FOR UPDATE", roomId);
+        "SELECT last_seq, status FROM rooms WHERE id = ? FOR UPDATE", roomId);
     if (rooms.empty())
     {
         throw ApiError::roomNotFound();
     }
+    if (author.type == "human" && rooms[0]["status"].as<std::string>() == "closed")
+        throw ApiError::invalidArgument("breakout has ended");
     // Speaking in a breakout is allowed for a joining member, or for an
     // owner/admin of any ancestor room (the parent splits the group).
     const auto membership = co_await tx->execSqlCoro(
@@ -432,6 +434,31 @@ drogon::Task<StoredMessage> MessageService::saveAiMessage(int64_t aiMemberId,
         roomId,
         std::move(generationId),
         std::move(content), std::move(context),0,Json::nullValue,std::move(admissionId),attempt);
+}
+
+drogon::Task<StoredMessage> MessageService::saveBreakoutConclusion(int64_t breakoutId, std::string content)
+{
+    auto context = RequestBuffer::instance().backgroundContext();
+    // The conclusion goes into the parent under the breakout's initiator (its
+    // owner, always a parent member), labelled by the content itself. One
+    // client_msg_id per breakout makes a resent conclusion a duplicate.
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT r.parent_room_id, m.id, m.display_name FROM rooms r "
+        "JOIN room_members rm ON rm.room_id = r.id AND rm.role = 'owner' "
+        "JOIN members m ON m.id = rm.member_id "
+        "WHERE r.id = ? AND r.parent_room_id IS NOT NULL ORDER BY rm.joined_at LIMIT 1",
+        breakoutId);
+    if (rows.empty()) throw ApiError::roomNotFound();
+    if (const auto length = utf8Length(content); length && *length > kMaxContentLength)
+        content = utf8Prefix(content, kMaxContentLength);
+    auto message = co_await store(
+        Author{rows[0]["id"].as<int64_t>(), rows[0]["display_name"].as<std::string>(), "human"},
+        rows[0]["parent_room_id"].as<int64_t>(),
+        "breakout-conclusion-" + std::to_string(breakoutId),
+        std::move(content), context);
+    co_await drogon::app().getDbClient()->execSqlCoro(
+        "UPDATE rooms SET status = 'closed' WHERE id = ?", breakoutId);
+    co_return message;
 }
 
 drogon::Task<> MessageService::distribute(const StoredMessage &message, RequestContextPtr context)

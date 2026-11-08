@@ -145,6 +145,25 @@ drogon::Task<> onNotice(ai::Notice notice)
                      noticeEvent(notice.notify_member_id(), notice.code(), notice.provider(),
                                  notice.message()));
 }
+void onBreakoutConcluded(ai::BreakoutConcluded concluded)
+{
+    // The parent's worker keeps its seqs in order; the breakout id is the
+    // dedup key, so a resend stores nothing new.
+    const auto breakoutId = concluded.room_id();
+    drogon::async_run([concluded = std::move(concluded), breakoutId]() -> drogon::Task<> {
+        try
+        {
+            auto message = co_await MessageService::saveBreakoutConclusion(breakoutId, concluded.content());
+            if (!message.duplicate) co_await MessageService::distribute(message);
+        }
+        catch (const std::exception &e)
+        {
+            // The AI service resends until the message exists.
+            LOG_WARN << "breakout conclusion deferred: " << e.what();
+        }
+    });
+}
+
 drogon::Task<> onSystemNotice(ai::SystemNotice notice)
 {
     Json::Value event;
@@ -160,6 +179,11 @@ void handleAiAction(ai::AiAction action)
     if (action.body_case() == ai::AiAction::kFinal)
     {
         onFinal(action.final());
+        return;
+    }
+    if (action.body_case() == ai::AiAction::kBreakoutConcluded)
+    {
+        onBreakoutConcluded(action.breakout_concluded());
         return;
     }
     drogon::async_run([action = std::move(action)]() -> drogon::Task<> {

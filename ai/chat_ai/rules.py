@@ -62,6 +62,9 @@ class RoomState:
     # risk is "discuss"|"readonly"|"side_effect"; status is
     # "pending"|"done"|"cancelled"|"paused".
     pending_step: dict | None = None
+    # A breakout that is wrapping up: {payer, content, delivered}. While set the
+    # room schedules no AI replies; the conclusion is resent until stored.
+    conclusion: dict | None = None
 
     def ai(self, slug: str) -> RoomAi | None:
         return next((a for a in self.ais if a.slug == slug), None)
@@ -80,6 +83,7 @@ class RoomState:
             "parent_room_id": self.parent_room_id,
             "fork_seq": self.fork_seq,
             "pending_step": self.pending_step,
+            "conclusion": self.conclusion,
         }
 
     @classmethod
@@ -98,6 +102,7 @@ class RoomState:
             parent_room_id=data.get("parent_room_id", 0),
             fork_seq=data.get("fork_seq", 0),
             pending_step=data.get("pending_step"),
+            conclusion=data.get("conclusion"),
         )
 
 

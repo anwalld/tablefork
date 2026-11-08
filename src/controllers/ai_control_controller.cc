@@ -176,25 +176,34 @@ AiControlController::Response AiControlController::collaboration(drogon::HttpReq
     const auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.collaboration");
     const auto role = co_await lockActor(tx, id, session.memberId);
     if (role != "owner" && role != "admin") throw ApiError::forbidden();
+    std::vector<int64_t> closedBreakouts;
     if (!prior)
     {
         co_await tx->execSqlCoro("UPDATE rooms SET collaboration_enabled = ? WHERE id = ?", enabled, id);
         if (!enabled)
-            // Closing collaboration cascades into the room's active breakouts.
-            co_await tx->execSqlCoro(
-                "UPDATE rooms SET status = 'closed' WHERE parent_room_id = ? AND status = 'active'", id);
+        {
+            // Closing collaboration ends every active breakout below the room,
+            // at any depth. Only the ones closed now are reported to the AI.
+            const auto tree = co_await tx->execSqlCoro(
+                "WITH RECURSIVE tree AS ("
+                "  SELECT id FROM rooms WHERE parent_room_id = ?"
+                "  UNION ALL SELECT r.id FROM rooms r JOIN tree t ON r.parent_room_id = t.id"
+                ") SELECT r.id FROM rooms r JOIN tree t ON t.id = r.id "
+                "WHERE r.status <> 'closed' FOR UPDATE", id);
+            for (const auto &row : tree)
+            {
+                const auto child = row["id"].as<int64_t>();
+                co_await tx->execSqlCoro("UPDATE rooms SET status = 'closed' WHERE id = ?", child);
+                closedBreakouts.push_back(child);
+            }
+        }
         co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
     }
     co_await commit(std::move(tx));
     co_await reportControlChanged(id, session.request);
-    if (!enabled)
-    {
-        // Each now-closed breakout gets told to wrap up.
-        const auto children = co_await drogon::app().getDbClient()->execSqlCoro(
-            "SELECT id FROM rooms WHERE parent_room_id = ? AND status = 'closed'", id);
-        for (const auto &row : children)
-            reportBreakoutClosed(row["id"].as<int64_t>());
-    }
+    // Each breakout closed above wraps up with the conclusion it has so far.
+    for (const auto child : closedBreakouts)
+        reportBreakoutClosed(child, session.memberId, session.userId);
     Json::Value event;
     event["type"] = "collaboration_changed";
     event["room_id"] = Json::Int64(id);

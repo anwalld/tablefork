@@ -121,6 +121,8 @@ message CouncilOverride {
 // must wrap up and stop.
 message BreakoutClosed {
   int64 room_id = 1;
+  int64 closed_by_member_id = 2;  // pays for the closing summary
+  int64 closed_by_user_id = 3;
 }
 
 message ControlChanged {
@@ -189,7 +191,16 @@ message AiAction {
     Failed failed = 4;
     Notice notice = 5;
     SystemNotice system_notice = 6;
+    BreakoutConcluded breakout_concluded = 7;
   }
+}
+
+// A breakout's conclusion. The chat server stores it in the parent room as a
+// durable, searchable message (deduplicated per breakout) and closes the
+// breakout. The AI service resends until the message exists.
+message BreakoutConcluded {
+  int64 room_id = 1;  // the breakout
+  string content = 2;
 }
 
 // A message the AI service asks the chat server to show the whole room, such
