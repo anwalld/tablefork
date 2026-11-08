@@ -64,6 +64,11 @@ services:
       context: .
       dockerfile: docker/certs.Dockerfile
     restart: "no"
+    environment:
+      # local: local CA (add hosts others use via PUBLIC_HOSTS);
+      # provided: your own server.crt/server.key in data/certs, never replaced.
+      CERT_MODE: ${CERT_MODE:-local}
+      PUBLIC_HOSTS: ${PUBLIC_HOSTS:-}
     volumes:
       - ./data/certs:/certs
 

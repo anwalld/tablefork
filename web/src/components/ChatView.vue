@@ -63,6 +63,19 @@ async function loadAiState() {
     if (activeId.value === id) aiState.value = state
   } catch { /* Status is retried by the room poll and reconnect. */ }
 }
+// Collaboration (host, council, breakouts) is on for new rooms; turning it
+// off makes the room a plain multi-AI chat.
+async function toggleCollaboration() {
+  const room = activeRoom.value
+  if (!room || aiControlBusy.value) return
+  aiControlBusy.value = true
+  try {
+    const enabled = !room.collaboration_enabled
+    await api.setCollaboration(room.id, enabled)
+    room.collaboration_enabled = enabled
+  } catch (error) { notice.value = requestErrorText(error, '切换协作模式失败') }
+  finally { aiControlBusy.value = false }
+}
 async function controlAi(generation = null) {
   const room = activeId.value
   if (!room || aiControlBusy.value) return
@@ -302,6 +315,9 @@ function onRoomEvent(frame) {
     scheduleAttentionRefresh()
   } else if (frame.type === 'ai_state_changed') {
     if (here) loadAiState()
+  } else if (frame.type === 'collaboration_changed') {
+    const room = rooms.value.find(r => r.id === frame.room_id)
+    if (room) room.collaboration_enabled = frame.enabled
   } else if (frame.type === 'ai_chunk') {
     if (here && !aiState.value.generations.some(g => g.id === frame.generation_id)) loadAiState()
     const member = here ? members.value.find(m => m.id === frame.member_id) : null
@@ -664,6 +680,9 @@ onBeforeUnmount(() => {
             </button>
             <span v-if="aiState.paused" class="tag">AI已暂停</span>
             <button v-if="canManageAi" :disabled="aiControlBusy" @click="controlAi()">{{ aiState.paused ? '恢复AI' : '暂停AI' }}</button>
+            <button v-if="canManageAi && activeRoom" :disabled="aiControlBusy" :aria-pressed="!!activeRoom.collaboration_enabled"
+              :title="activeRoom.collaboration_enabled ? '关闭后退化为普通的多人 AI 聊天' : '打开主持人、主席团和小会'"
+              @click="toggleCollaboration()">{{ activeRoom.collaboration_enabled ? '关闭协作' : '开启协作' }}</button>
             <button @click="searchOpen = !searchOpen">搜索</button>
             <button @click="exportActive">导出</button>
             <button class="danger" @click="startLeave">退出房间</button>

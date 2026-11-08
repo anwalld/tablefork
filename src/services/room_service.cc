@@ -268,7 +268,7 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         // Rooms the caller was invited to but has not joined are listed too.
         "  SELECT id FROM visible UNION SELECT room_id FROM room_invites WHERE user_id = ?"
         ") "
-        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, m.member_id, "
+        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, r.collaboration_enabled, m.member_id, "
         "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
         "(SELECT COUNT(*) FROM messages msg WHERE msg.room_id = r.id "
         " AND msg.seq > COALESCE(m.read_seq, r.last_seq) AND msg.member_id <> ?) AS unread_count, "
@@ -305,6 +305,7 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         room["unread_count"] = Json::Int64(row["unread_count"].as<int64_t>());
         room["mention_seq"] = row["mention_seq"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["mention_seq"].as<int64_t>()));
         room["parent_room_id"] = row["parent_room_id"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["parent_room_id"].as<int64_t>()));
+        room["collaboration_enabled"] = row["collaboration_enabled"].as<bool>();
         rooms.append(std::move(room));
     }
     Json::Value body;
