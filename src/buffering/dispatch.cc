@@ -90,6 +90,10 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
         co_return co_await AiController().approve(req, args[0], args[1]);
     if(route=="AiController::reject" && args.size()==2)
         co_return co_await AiController().reject(req, args[0], args[1]);
+    if(route=="AiController::tableTemplates" && args.empty())
+        co_return co_await AiController().tableTemplates(req);
+    if(route=="AiController::launchTemplate" && args.size()==1)
+        co_return co_await AiController().launchTemplate(req, args[0]);
     if(route=="AiController::keys" && args.size()==0)
         co_return co_await AiController().keys(req);
     if(route=="AiController::storeKey" && args.size()==1)

@@ -37,6 +37,13 @@ class AiService
                                                 int64_t roomId,
                                                 std::string slug, std::string persona = "");
 
+    // Launches a table template: creates one private AI per template entry,
+    // owned by the caller, adds them to the room with their role personas,
+    // seats the chairs on the council and turns collaboration on. Entries
+    // whose provider the caller has no key for are skipped and reported.
+    // Owners and admins only.
+    static drogon::Task<Json::Value> launchTemplate(Session session, int64_t roomId, std::string templateId);
+
     static drogon::Task<Json::Value> pendingRequests(Session session, int64_t roomId);
 
     struct Review

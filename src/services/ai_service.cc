@@ -1,4 +1,5 @@
 #include "services/ai_service.h"
+#include "services/table_templates.h"
 
 #include <drogon/drogon.h>
 
@@ -410,5 +411,66 @@ drogon::Task<> AiService::deleteKey(Session session, std::string provider)
         provider);
     co_await RequestMemo::finish(tx, session.request, actor, Json::objectValue);
     co_await commit(std::move(tx));
+}
+drogon::Task<Json::Value> AiService::launchTemplate(Session session, int64_t roomId, std::string templateId)
+{
+    const auto table = TableTemplates::find(templateId);
+    if (!table) throw ApiError::invalidArgument("unknown table template");
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.template")) co_return *prior;
+    const auto role = co_await lockedRole(tx, roomId, session.memberId);
+    if (!canManage(role)) throw ApiError::forbidden();
+    Json::Value result;
+    result["template"] = table->id;
+    result["joined"] = Json::arrayValue;
+    result["skipped"] = Json::arrayValue;
+    std::vector<int64_t> chairs;
+    for (const auto &ai : table->ais)
+    {
+        const auto types = co_await tx->execSqlCoro("SELECT provider FROM ai_model_types WHERE model_slug=?", ai.model);
+        if (types.empty()) throw ApiError::invalidArgument("template uses an unknown model: " + ai.model);
+        const auto provider = types[0]["provider"].as<std::string>();
+        const auto key = co_await tx->execSqlCoro(
+            "SELECT 1 FROM user_api_keys WHERE user_id = ? AND provider = ?", session.userId, provider);
+        if (key.empty())
+        {
+            Json::Value skipped;
+            skipped["name"] = ai.name;
+            skipped["provider"] = provider;
+            result["skipped"].append(skipped);
+            continue;
+        }
+        const auto inserted = co_await tx->execSqlCoro("INSERT INTO members (type,display_name) VALUES ('ai',?)", ai.name);
+        const auto member = static_cast<int64_t>(inserted.insertId());
+        co_await tx->execSqlCoro(
+            "INSERT INTO ai_profiles (member_id,slug,provider,model_slug,creator_user_id,is_legacy) VALUES (?,?,?,?,?,FALSE)",
+            member, "role_" + std::to_string(member), provider, ai.model, session.userId);
+        co_await tx->execSqlCoro("INSERT INTO room_members (room_id, member_id) VALUES (?, ?)", roomId, member);
+        co_await tx->execSqlCoro(
+            "INSERT INTO room_ai_personas (room_id,member_id,admission_id,persona) VALUES (?,?,UNHEX(?),?)",
+            roomId, member, PayloadCrypto::randomToken().substr(0, 32), ai.persona);
+        if (ai.chair) chairs.push_back(member);
+        Json::Value joined;
+        joined["id"] = Json::Int64(member);
+        joined["name"] = ai.name;
+        joined["model_slug"] = ai.model;
+        joined["chair"] = ai.chair;
+        result["joined"].append(joined);
+    }
+    // The council only makes sense with enough chairs to reach 3 valid votes.
+    result["council"] = table->council && chairs.size() >= 3;
+    if (result["council"].asBool())
+    {
+        co_await tx->execSqlCoro("DELETE FROM room_council WHERE room_id = ?", roomId);
+        for (const auto chair : chairs)
+            co_await tx->execSqlCoro("INSERT INTO room_council (room_id, member_id) VALUES (?, ?)", roomId, chair);
+    }
+    if (!result["joined"].empty())
+        co_await tx->execSqlCoro("UPDATE rooms SET collaboration_enabled = TRUE WHERE id = ?", roomId);
+    result["collaboration_enabled"] = !result["joined"].empty();
+    co_await RequestMemo::finish(tx, session.request, actor, result);
+    co_await commit(std::move(tx));
+    co_return result;
 }
 }  // namespace chat
