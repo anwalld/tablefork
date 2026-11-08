@@ -348,10 +348,27 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
     std::string councilVerdict;
     if (content == "/否决") councilVerdict = "veto";
     else if (content == "/强制通过") councilVerdict = "force_pass";
+    const bool breakoutStart = content.rfind("/小会", 0) == 0;
+    std::vector<int64_t> breakoutMembers;
+    std::string breakoutTopic;
+    if (breakoutStart)
+    {
+        for (const auto &id : mentionIds) if (id.isInt64()) breakoutMembers.push_back(id.asInt64());
+        breakoutTopic = content.size() > 3 ? content.substr(3) : "";
+        // 去掉 @提及，只留议题文本。
+        std::string cleaned;
+        std::istringstream stream(breakoutTopic);
+        std::string word;
+        while (stream >> word)
+            if (word[0] != '@') { if (!cleaned.empty()) cleaned += ' '; cleaned += word; }
+        breakoutTopic = cleaned.empty() ? "小会" : cleaned;
+    }
     auto message = co_await store(Author{session.memberId, session.username, "human"},
                               roomId,
                               std::move(clientMsgId),
                               std::move(content), session.request, session.userId, std::move(mentionIds));
+    if (breakoutStart)
+        co_await RoomService::createBreakout(session, roomId, breakoutTopic, std::move(breakoutMembers));
     if (!response.empty())
     {
         const auto role = co_await drogon::app().getDbClient()->execSqlCoro(

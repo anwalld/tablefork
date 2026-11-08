@@ -15,6 +15,14 @@ class RoomService
 {
   public:
     static drogon::Task<Json::Value> create(Session session, std::string name);
+    // Splits a breakout off `parentRoomId`. The caller and each member in
+    // `memberIds` join; `memberIds` must name humans or AIs already in the
+    // parent, and nesting is bounded. The breakout inherits the parent's
+    // history only up to the fork point.
+    static drogon::Task<Json::Value> createBreakout(Session session,
+                                                    int64_t parentRoomId,
+                                                    std::string topic,
+                                                    std::vector<int64_t> memberIds);
     static drogon::Task<Json::Value> list(Session session,
                                           int64_t limit,
                                           int64_t offset);

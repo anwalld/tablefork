@@ -200,6 +200,58 @@ drogon::Task<Json::Value> RoomService::create(Session session, std::string name)
     co_return body;
 }
 
+drogon::Task<Json::Value> RoomService::createBreakout(Session session,
+                                                       int64_t parentRoomId,
+                                                       std::string topic,
+                                                       std::vector<int64_t> memberIds)
+{
+    constexpr uint64_t kMaxDepth = 3;
+    if (topic.empty() || !utf8Length(topic) || *utf8Length(topic) > 64)
+        throw ApiError::invalidArgument("breakout topic must be 1 to 64 characters");
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "room.breakout"))
+        co_return *prior;
+    const auto parent = co_await tx->execSqlCoro(
+        "SELECT depth, last_seq FROM rooms WHERE id = ? FOR UPDATE", parentRoomId);
+    if (parent.empty()) throw ApiError::roomNotFound();
+    const auto depth = parent[0]["depth"].as<uint64_t>();
+    if (depth >= kMaxDepth) throw ApiError::invalidArgument("breakout depth limit reached");
+    const auto forkSeq = parent[0]["last_seq"].as<int64_t>();
+    // The caller must be a member of the parent, the breakout participants too.
+    co_await requireMember(session.memberId, parentRoomId);
+    std::vector<int64_t> participants;
+    for (const auto memberId : memberIds)
+    {
+        if (memberId == session.memberId) continue;
+        const auto rows = co_await tx->execSqlCoro(
+            "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?",
+            parentRoomId, memberId);
+        if (rows.empty()) throw ApiError::invalidArgument("breakout members must be in the parent room");
+        if (std::find(participants.begin(), participants.end(), memberId) == participants.end())
+            participants.push_back(memberId);
+    }
+    const auto room = co_await tx->execSqlCoro(
+        "INSERT INTO rooms (name, parent_room_id, fork_seq, depth, topic, status) "
+        "VALUES (?, ?, ?, ?, ?, 'active')",
+        topic, parentRoomId, forkSeq, depth + 1, topic);
+    const auto roomId = static_cast<int64_t>(room.insertId());
+    co_await tx->execSqlCoro("INSERT INTO room_members (room_id, member_id, role) VALUES (?, ?, 'owner')",
+                             roomId, session.memberId);
+    for (const auto memberId : participants)
+        co_await tx->execSqlCoro("INSERT INTO room_members (room_id, member_id) VALUES (?, ?)", roomId, memberId);
+    Json::Value body;
+    body["id"] = Json::Int64(roomId);
+    body["name"] = topic;
+    body["parent_room_id"] = Json::Int64(parentRoomId);
+    body["fork_seq"] = Json::Int64(forkSeq);
+    body["status"] = "active";
+    co_await RequestMemo::finish(tx, session.request, actor, body);
+    checkRequest(session.request);
+    co_await commit(std::move(tx));
+    co_return body;
+}
+
 drogon::Task<Json::Value> RoomService::list(Session session,
                                             int64_t limit,
                                             int64_t offset)
