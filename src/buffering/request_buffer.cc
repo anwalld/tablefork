@@ -30,6 +30,7 @@ bool recoverable(const drogon::HttpRequestPtr &req)
     const auto &path=req->getPath();
     if(req->method()==drogon::Get) return true;
     if(path=="/api/auth/register" || path=="/api/ai/roles") return true;
+    if(path.rfind("/api/ai/roles/",0)==0 && req->method()==drogon::Put) return true;
     if(path.rfind("/api/auth/",0)==0) return false;
     if(path.rfind("/api/keys/",0)==0 && req->method()==drogon::Put) return false;
     return path.rfind("/api/rooms",0)==0 || (path.rfind("/api/keys/",0)==0 && req->method()==drogon::Delete);

@@ -57,7 +57,7 @@ def test_flyway_applied_every_migration(db):
         )
         rows = cursor.fetchall()
     # V1 is either applied or recorded as the baseline of an older database.
-    assert [version for version, _ in rows] == [str(version) for version in range(1, 17)]
+    assert [version for version, _ in rows] == [str(version) for version in range(1, 18)]
     assert all(success for _, success in rows)
 
 

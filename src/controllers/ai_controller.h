@@ -12,6 +12,7 @@ class AiController : public drogon::HttpController<AiController>
     ADD_METHOD_TO(AiController::models, "/api/ai/models", drogon::Get);
     ADD_METHOD_TO(AiController::catalog, "/api/ai/roles", drogon::Get);
     ADD_METHOD_TO(AiController::createRole, "/api/ai/roles", drogon::Post);
+    ADD_METHOD_TO(AiController::editRolePersona, "/api/ai/roles/{1}/persona", drogon::Put);
     ADD_METHOD_TO(AiController::editPersona, "/api/rooms/{1}/ais/{2}/persona", drogon::Put);
     ADD_METHOD_TO(AiController::catalog, "/api/ai-agents", drogon::Get);
     ADD_METHOD_TO(AiController::request, "/api/rooms/{1}/ai-members", drogon::Post);
@@ -31,6 +32,7 @@ class AiController : public drogon::HttpController<AiController>
     Response catalog(drogon::HttpRequestPtr req);
     Response models(drogon::HttpRequestPtr req);
     Response createRole(drogon::HttpRequestPtr req);
+    Response editRolePersona(drogon::HttpRequestPtr req,std::string memberId);
     Response editPersona(drogon::HttpRequestPtr req,std::string roomId,std::string memberId);
     Response request(drogon::HttpRequestPtr req, std::string roomId);
     Response remove(drogon::HttpRequestPtr req, std::string roomId, std::string slug);

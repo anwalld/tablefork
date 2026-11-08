@@ -53,7 +53,15 @@ AiController::Response AiController::createRole(drogon::HttpRequestPtr req)
 {
     if(auto queued=co_await RequestBuffer::instance().admit(req,"AiController::createRole")) co_return queued;
     const auto session=co_await SessionStore::require(req);const auto input=jsonBody(req);
-    co_return jsonResponse(co_await AiService::createRole(session,stringField(input,"model_slug"),stringField(input,"name")),drogon::k201Created);
+    co_return jsonResponse(co_await AiService::createRole(session,stringField(input,"model_slug"),stringField(input,"name"),
+        optionalStringField(input,"persona")),drogon::k201Created);
+}
+AiController::Response AiController::editRolePersona(drogon::HttpRequestPtr req,std::string memberId)
+{
+    std::vector<std::string> args{memberId};
+    if(auto queued=co_await RequestBuffer::instance().admit(req,"AiController::editRolePersona",std::move(args))) co_return queued;
+    const auto session=co_await SessionStore::require(req);const auto input=jsonBody(req);
+    co_return jsonResponse(co_await AiService::editRolePersona(session,parseRoomId(memberId),stringField(input,"persona")));
 }
 AiController::Response AiController::editPersona(drogon::HttpRequestPtr req,std::string roomId,std::string memberId)
 {

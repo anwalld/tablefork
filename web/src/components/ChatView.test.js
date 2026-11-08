@@ -60,8 +60,10 @@ afterEach(() => {
 it('keeps the room draft and warns against repeating an uncertain creation', async () => {
   const view = await chat()
   api.createRoom.mockRejectedValue({ code: 'result_unknown' })
+  expect(view.find('input[aria-label="新房间名称"]').exists()).toBe(false)
+  await view.findAll('button').find(b => b.text() === '新建房间').trigger('click')
   await view.get('input[aria-label="新房间名称"]').setValue('new-room')
-  await view.get('.sidebar > form').trigger('submit')
+  await view.get('form[aria-label="新建房间"]').trigger('submit')
   await flushPromises()
   expect(view.get('.toast[role="status"]').text()).toBe('执行结果尚无法确认，请勿重复提交')
   expect(view.get('input[aria-label="新房间名称"]').element.value).toBe('new-room')
@@ -189,8 +191,9 @@ it('keeps an ack arriving after removal and never backfills its sequence gap', a
 it('explains that a banned invitee must be unbanned first', async () => {
   const view = await chat()
   api.invite.mockRejectedValue({ code: 'user_banned' })
+  await view.findAll('.chat-head button').find(b => b.text() === '邀请').trigger('click')
   await view.get('input[aria-label="邀请用户名"]').setValue('outside')
-  await view.get('.chat-head form').trigger('submit')
+  await view.get('form[aria-label="邀请用户"]').trigger('submit')
   await flushPromises()
   expect(view.text()).toContain('该用户已被此房间封禁，需要先解封')
 })
@@ -329,4 +332,22 @@ it.each(['partial retained', ''])('renders durable failed history with body %j',
   expect(view.text()).toContain('生成失败')
   expect(view.findAll('.messages .message')).toHaveLength(1)
   expect(view.get('.messages .bubble').text()).toBe(content)
+})
+
+
+it('creates a room from the dialog and shows progress while it runs', async () => {
+  const view = await chat()
+  let finish
+  api.createRoom.mockReturnValue(new Promise(resolve => { finish = resolve }))
+  await view.findAll('button').find(b => b.text() === '新建房间').trigger('click')
+  await view.get('input[aria-label="新房间名称"]').setValue('fresh')
+  await view.get('form[aria-label="新建房间"]').trigger('submit')
+  const submit = view.get('form[aria-label="新建房间"] button.primary')
+  expect(submit.text()).toBe('创建中…')
+  expect(submit.element.disabled).toBe(true)
+  await view.get('form[aria-label="新建房间"]').trigger('submit')
+  expect(api.createRoom).toHaveBeenCalledTimes(1)
+  finish({ id: 99 })
+  await flushPromises()
+  expect(view.find('form[aria-label="新建房间"]').exists()).toBe(false)
 })

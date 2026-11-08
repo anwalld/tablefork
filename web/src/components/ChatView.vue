@@ -9,6 +9,7 @@ import { insertMention, matchingMembers, mentionQuery } from '../lib/mentions.js
 import { RoomStream } from '../lib/room-stream.js'
 import { fetchAllRooms } from '../lib/rooms.js'
 import { exportRoom } from '../lib/transcript.js'
+import AppDialog from './AppDialog.vue'
 import LeaveDialog from './LeaveDialog.vue'
 import MembersPanel from './MembersPanel.vue'
 import SettingsDialog from './SettingsDialog.vue'
@@ -31,6 +32,10 @@ const connected = ref(false)
 const notice = ref('')
 const newRoomName = ref('')
 const inviteName = ref('')
+const creatingRoom = ref(false)
+const roomBusy = ref(false)
+const invitingUser = ref(false)
+const inviteBusy = ref(false)
 const draft = ref('')
 const selectedMentions = ref([])
 const messagesEl = ref(null)
@@ -427,38 +432,51 @@ function forgetRoom(roomId) {
 
 async function createRoom() {
   const name = newRoomName.value.trim()
-  if (!name) return
+  if (!name || roomBusy.value) return
+  roomBusy.value = true
   try {
     const room = await api.createRoom(name)
     newRoomName.value = ''
+    creatingRoom.value = false
     await refreshRooms()
     autoSelectRoom.value = true
     activeId.value = room.id
   } catch (error) {
     notice.value = requestErrorText(error, '创建房间失败，名称最多 64 个字符')
+  } finally {
+    roomBusy.value = false
   }
 }
 
+const joinBusy = ref(false)
 async function joinRoom() {
+  if (joinBusy.value) return
+  joinBusy.value = true
   try {
     await api.join(activeId.value)
     await refreshRooms()
   } catch (error) {
     notice.value = requestErrorText(error, '加入失败，房间可能已被删除')
     await refreshRooms()
+  } finally {
+    joinBusy.value = false
   }
 }
 
 async function invite() {
   const username = inviteName.value.trim()
-  if (!username) return
+  if (!username || inviteBusy.value) return
+  inviteBusy.value = true
   try {
     await api.invite(activeId.value, username)
     notice.value = `已邀请 ${username}`
     inviteName.value = ''
+    invitingUser.value = false
   } catch (e) {
     notice.value = requestErrorText(e, e.code === 'user_banned' ? '该用户已被此房间封禁，需要先解封' :
       e.code === 'user_not_found' ? '找不到这个用户' : '邀请失败')
+  } finally {
+    inviteBusy.value = false
   }
 }
 
@@ -594,10 +612,16 @@ onBeforeUnmount(() => {
         <button class="link" @click="showSettings = true">设置</button>
         <button class="link" :disabled="loggingOut" @click="$emit('logout')">{{ loggingOut ? '退出中…' : '退出登录' }}</button>
       </header>
-      <form class="inline-form" @submit.prevent="createRoom">
-        <input v-model="newRoomName" placeholder="新房间名称" maxlength="64" aria-label="新房间名称" />
-        <button>创建</button>
-      </form>
+      <button class="primary new-room" @click="creatingRoom = true">新建房间</button>
+      <AppDialog v-if="creatingRoom" title="新建房间" @close="creatingRoom = false">
+        <form class="dialog-form" aria-label="新建房间" @submit.prevent="createRoom">
+          <input v-model="newRoomName" placeholder="房间名称" maxlength="64" aria-label="新房间名称" />
+          <div class="dialog-actions">
+            <button type="button" @click="creatingRoom = false">取消</button>
+            <button class="primary" :disabled="roomBusy || !newRoomName.trim()" :aria-busy="roomBusy">{{ roomBusy ? '创建中…' : '创建' }}</button>
+          </div>
+        </form>
+      </AppDialog>
       <nav class="room-list">
         <button
           v-for="room in rooms"
@@ -625,10 +649,16 @@ onBeforeUnmount(() => {
         <header class="chat-head">
           <h1>{{ activeRoom.name }}</h1>
           <template v-if="activeRoom.status === 'joined' && !activeRemoval">
-            <form class="inline-form" @submit.prevent="invite">
-              <input v-model="inviteName" placeholder="邀请用户名" aria-label="邀请用户名" />
-              <button>邀请</button>
-            </form>
+            <button @click="invitingUser = true">邀请</button>
+            <AppDialog v-if="invitingUser" title="邀请用户" @close="invitingUser = false">
+              <form class="dialog-form" aria-label="邀请用户" @submit.prevent="invite">
+                <input v-model="inviteName" placeholder="对方的用户名" aria-label="邀请用户名" />
+                <div class="dialog-actions">
+                  <button type="button" @click="invitingUser = false">取消</button>
+                  <button class="primary" :disabled="inviteBusy || !inviteName.trim()" :aria-busy="inviteBusy">{{ inviteBusy ? '邀请中…' : '邀请' }}</button>
+                </div>
+              </form>
+            </AppDialog>
             <button :class="{ active: showMembers }" @click="showMembers = !showMembers">
               成员 {{ members.length }}
             </button>
@@ -658,7 +688,7 @@ onBeforeUnmount(() => {
 
         <div v-if="activeRoom.status === 'invited'" class="invite-panel">
           <p>你被邀请加入这个房间。</p>
-          <button class="primary" @click="joinRoom">加入房间</button>
+          <button class="primary" :disabled="joinBusy" :aria-busy="joinBusy" @click="joinRoom">{{ joinBusy ? '加入中…' : '加入房间' }}</button>
         </div>
 
         <template v-else>
