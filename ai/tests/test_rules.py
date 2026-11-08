@@ -194,3 +194,38 @@ def test_success_mask_is_idempotent_and_old_rounds_do_not_count():
 
 def test_legacy_proactive_counter_migrates_to_mask():
     assert RoomState.from_json({'proactive_sent': 2}).proactive_mask == 3
+
+
+def two_ais():
+    return RoomState(humans=[ALICE], ais=[CLAUDE, GPT])
+
+
+def test_host_decision_maps_names_and_mentions_lead():
+    state = two_ais()
+    decision = rules.on_host_decision(state, ["GPT"], False, ALICE, ALL_KEYS, ["claude"], 5)
+    assert [r.slug for r in decision.requests] == ["claude", "gpt"]
+
+
+def test_host_decision_drops_unknown_names():
+    state = two_ais()
+    decision = rules.on_host_decision(state, ["不存在的AI", "Claude"], False, ALICE, ALL_KEYS, [], 5)
+    assert [r.slug for r in decision.requests] == ["claude"]
+
+
+def test_host_decision_respects_the_round_limit():
+    state = RoomState(humans=[ALICE], ais=[
+        CLAUDE, GPT, RoomAi(102, "d", "deepseek", "DeepSeek"), RoomAi(103, "g", "gemini", "Gemini")])
+    decision = rules.on_host_decision(
+        state, ["Claude", "GPT", "DeepSeek", "Gemini"], False, ALICE, ALL_KEYS, [], 2)
+    assert len(decision.requests) == 2
+
+
+def test_host_decision_end_stops_the_round():
+    decision = rules.on_host_decision(two_ais(), ["GPT"], True, ALICE, ALL_KEYS, [], 5)
+    assert decision.requests == []
+
+
+def test_host_decision_reports_missing_keys():
+    decision = rules.on_host_decision(two_ais(), ["GPT"], False, ALICE, {"anthropic"}, [], 5)
+    assert decision.requests == []
+    assert [m.provider for m in decision.missing] == ["openai"]

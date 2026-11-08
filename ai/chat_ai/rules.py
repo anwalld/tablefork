@@ -246,3 +246,44 @@ def on_proactive_saved(state: RoomState, epoch: int, slot: int) -> None:
     state.proactive_mask |= 1 << slot
     if state.proactive_mask == 7:
         state.target = None
+
+
+def slug_for_name(state: RoomState, name: str) -> str | None:
+    """The slug of the AI whose display name matches `name`, when unambiguous."""
+    matches = [a.slug for a in state.ais if a.name.lower() == name.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def on_host_decision(
+    state: RoomState,
+    speakers: list[str],
+    end: bool,
+    payer: Human,
+    keys: set[str],
+    mentioned: list[str],
+    max_replies: int,
+    kind: str = "reply",
+    hop: int = 1,
+) -> Decision:
+    """Turns the host's speaker list into requests.
+
+    Mentioned AIs always lead the round; the host's other picks follow if they
+    are still in the room and hold a key. The round never exceeds max_replies.
+    """
+    decision = Decision()
+    if end:
+        return decision
+    order: list[str] = []
+    for name in speakers:
+        slug = slug_for_name(state, name)
+        if slug is None or slug in order or state.ai(slug) is None:
+            continue
+        order.append(slug)
+    for slug in mentioned:
+        if state.ai(slug) is None:
+            continue
+        if slug not in order:
+            order.insert(0, slug)
+    for slug in order[:max_replies]:
+        _request(decision, state, Request(slug, payer, kind, hop), keys)
+    return decision

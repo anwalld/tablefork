@@ -50,6 +50,10 @@ class Settings:
     retrieval_top_k: int = 5
     retrieval_chars: int = 1500
     classified_retry: bool = False
+    # Collaboration host (group supervisor). Uses the round trigger's key.
+    host_provider: str = "deepseek"
+    host_model: str = "deepseek-flash"
+    round_max_replies: int = 12
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -92,4 +96,7 @@ class Settings:
             retrieval_top_k=max(1, min(20, _int("AI_RETRIEVAL_TOP_K", 5))),
             retrieval_chars=max(100, _int("AI_RETRIEVAL_CHARS", 1500)),
             classified_retry=os.environ.get("AI_CLASSIFIED_RETRY", "") == "1",
+            host_provider=os.environ.get("AI_HOST_PROVIDER", "deepseek"),
+            host_model=os.environ.get("AI_HOST_MODEL", "deepseek-flash"),
+            round_max_replies=max(1, _int("AI_ROUND_MAX_REPLIES", 12)),
         )

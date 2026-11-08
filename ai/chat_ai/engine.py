@@ -13,6 +13,7 @@ import uuid
 from typing import Awaitable, Callable
 
 from . import rules
+from . import host
 from .controls import GenerationControls
 from .context import build_system_prompt, estimate_tokens, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
@@ -135,7 +136,10 @@ class Engine:
                                              else hashlib.sha256(raw_trace.encode()).hexdigest())
                     _apply_snapshot(state, value.room)
                     payer = rules.Human(value.sender.member_id, value.sender.user_id)
-                    decision = rules.on_human_message(state, payer, value.content, available, self.rng, value.mention_ids)
+                    if state.collaboration_enabled:
+                        decision = await self._host_round(state, room_id, payer, value.content, available, value.mention_ids)
+                    else:
+                        decision = rules.on_human_message(state, payer, value.content, available, self.rng, value.mention_ids)
                     state.timer_due = self._next_timer(state)
                     self._enqueue(state, decision, {
                         'name': value.sender.name or '用户', 'content': value.content,
@@ -156,8 +160,18 @@ class Engine:
                                 rules.on_proactive_saved(state, job['epoch'], job['slot'])
                                 state.timer_due = self._next_timer(state)
                             payer = rules.Human(*job['payer'])
-                            decision = rules.on_ai_message(state, value.sender.slug, value.content,
-                                payer, job['hop'], available, self.settings.chain_p, self.rng)
+                            if state.collaboration_enabled:
+                                speakers, end = await self._host_pick(room_id, state, payer.user_id)
+                                if speakers is not None:
+                                    decision = rules.on_host_decision(
+                                        state, speakers, end, payer, available, [],
+                                        self.settings.round_max_replies, kind="chain", hop=job['hop'] + 1)
+                                else:
+                                    decision = rules.on_ai_message(state, value.sender.slug, value.content,
+                                        payer, job['hop'], available, self.settings.chain_p, self.rng)
+                            else:
+                                decision = rules.on_ai_message(state, value.sender.slug, value.content,
+                                    payer, job['hop'], available, self.settings.chain_p, self.rng)
                             self._enqueue(state, decision)
         # The state and queue have committed, including for duplicate delivery.
         await ack()
@@ -507,6 +521,48 @@ class Engine:
                                 retry_at=self.clock() + self.settings.retry_base_seconds)
             final = copy.deepcopy(state.active)
         self._send_final(room_id, final)
+
+    async def _host_pick(self, room_id, state, payer_user_id):
+        """Asks the host who should speak next; (None, False) on any failure."""
+        settings = self.settings
+        key = await self.keys.get(payer_user_id, settings.host_provider)
+        if key is None:
+            return None, False
+        entries = await recent_messages(self.cache, self.pool, room_id, 20)
+        history = "\n".join(f"{e['member']['name']}：{e['content']}" for e in entries[-20:])
+        participants = "\n".join(f"{ai.name}：{(ai.persona or '').strip()}" for ai in state.ais)
+        system = host.HOST_PROMPT.format(participants=participants, history=history)
+        provider = self.providers.create(settings.host_provider)
+        try:
+            parts = []
+            async with asyncio.timeout(settings.generation_timeout):
+                async for piece in provider.stream(
+                        model=settings.host_model, system=system,
+                        messages=[ChatMessage("user", history)],
+                        api_key=key, max_tokens=256):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return None, False
+        parsed = host.parse_host_json("".join(parts))
+        if parsed is None:
+            return None, False
+        return parsed["speakers"], parsed["end"]
+
+    async def _host_round(self, state, room_id, payer, content, available, mention_ids):
+        """Lets the host decide the round's speakers; falls back on failure."""
+        if mention_ids:
+            mentioned = list(dict.fromkeys(a.slug for m in mention_ids
+                                           for a in state.ais if a.member_id == m))
+        else:
+            mentioned = rules.mentions(content, state.ais)
+        speakers, end = await self._host_pick(room_id, state, payer.user_id)
+        if speakers is not None:
+            return rules.on_host_decision(state, speakers, end, payer, available,
+                                          mentioned, self.settings.round_max_replies)
+        self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
+            room_id=room_id, notify_member_id=payer.member_id,
+            code='host_unavailable', message='主持人暂时不可用，已按原规则回复')))
+        return rules.on_human_message(state, payer, content, available, self.rng, mention_ids)
 
     async def _context(self, room_id, job, member_id):
         """Recent messages, plus related older ones when retrieval is on."""
