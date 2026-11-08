@@ -469,7 +469,7 @@ drogon::Task<Json::Value> MessageService::history(Session session,
         throw ApiError::invalidArgument("use either before or after");
     }
     const auto lastSeq =
-        co_await RoomService::requireMember(session.memberId, roomId);
+        co_await RoomService::requireVisible(session.memberId, roomId);
     const auto [low, high] = resolveRange(query, lastSeq);
 
     Json::Value body;
@@ -521,7 +521,7 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
     std::string keyword, std::optional<int64_t> sender, std::optional<int64_t> from,
     std::optional<int64_t> to, std::optional<int64_t> before, int64_t limit)
 {
-    co_await RoomService::requireMember(session.memberId, roomId);
+    co_await RoomService::requireVisible(session.memberId, roomId);
     const auto length = utf8Length(keyword);
     if (!length || *length > 200 || (from && to && *from > *to))
         throw ApiError::invalidArgument("invalid search filter");

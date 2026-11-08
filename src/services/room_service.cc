@@ -441,7 +441,7 @@ drogon::Task<bool> RoomService::leave(Session session,
 
 drogon::Task<Json::Value> RoomService::members(Session session, int64_t roomId)
 {
-    co_await requireMember(session.memberId, roomId);
+    co_await requireVisible(session.memberId, roomId);
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT m.id,m.type,m.display_name,rm.role,p.slug,p.provider,p.model_slug,p.creator_user_id,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
@@ -665,5 +665,28 @@ drogon::Task<int64_t> RoomService::requireMember(int64_t memberId, int64_t roomI
         throw ApiError::roomNotFound();
     }
     co_return rows[0]["last_seq"].as<int64_t>();
+}
+
+drogon::Task<int64_t> RoomService::requireVisible(int64_t memberId, int64_t roomId)
+{
+    // A caller can see the room itself, or any ancestor room they are a member
+    // of, so members of a root room can read everything in its breakout tree.
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "WITH RECURSIVE chain AS ("
+        "  SELECT id, parent_room_id FROM rooms WHERE id = ?"
+        "  UNION ALL"
+        "  SELECT r.id, r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.parent_room_id"
+        ") "
+        "SELECT 1 FROM chain c "
+        "JOIN room_members m ON m.room_id = c.id AND m.member_id = ? LIMIT 1",
+        roomId,
+        memberId);
+    if (rows.empty())
+    {
+        throw ApiError::roomNotFound();
+    }
+    const auto lastSeq = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT last_seq FROM rooms WHERE id = ?", roomId);
+    co_return lastSeq[0]["last_seq"].as<int64_t>();
 }
 }  // namespace chat

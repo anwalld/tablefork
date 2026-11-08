@@ -66,5 +66,9 @@ class RoomService
         std::vector<std::string> allowed);
     // The room's last_seq, or ApiError::roomNotFound() for a non-member.
     static drogon::Task<int64_t> requireMember(int64_t memberId, int64_t roomId);
+    // The room's last_seq, or ApiError::roomNotFound() when the member cannot
+    // see the room: a caller sees a room they joined, or any breakout below a
+    // room they can see, so a root room's members can read every child.
+    static drogon::Task<int64_t> requireVisible(int64_t memberId, int64_t roomId);
 };
 }  // namespace chat
