@@ -223,4 +223,14 @@ drogon::Task<> reportCouncilOverride(int64_t roomId, const std::string &verdict,
         gateway->send(std::move(event));
     }
 }
+
+void reportBreakoutClosed(int64_t roomId)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        event.mutable_breakout_closed()->set_room_id(roomId);
+        gateway->send(std::move(event));
+    }
+}
 }

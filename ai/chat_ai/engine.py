@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 from . import rules
 from . import host
 from . import council
+from . import breakout
 from .council_state import Ballot
 from .controls import GenerationControls
 from .context import build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
@@ -89,7 +90,7 @@ class Engine:
         if body in ('message_saved', 'members_changed'):
             room_id = value.room.room_id
         elif body in ('room_deleted', 'generation_rejected', 'control_changed', 'confirmation_input',
-                      'council_start', 'council_override'):
+                      'council_start', 'council_override', 'breakout_closed'):
             room_id = value.room_id
         else:
             await ack()
@@ -119,6 +120,11 @@ class Engine:
 
         if body == 'council_override':
             await self._override_council(room_id, value.verdict)
+            await ack()
+            return
+
+        if body == 'breakout_closed':
+            await self._conclude_breakout(room_id)
             await ack()
             return
 
@@ -299,6 +305,10 @@ class Engine:
                 if paused:
                     state.timer_due = None
                     state.target = None
+            if state.active is None and state.pending and state.parent_room_id:
+                if not await self._spend_budget(room_id):
+                    state.pending.clear()
+                    return None
             if state.active is None:
                 # Messages queued before generation starts share one reply
                 # per AI. The latest trigger supplies the payer and epoch.
@@ -715,6 +725,47 @@ class Engine:
         await self.cache.set(f'council:{room_id}:{job["ballot_round"]}', json.dumps(ballot.to_json()))
         if ballot.complete():
             await self._finish_ballot(room_id, ballot)
+
+    async def _budget_chain(self, room_id):
+        """room_id -> ... -> root, innermost first, for cgroup-style spend."""
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "WITH RECURSIVE chain AS ("
+                "  SELECT id, parent_room_id FROM rooms WHERE id=%s"
+                "  UNION ALL"
+                "  SELECT r.id, r.parent_room_id FROM rooms r JOIN chain c ON r.id = c.parent_room_id"
+                ") SELECT id FROM chain", (room_id,))
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def _spend_budget(self, room_id) -> bool:
+        """Charges one reply to every level of a breakout's chain.
+
+        Returns False and concludes the breakout when any level is exhausted.
+        """
+        if not self.settings.breakout_reply_budget:
+            return True
+        chain = await self._budget_chain(room_id)
+        budgets = []
+        for rid in chain:
+            raw = await self.cache.get(f'budget:{rid}')
+            budgets.append(int(raw) if raw else self.settings.breakout_reply_budget)
+        after = breakout.deduct(budgets)
+        if after == budgets:
+            await self._conclude_breakout(room_id)
+            return False
+        for rid, value in zip(chain, after):
+            await self.cache.set(f'budget:{rid}', value)
+        return True
+
+    async def _conclude_breakout(self, room_id):
+        """Posts a conclusion back to the parent and stops the breakout."""
+        state = await self._load(room_id)
+        if not state.parent_room_id:
+            return
+        names = [ai.name for ai in state.ais]
+        content = breakout.conclusion_content(state.room_name or "小会", names, "讨论已结束")
+        self._post_system(state.parent_room_id, content)
 
     async def _pending_deadline(self, room_id, state):
         """Runs on a collaboration room's timer when a step waits for a human.

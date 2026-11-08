@@ -87,6 +87,7 @@ message GatewayEvent {
     ConfirmationInput confirmation_input = 8;
     CouncilStart council_start = 9;
     CouncilOverride council_override = 10;
+    BreakoutClosed breakout_closed = 11;
   }
 }
 
@@ -114,6 +115,12 @@ message CouncilOverride {
   int64 room_id = 1;
   string verdict = 2;  // "veto" | "force_pass"
   int64 member_id = 3;
+}
+
+// A breakout's parent stopped collaborating or was removed, so the breakout
+// must wrap up and stop.
+message BreakoutClosed {
+  int64 room_id = 1;
 }
 
 message ControlChanged {

@@ -56,6 +56,8 @@ class Settings:
     round_max_replies: int = 12
     # Council ballots time out when no new vote arrives for this long.
     council_timeout_seconds: float = 180.0
+    # AI replies a breakout may spend per level; exhausted breakouts conclude.
+    breakout_reply_budget: int = 20
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,4 +104,5 @@ class Settings:
             host_model=os.environ.get("AI_HOST_MODEL", "deepseek-flash"),
             round_max_replies=max(1, _int("AI_ROUND_MAX_REPLIES", 12)),
             council_timeout_seconds=max(10.0, _float("AI_COUNCIL_TIMEOUT_SECONDS", 180)),
+            breakout_reply_budget=max(0, _int("AI_BREAKOUT_REPLY_BUDGET", 20)),
         )

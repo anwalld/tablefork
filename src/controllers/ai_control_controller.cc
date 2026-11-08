@@ -187,6 +187,14 @@ AiControlController::Response AiControlController::collaboration(drogon::HttpReq
     }
     co_await commit(std::move(tx));
     co_await reportControlChanged(id, session.request);
+    if (!enabled)
+    {
+        // Each now-closed breakout gets told to wrap up.
+        const auto children = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT id FROM rooms WHERE parent_room_id = ? AND status = 'closed'", id);
+        for (const auto &row : children)
+            reportBreakoutClosed(row["id"].as<int64_t>());
+    }
     Json::Value event;
     event["type"] = "collaboration_changed";
     event["room_id"] = Json::Int64(id);

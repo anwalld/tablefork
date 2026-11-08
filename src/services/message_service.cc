@@ -192,10 +192,24 @@ drogon::Task<StoredMessage> store(Author author,
     {
         throw ApiError::roomNotFound();
     }
+    // Speaking in a breakout is allowed for a joining member, or for an
+    // owner/admin of any ancestor room (the parent splits the group).
     const auto membership = co_await tx->execSqlCoro(
-        "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?",
+        "SELECT 1 FROM room_members WHERE room_id = ? AND member_id = ?"
+        " UNION "
+        "SELECT 1 FROM room_members m JOIN rooms r ON r.id = m.room_id "
+        "WHERE m.member_id = ? AND m.role IN ('owner','admin') "
+        "AND r.id IN ("
+        "  WITH RECURSIVE chain AS ("
+        "    SELECT parent_room_id AS id FROM rooms WHERE id = ?"
+        "    UNION ALL"
+        "    SELECT r2.parent_room_id FROM rooms r2 JOIN chain c ON r2.id = c.id"
+        "  ) SELECT id FROM chain"
+        ")",
         roomId,
-        author.memberId);
+        author.memberId,
+        author.memberId,
+        roomId);
     if (membership.empty())
     {
         throw ApiError::roomNotFound();
@@ -546,15 +560,18 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
             ? "AND MATCH(msg.content) AGAINST (? IN BOOLEAN MODE) "
             : "AND ? = '' ";
         co_return co_await drogon::app().getDbClient()->execSqlCoro(
-            "SELECT msg.seq, msg.member_id, msg.client_msg_id, msg.content,msg.stopped,msg.generation_outcome,msg.generation_attempt, "
+            "WITH RECURSIVE scope AS ("
+            "  SELECT ? AS id UNION ALL "
+            "  SELECT c.id FROM rooms c JOIN scope s ON c.parent_room_id = s.id"
+            ") "
+            "SELECT msg.room_id, msg.seq, msg.member_id, msg.client_msg_id, msg.content, msg.stopped, msg.generation_outcome, msg.generation_attempt, "
             "msg.created_at_ms, m.display_name, m.type AS member_type "
             "FROM messages msg JOIN members m ON m.id = msg.member_id "
-            "JOIN room_members rm ON rm.room_id = msg.room_id AND rm.member_id = ? "
-            "WHERE msg.room_id = ? " + predicate +
+            "WHERE msg.room_id IN (SELECT id FROM scope) " + predicate +
             "AND (? = '' OR LOCATE(?, msg.content) > 0) "
             "AND (? = 0 OR msg.member_id = ?) AND msg.created_at_ms >= ? AND msg.created_at_ms <= ? "
             "AND msg.seq < ? ORDER BY msg.seq DESC LIMIT ?",
-            session.memberId, roomId, indexed ? candidate : std::string(), keyword, keyword,
+            roomId, indexed ? candidate : std::string(), keyword, keyword,
             sender.value_or(0), sender.value_or(0), from.value_or(0), to.value_or(INT64_MAX),
             before.value_or(INT64_MAX), limit);
     };
@@ -572,7 +589,7 @@ drogon::Task<Json::Value> MessageService::search(Session session, int64_t roomId
     const auto &rows = *loaded;
     Json::Value result;
     result["messages"] = Json::arrayValue;
-    for (const auto &row : rows) result["messages"].append(rowJson(roomId, row));
+    for (const auto &row : rows) result["messages"].append(rowJson(row["room_id"].as<int64_t>(), row));
     result["next_before"] = rows.empty() ? Json::Value() : Json::Value(Json::Int64(rows[rows.size()-1]["seq"].as<int64_t>()));
     co_return result;
 }
