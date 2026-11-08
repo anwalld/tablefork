@@ -6,6 +6,7 @@ import { AiDrafts } from '../lib/ai-drafts.js'
 import { ChatSocket } from '../lib/chat-socket.js'
 import { leave, prepareLeave } from '../lib/leave.js'
 import { insertMention, matchingMembers, mentionQuery } from '../lib/mentions.js'
+import { commandQuery, insertCommand, matchingCommands } from '../lib/commands.js'
 import { RoomStream } from '../lib/room-stream.js'
 import { fetchAllRooms } from '../lib/rooms.js'
 import { exportRoom } from '../lib/transcript.js'
@@ -225,6 +226,50 @@ const aiDrafts = computed(() => {
 
 const suggestions = computed(() => matchingMembers(members.value, mentionQuery(draft.value, caret.value)))
 
+// "/" command picker: shown while a leading "/word" is typed in a room that
+// collaborates; arrow keys move, Tab or Enter picks, Escape closes.
+const commandIndex = ref(0)
+const commandsDismissed = ref(false)
+const commandSuggestions = computed(() => commandsDismissed.value ? [] : matchingCommands(
+  commandQuery(draft.value, caret.value),
+  { collaboration: !!activeRoom.value?.collaboration_enabled, breakout: !!activeRoom.value?.parent_room_id, manager: canManageAi.value }))
+// Reset the highlight only when the offered commands change, not whenever a
+// room or member refresh recomputes the same list.
+watch(() => commandSuggestions.value.map(c => c.name).join(' '), () => { commandIndex.value = 0 })
+watch(draft, () => { commandsDismissed.value = false })
+
+// Rooms as a tree: each breakout right under the room it split from, so the
+// cgroup-like hierarchy and the AIs at each table are visible at a glance.
+const roomTree = computed(() => {
+  const byParent = new Map()
+  const ids = new Set(rooms.value.map(r => r.id))
+  for (const room of rooms.value) {
+    const parent = room.parent_room_id && ids.has(room.parent_room_id) ? room.parent_room_id : null
+    if (!byParent.has(parent)) byParent.set(parent, [])
+    byParent.get(parent).push(room)
+  }
+  const out = []
+  const walk = (parent, depth) => {
+    for (const room of byParent.get(parent) ?? []) {
+      out.push({ room, depth })
+      walk(room.id, depth + 1)
+    }
+  }
+  walk(null, 0)
+  return out
+})
+const breadcrumb = computed(() => {
+  const chain = []
+  let room = activeRoom.value
+  const seen = new Set()
+  while (room?.parent_room_id && !seen.has(room.id)) {
+    seen.add(room.id)
+    room = rooms.value.find(r => r.id === room.parent_room_id)
+    if (room) chain.unshift(room)
+  }
+  return chain
+})
+
 const pending = computed(() => {
   const confirmed = new Set(timeline.value.map((m) => m.client_msg_id))
   return (outbox.get(activeId.value) ?? []).filter((m) => !confirmed.has(m.clientMsgId))
@@ -362,6 +407,16 @@ async function loadMembers() {
 function trackCaret(event) {
   caret.value = event.target.selectionStart ?? draft.value.length
   selectedMentions.value = selectedMentions.value.filter(m => draft.value.slice(m.start, m.end) === `@${m.name}`)
+}
+
+async function chooseCommand(command) {
+  const result = insertCommand(draft.value, caret.value, command)
+  draft.value = result.text
+  caret.value = result.caret
+  await nextTick()
+  commandsDismissed.value = true
+  composerEl.value?.setSelectionRange(result.caret, result.caret)
+  composerEl.value?.focus()
 }
 
 async function chooseMention(member) {
@@ -525,6 +580,25 @@ function retry(entry) {
 }
 
 function onKeydown(event) {
+  const commands = commandSuggestions.value
+  if (commands.length && !event.isComposing) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const step = event.key === 'ArrowDown' ? 1 : -1
+      commandIndex.value = (commandIndex.value + step + commands.length) % commands.length
+      return
+    }
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+      event.preventDefault()
+      chooseCommand(commands[commandIndex.value] ?? commands[0])
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      commandsDismissed.value = true
+      return
+    }
+  }
   if (event.key === 'Tab' && suggestions.value.length) {
     event.preventDefault()
     chooseMention(suggestions.value[0])
@@ -640,14 +714,19 @@ onBeforeUnmount(() => {
       </AppDialog>
       <nav class="room-list">
         <button
-          v-for="room in rooms"
+          v-for="{ room, depth } in roomTree"
           :key="room.id"
           class="room"
-          :class="{ active: room.id === activeId }"
+          :class="{ active: room.id === activeId, breakout: depth > 0 }"
+          :style="{ paddingLeft: `${8 + depth * 16}px` }"
           @click="openRoom(room)"
         >
-          <span class="room-name">{{ room.name }}</span>
+          <span class="room-main">
+            <span class="room-name"><span v-if="depth" class="branch" aria-hidden="true">└ </span>{{ room.name }}</span>
+            <span v-if="room.ai_names?.length" class="room-ais" :aria-label="`AI：${room.ai_names.join('、')}`">AI：{{ room.ai_names.join('、') }}</span>
+          </span>
           <span v-if="room.parent_room_id" class="tag" aria-label="小会">小会</span>
+          <span v-if="room.room_status === 'closed'" class="tag muted" aria-label="已结束">已结束</span>
           <span v-if="room.unread_count" class="tag" aria-label="未读消息">{{ room.unread_count > 99 ? '99+' : room.unread_count }}</span>
           <span v-if="room.mention_seq" class="tag" role="button" tabindex="0"
             @click.stop="locateMessage(room.id, room.mention_seq, true)"
@@ -663,7 +742,12 @@ onBeforeUnmount(() => {
     <main class="chat">
       <template v-if="activeRoom">
         <header class="chat-head">
-          <h1>{{ activeRoom.name }}</h1>
+          <h1>
+            <span v-for="parent in breadcrumb" :key="parent.id" class="crumb">
+              <button type="button" class="link" @click="openRoom(parent)">{{ parent.name }}</button> ›
+            </span>
+            {{ activeRoom.name }}
+          </h1>
           <template v-if="activeRoom.status === 'joined' && !activeRemoval">
             <button @click="invitingUser = true">邀请</button>
             <AppDialog v-if="invitingUser" title="邀请用户" @close="invitingUser = false">
@@ -750,7 +834,19 @@ onBeforeUnmount(() => {
           </div>
 
           <form class="composer" @submit.prevent="send">
-            <ul v-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及成员">
+            <div v-if="commandSuggestions.length" class="command-picker">
+              <ul class="command-list" role="listbox" aria-label="指令">
+                <li v-for="(command, index) in commandSuggestions" :key="command.name"
+                  role="option" :aria-selected="index === commandIndex">
+                  <button type="button" :class="{ selected: index === commandIndex }"
+                    @mouseenter="commandIndex = index" @mousedown.prevent @click="chooseCommand(command)">
+                    <span class="command-name">{{ command.name }}</span><span v-if="command.args" class="command-args">{{ command.args }}</span>
+                  </button>
+                </li>
+              </ul>
+              <p class="command-hint" role="status">{{ commandSuggestions[commandIndex]?.description }}</p>
+            </div>
+            <ul v-else-if="suggestions.length" class="mention-list" role="listbox" aria-label="提及成员">
               <li v-for="member in suggestions" :key="member.id">
                 <button type="button" class="link" @click="chooseMention(member)">@{{ member.name }}{{ member.type === 'ai' ? ` · ${member.creator_name ?? '旧版预置AI'}` : '' }}</button>
               </li>
@@ -760,7 +856,7 @@ onBeforeUnmount(() => {
               v-model="draft"
               :disabled="!!activeRemoval || activeRoom?.status === 'readonly'"
               rows="2"
-              :placeholder="activeRoom?.status === 'readonly' ? '只读：你未参加这个小会' : '输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员'"
+              :placeholder="activeRoom?.status === 'readonly' ? '只读：你未参加这个小会' : (activeRoom?.collaboration_enabled ? '输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员，/ 查看指令' : '输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员')"
               aria-label="消息内容"
               @keydown="onKeydown"
               @keyup="trackCaret"

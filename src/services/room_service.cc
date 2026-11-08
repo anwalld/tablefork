@@ -1,6 +1,8 @@
 #include "services/ai_service.h"
 #include "services/room_service.h"
 
+#include <sstream>
+
 #include <algorithm>
 #include <drogon/drogon.h>
 #include <optional>
@@ -268,7 +270,11 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         // Rooms the caller was invited to but has not joined are listed too.
         "  SELECT id FROM visible UNION SELECT room_id FROM room_invites WHERE user_id = ?"
         ") "
-        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, r.collaboration_enabled, m.member_id, "
+        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, r.collaboration_enabled, r.status AS room_status, m.member_id, "
+        // The AIs at each table, so the client can show who sits where.
+        "(SELECT GROUP_CONCAT(am.display_name ORDER BY arm.joined_at, am.id SEPARATOR '\\n') "
+        " FROM room_members arm JOIN members am ON am.id = arm.member_id "
+        " WHERE arm.room_id = r.id AND am.type = 'ai') AS ai_names, "
         "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
         "(SELECT COUNT(*) FROM messages msg WHERE msg.room_id = r.id "
         " AND msg.seq > COALESCE(m.read_seq, r.last_seq) AND msg.member_id <> ?) AS unread_count, "
@@ -306,6 +312,14 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         room["mention_seq"] = row["mention_seq"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["mention_seq"].as<int64_t>()));
         room["parent_room_id"] = row["parent_room_id"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["parent_room_id"].as<int64_t>()));
         room["collaboration_enabled"] = row["collaboration_enabled"].as<bool>();
+        room["room_status"] = row["room_status"].as<std::string>();
+        room["ai_names"] = Json::arrayValue;
+        if (!row["ai_names"].isNull())
+        {
+            std::istringstream names(row["ai_names"].as<std::string>());
+            for (std::string name; std::getline(names, name, '\n');)
+                if (!name.empty()) room["ai_names"].append(name);
+        }
         rooms.append(std::move(room));
     }
     Json::Value body;

@@ -40,6 +40,8 @@ def test_parent_members_can_read_and_search_but_not_speak(make_user, make_room, 
     # The non-participant sees the breakout read-only in the room list.
     listed = {r["id"]: r for r in member.get("/api/rooms").json()["rooms"]}
     assert listed[child]["status"] == "readonly"
+    assert listed[child]["parent_room_id"] == room and listed[child]["room_status"] == "active"
+    assert listed[child]["ai_names"] == [] and listed[room]["ai_names"] == []
     history = member.get(f"/api/rooms/{child}/messages").json()["messages"]
     assert any("zq9" in m["content"] for m in history)
     found = member.get(f"/api/rooms/{room}/search", params={"q": "zq9"}).json()["messages"]
