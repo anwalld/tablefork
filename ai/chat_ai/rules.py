@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 class Human:
     member_id: int
     user_id: int
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,19 +49,24 @@ class RoomState:
     epoch: int = 0
     last_trigger_seq: int = 0
     last_trigger_id: str = ""
+    # Room-level collaboration mode, reported by the chat server's snapshot.
+    collaboration_enabled: bool = False
+    room_name: str = ""
 
     def ai(self, slug: str) -> RoomAi | None:
         return next((a for a in self.ais if a.slug == slug), None)
 
     def to_json(self) -> dict:
         return {
-            "humans": [[h.member_id, h.user_id] for h in self.humans],
+            "humans": [[h.member_id, h.user_id, h.name] for h in self.humans],
             "ais": [[a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy] for a in self.ais],
             "target": self.target,
             "proactive_mask": self.proactive_mask,
             "timer_due": self.timer_due, "pending": self.pending,
             "active": self.active, "deleted": self.deleted,
             "epoch": self.epoch, "last_trigger_seq": self.last_trigger_seq, "last_trigger_id": self.last_trigger_id,
+            "collaboration_enabled": self.collaboration_enabled,
+            "room_name": self.room_name,
         }
 
     @classmethod
@@ -74,6 +80,8 @@ class RoomState:
             active=data.get("active"), deleted=data.get("deleted", False),
             epoch=data.get("epoch", 0), last_trigger_seq=data.get("last_trigger_seq", 0),
             last_trigger_id=data.get("last_trigger_id", ""),
+            collaboration_enabled=data.get("collaboration_enabled", False),
+            room_name=data.get("room_name", ""),
         )
 
 

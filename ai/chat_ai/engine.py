@@ -14,7 +14,7 @@ from typing import Awaitable, Callable
 
 from . import rules
 from .controls import GenerationControls
-from .context import estimate_tokens, recent_messages, related_messages, related_note, to_chat
+from .context import build_system_prompt, estimate_tokens, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
 from .providers.base import ChatMessage, KeyRejected, ProviderError
 
@@ -406,7 +406,10 @@ class Engine:
         messages, related = await self._context(room_id, job, ai.member_id)
         if 'persona_snapshot' not in job:
             job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
-        system = job['persona_snapshot'] if ai.is_legacy else f'你是 {ai.name}，聊天室中的独立AI角色，created by {ai.creator_name}。只以自己的身份说话。\n' + job['persona_snapshot']
+        system = build_system_prompt(ai, job['persona_snapshot'],
+                                     collaboration=state.collaboration_enabled,
+                                     room_name=state.room_name,
+                                     humans=state.humans, ais=state.ais)
         if job['kind'] in ('proactive', 'goodbye'):
             prompt = GOODBYE_PROMPT if job['kind'] == 'goodbye' else PROACTIVE_PROMPT
             messages.append(ChatMessage('user', prompt))
@@ -716,6 +719,8 @@ class Engine:
 def _apply_snapshot(state, snapshot):
     state.humans = [rules.Human(h.member_id, h.user_id) for h in snapshot.humans]
     state.ais = [rules.RoomAi(a.member_id,a.slug,a.provider,a.name,a.model_slug,a.admission_id,a.persona,a.persona_version,a.creator_name,a.is_legacy or not a.model_slug) for a in snapshot.ais]
+    state.collaboration_enabled = snapshot.collaboration_enabled
+    state.room_name = snapshot.room_name
     state.pending = [j for j in state.pending if any(a.member_id==j.get('member_id') and a.admission_id==j.get('admission_id',a.admission_id) for a in state.ais)]
     if state.target is not None and (len(state.humans) != 1 or state.ai(state.target) is None):
         state.target = None

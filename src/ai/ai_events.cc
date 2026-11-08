@@ -10,6 +10,11 @@ namespace
 {
 drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
 {
+    const auto collaboration = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT collaboration_enabled, name FROM rooms WHERE id = ?", roomId);
+    snapshot->set_collaboration_enabled(
+        !collaboration.empty() && collaboration[0]["collaboration_enabled"].as<bool>());
+    if (!collaboration.empty()) snapshot->set_room_name(collaboration[0]["name"].as<std::string>());
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
         "SELECT m.id,m.type,m.user_id,m.display_name,p.slug,p.provider,p.model_slug,p.is_legacy,u.username,a.persona,a.persona_version,HEX(a.admission_id) AS admission "
         "FROM room_members rm "
@@ -26,6 +31,7 @@ drogon::Task<> fillSnapshot(int64_t roomId, ai::RoomSnapshot *snapshot)
             auto *human = snapshot->add_humans();
             human->set_member_id(row["id"].as<int64_t>());
             human->set_user_id(row["user_id"].as<int64_t>());
+            human->set_name(row["display_name"].as<std::string>());
         }
         else if (!row["slug"].isNull())
         {

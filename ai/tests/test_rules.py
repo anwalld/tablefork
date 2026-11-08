@@ -172,6 +172,14 @@ def test_state_round_trips_through_json():
     assert RoomState.from_json(state.to_json()) == state
 
 
+def test_state_round_trips_collaboration_flags():
+    state = RoomState(humans=[ALICE], ais=[CLAUDE], collaboration_enabled=True, room_name="作战室")
+    assert RoomState.from_json(state.to_json()) == state
+    # The human name travels too, for the collaboration room-and-members injector.
+    named = RoomState(humans=[Human(10, 1, "alice")])
+    assert named.humans[0].name == "alice"
+
+
 def test_success_mask_is_idempotent_and_old_rounds_do_not_count():
     state = one_human(CLAUDE)
     state.target = 'claude'

@@ -161,4 +161,33 @@ AiControlController::Response AiControlController::stop(drogon::HttpRequestPtr r
     co_await deliverStopped(id, session.request);
     co_return jsonResponse(Json::Value(Json::objectValue));
 }
+
+AiControlController::Response AiControlController::collaboration(drogon::HttpRequestPtr req, std::string room)
+{
+    std::vector<std::string> args{room};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::collaboration", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    const auto &body = jsonBody(req);
+    if (!body["enabled"].isBool()) throw ApiError::invalidArgument("enabled required");
+    const auto enabled = body["enabled"].asBool();
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    const auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.collaboration");
+    const auto role = co_await lockActor(tx, id, session.memberId);
+    if (role != "owner" && role != "admin") throw ApiError::forbidden();
+    if (!prior)
+    {
+        co_await tx->execSqlCoro("UPDATE rooms SET collaboration_enabled = ? WHERE id = ?", enabled, id);
+        co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
+    }
+    co_await commit(std::move(tx));
+    co_await reportControlChanged(id, session.request);
+    Json::Value event;
+    event["type"] = "collaboration_changed";
+    event["room_id"] = Json::Int64(id);
+    event["enabled"] = enabled;
+    co_await RoomHub::instance().publish(id, toJsonString(event), session.request);
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
 }

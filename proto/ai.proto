@@ -16,6 +16,7 @@ service AiGateway {
 message Human {
   int64 member_id = 1;
   int64 user_id = 2;
+  string name = 3;
 }
 
 message AiMember {
@@ -36,6 +37,8 @@ message RoomSnapshot {
   int64 room_id = 1;
   repeated Human humans = 2;
   repeated AiMember ais = 3;
+  bool collaboration_enabled = 4;
+  string room_name = 5;
 }
 
 message Sender {
