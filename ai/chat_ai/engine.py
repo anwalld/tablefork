@@ -14,15 +14,31 @@ from typing import Awaitable, Callable
 
 from . import rules
 from .controls import GenerationControls
-from .context import recent_messages, to_chat
+from .context import estimate_tokens, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
-from .providers.base import ChatMessage, KeyRejected
+from .providers.base import ChatMessage, KeyRejected, ProviderError
 
 log = logging.getLogger(__name__)
 PROVIDER_NAMES = {"deepseek": "DeepSeek", "openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Gemini"}
 MAX_CONTENT = 4000
 PROACTIVE_PROMPT = "（对方有一阵子没说话了。请你自然地主动说点什么，比如接着刚才的话题，或者问候一下。）"
 GOODBYE_PROMPT = "（对方很久没有回复了。请简短、自然地道个别，说下次再聊。）"
+MAX_RETRY_AFTER = 60
+
+
+def strip_self_name(text: str, name: str) -> str:
+    """Removes a leading "<own name>:" that models copy from the history format."""
+    stripped = text.lstrip()
+    for colon in ('：', ':'):
+        if name and stripped.startswith(name + colon):
+            return stripped[len(name) + 1:].lstrip()
+    return text
+
+
+def _maybe_own_name(text: str, name: str) -> bool:
+    """True while the reply so far could still turn into "<own name>:"."""
+    stripped = text.lstrip()
+    return bool(name) and any((name + colon).startswith(stripped) for colon in ('：', ':'))
 
 _RELEASE = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
@@ -387,8 +403,7 @@ class Engine:
             await self._fail_job(room_id, job, 'api_key_required',
                                  f'请先填写 {PROVIDER_NAMES[ai.provider]} 的 API key', False)
             return
-        entries = await recent_messages(self.cache, self.pool, room_id, self.settings.context_messages)
-        messages = to_chat(entries, ai.member_id, self.settings.context_messages, self.settings.context_chars)
+        messages, related = await self._context(room_id, job, ai.member_id)
         if 'persona_snapshot' not in job:
             job['persona_snapshot'] = agent.persona if ai.is_legacy else ai.persona
         system = job['persona_snapshot'] if ai.is_legacy else f'你是 {ai.name}，聊天室中的独立AI角色，created by {ai.creator_name}。只以自己的身份说话。\n' + job['persona_snapshot']
@@ -400,16 +415,28 @@ class Engine:
         elif job['kind'] == 'reply' and messages[-1].role == 'assistant' and job.get('trigger'):
             trigger = job['trigger']
             messages.append(ChatMessage('user', f"请回复之前的新消息：{trigger['name']}：{trigger['content']}"))
+        if related is not None:
+            # Placed just before the newest turn, so the cached prefix stays the same.
+            messages.insert(len(messages) - 1, related)
+        strip = self.settings.strip_self_name
 
+        def visible(text):
+            if not strip:
+                return text
+            if _maybe_own_name(text, ai.name):
+                return ''
+            return strip_self_name(text, ai.name)
+
+        shown = ''
         parts = []
         buffered = []
         sequence = 0
         last_flush = time.monotonic()
         async def flush():
-            nonlocal sequence, last_flush
+            nonlocal sequence, last_flush, shown
             sequence += 1
             # Snapshots let a reconnect or a new attempt replace partial text.
-            snapshot = ''.join(parts)[:MAX_CONTENT]
+            snapshot = visible(''.join(parts))[:MAX_CONTENT]
             if self.controls:
                 saved = await self.controls.snapshot(job, snapshot)
                 if not saved:
@@ -420,10 +447,13 @@ class Engine:
                         raise asyncio.CancelledError
                     current.active['last_nonempty_content'] = snapshot
             delta = ''.join(buffered)
+            if strip:
+                delta = snapshot[len(shown):] if snapshot.startswith(shown) else snapshot
+                shown = snapshot
             buffered.clear()
             self.send(ai_pb2.AiAction(chunk=ai_pb2.Chunk(
                 room_id=room_id, generation_id=job['id'], ai_member_id=ai.member_id,
-                text=delta, snapshot=''.join(parts)[:MAX_CONTENT], attempt=job['attempt'],
+                text=delta, snapshot=snapshot, attempt=job['attempt'],
                 sequence=sequence, cumulative=True, admission_id=job.get("admission_id", ""))))
             last_flush = time.monotonic()
         await flush()  # clears the previous attempt even before the first token
@@ -431,7 +461,8 @@ class Engine:
             provider = self.providers.create(ai.provider)
             async with asyncio.timeout(self.settings.generation_timeout):
                 async for piece in provider.stream(model=agent.model, system=system,
-                        messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens):
+                        messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens,
+                        cache_prefix=self.settings.context_block > 0):
                     parts.append(piece)
                     buffered.append(piece)
                     if time.monotonic() - last_flush >= self.settings.chunk_interval:
@@ -453,9 +484,13 @@ class Engine:
         except Exception as error:
             await flush()
             log.warning('generation by %s failed: %s', ai.slug, type(error).__name__)
+            if self.settings.classified_retry and isinstance(error, ProviderError):
+                await self._fail_classified(room_id, job, ai, error)
+                return
             await self._fail_job(room_id, job, 'provider_error', f'{ai.name} 暂时无法回复', True)
             return
-        content = ''.join(parts).strip()[:MAX_CONTENT]
+        raw = ''.join(parts)
+        content = (strip_self_name(raw, ai.name) if strip else raw).strip()[:MAX_CONTENT]
         if not content:
             await self._fail_job(room_id, job, 'empty_reply', f'{ai.name} 没有给出回复', True)
             return
@@ -469,6 +504,43 @@ class Engine:
                                 retry_at=self.clock() + self.settings.retry_base_seconds)
             final = copy.deepcopy(state.active)
         self._send_final(room_id, final)
+
+    async def _context(self, room_id, job, member_id):
+        """Recent messages, plus related older ones when retrieval is on."""
+        settings = self.settings
+        count, chars, tokens = settings.context_messages, settings.context_chars, settings.context_tokens
+        if job.get('context_halved'):
+            count, chars, tokens = max(1, count // 2), max(1, chars // 2), tokens // 2
+        entries = await recent_messages(self.cache, self.pool, room_id, count + settings.context_block)
+        trigger = job.get('trigger')
+        related = None
+        if (settings.retrieval_enabled and job['kind'] == 'reply' and trigger and entries
+                and all('seq' in entry for entry in entries)):
+            items = await related_messages(self.pool, room_id, min(int(e['seq']) for e in entries),
+                                           trigger.get('content', ''), settings.retrieval_top_k,
+                                           settings.retrieval_chars)
+            related = related_note(items)
+            if related is not None:
+                # The reference shares the history budget instead of adding to it.
+                if tokens:
+                    tokens = max(1, tokens - estimate_tokens(related.content))
+                else:
+                    chars = max(1, chars - len(related.content))
+        return to_chat(entries, member_id, count, chars, block=settings.context_block,
+                       max_tokens=tokens), related
+
+    async def _fail_classified(self, room_id, job, ai, error):
+        backoff = self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1)
+        if error.kind == 'refused':
+            await self._fail_job(room_id, job, 'content_refused', f'{ai.name} 拒绝回复这条内容', False)
+        elif error.kind == 'context_too_long' and not job.get('context_halved'):
+            await self._fail_job(room_id, job, 'context_too_long', f'{ai.name} 暂时无法回复', True,
+                                 updates={'context_halved': True})
+        elif error.kind == 'rate_limit':
+            delay = min(MAX_RETRY_AFTER, max(backoff, error.retry_after or 0))
+            await self._fail_job(room_id, job, 'rate_limited', f'{ai.name} 暂时无法回复', True, delay=delay)
+        else:
+            await self._fail_job(room_id, job, 'provider_error', f'{ai.name} 暂时无法回复', True)
 
     async def _controlled_finish(self, room_id, job):
         durable = await self.controls.generation(job['id'])
@@ -551,14 +623,16 @@ class Engine:
         if job['kind'] in ('proactive', 'goodbye') and job['epoch'] == state.epoch:
             state.timer_due = self._next_timer(state)
 
-    async def _fail_job(self, room_id, job, code, message, retryable):
+    async def _fail_job(self, room_id, job, code, message, retryable, *, delay=None, updates=None):
         terminal = False
         async with self._room(room_id) as state:
             if not self._owns(state, job):
                 return
             if retryable and job['attempt'] < self.settings.generation_max_attempts:
+                if delay is None:
+                    delay = self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1)
                 state.active.update(status='queued', owner='', lease_until=0,
-                    retry_at=self.clock() + self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1))
+                    retry_at=self.clock() + delay, **(updates or {}))
             elif code == 'ai_removed' or (code == 'api_key_required' and job['attempt'] == 1):
                 if self.controls:
                     await self.controls.cancelled(job)
