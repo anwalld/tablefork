@@ -54,6 +54,8 @@ class Settings:
     host_provider: str = "deepseek"
     host_model: str = "deepseek-flash"
     round_max_replies: int = 12
+    # Council ballots time out when no new vote arrives for this long.
+    council_timeout_seconds: float = 180.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -99,4 +101,5 @@ class Settings:
             host_provider=os.environ.get("AI_HOST_PROVIDER", "deepseek"),
             host_model=os.environ.get("AI_HOST_MODEL", "deepseek-flash"),
             round_max_replies=max(1, _int("AI_ROUND_MAX_REPLIES", 12)),
+            council_timeout_seconds=max(10.0, _float("AI_COUNCIL_TIMEOUT_SECONDS", 180)),
         )

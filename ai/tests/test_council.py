@@ -46,3 +46,17 @@ def test_rotate_lead_skips_the_proposer_and_walks_the_order():
     # Proposer never leads, even if they were next.
     assert rotate_lead(["a", "b"], "a", None) == "b"
     assert rotate_lead(["a", "b", "c"], "c", None) == "a"
+
+from chat_ai.council import parse_vote_json
+
+
+def test_parse_vote_json():
+    assert parse_vote_json('{"verdict": "pass", "reason": "有道理"}') == {"verdict": "pass", "reason": "有道理"}
+    assert parse_vote_json('```json\n{"verdict": "reject", "reason": "太冒险"}\n```') == {"verdict": "reject", "reason": "太冒险"}
+
+
+def test_parse_vote_json_rejects_bad_verdicts():
+    assert parse_vote_json('{"verdict": "maybe", "reason": "?"}') is None
+    assert parse_vote_json('not json') is None
+    # abstain still parses, the caller filters it out of effective votes.
+    assert parse_vote_json('{"verdict": "abstain", "reason": ""}') == {"verdict": "abstain", "reason": ""}

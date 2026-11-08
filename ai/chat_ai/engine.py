@@ -14,6 +14,8 @@ from typing import Awaitable, Callable
 
 from . import rules
 from . import host
+from . import council
+from .council_state import Ballot
 from .controls import GenerationControls
 from .context import build_system_prompt, estimate_tokens, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
@@ -86,7 +88,8 @@ class Engine:
         value = getattr(event, body) if body else None
         if body in ('message_saved', 'members_changed'):
             room_id = value.room.room_id
-        elif body in ('room_deleted', 'generation_rejected', 'control_changed', 'confirmation_input'):
+        elif body in ('room_deleted', 'generation_rejected', 'control_changed', 'confirmation_input',
+                      'council_start', 'council_override'):
             room_id = value.room_id
         else:
             await ack()
@@ -106,6 +109,16 @@ class Engine:
                     allowed = value.privileged or value.member_id == step.get('initiator')
                     if allowed:
                         step['status'] = 'done' if value.response == 'continue' else 'cancelled'
+            await ack()
+            return
+
+        if body == 'council_start':
+            await self._start_council(room_id, value.topic, value.proposer_member_id, seen)
+            await ack()
+            return
+
+        if body == 'council_override':
+            await self._override_council(room_id, value.verdict)
             await ack()
             return
 
@@ -355,6 +368,12 @@ class Engine:
             if job['status'] == 'final':
                 self._send_final(room_id, job)
                 return
+            if job['kind'] == 'vote':
+                await self._run_vote(room_id, job)
+                async with self._room(room_id) as state:
+                    if state.active and state.active['id'] == job['id']:
+                        state.active = None
+                return
             if self.controls and not await self.controls.reserve(room_id, job):
                 result = 'controlled'
                 await self._controlled_finish(room_id, job)
@@ -584,6 +603,116 @@ class Engine:
         """Asks the chat server to show the room a confirmation request."""
         self.send(ai_pb2.AiAction(system_notice=ai_pb2.SystemNotice(
             room_id=room_id, content=rules.confirmation_text(step))))
+
+    def _post_system(self, room_id, content):
+        """Sends a room-wide system message via the chat server."""
+        self.send(ai_pb2.AiAction(system_notice=ai_pb2.SystemNotice(
+            room_id=room_id, content=content)))
+
+    async def _council_member_ids(self, room_id):
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT member_id FROM room_council WHERE room_id=%s", (room_id,))
+            rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
+    async def _start_council(self, room_id, topic, proposer_member_id, seen):
+        chair_ids = await self._council_member_ids(room_id)
+        async with self._room(room_id, seen) as state:
+            if state is None or state.deleted:
+                return
+            chairs = [a.slug for a in state.ais if a.member_id in chair_ids]
+            if len(chairs) < 3:
+                self._post_system(room_id, "主席团成员不足 3 人，无法发起表决。")
+                return
+            round_ = int(await self.cache.incr(f'council:{room_id}:round'))
+            prev_raw = await self.cache.get(f'council:{room_id}:lead')
+            lead = council.rotate_lead(chairs, None, prev_raw.decode() if prev_raw else None)
+            deadline = self.clock() + self.settings.council_timeout_seconds
+            ballot = Ballot(round_, topic, proposer_member_id, lead, chairs, deadline)
+            await self.cache.set(f'council:{room_id}:{round_}', json.dumps(ballot.to_json()))
+            await self.cache.set(f'council:{room_id}:lead', lead)
+            proposer_user = next((h.user_id for h in state.humans if h.member_id == proposer_member_id), 0)
+            for slug in chairs:
+                ai = state.ai(slug)
+                state.pending.append({
+                    'id': uuid.uuid4().hex, 'slug': slug,
+                    'payer': [proposer_member_id, proposer_user],
+                    'kind': 'vote', 'hop': 1, 'epoch': state.epoch, 'slot': 0, 'attempt': 0,
+                    'member_id': ai.member_id, 'admission_id': ai.admission_id,
+                    'ballot_round': round_, 'topic': topic,
+                    'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
+                    'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
+                })
+            self._post_system(room_id, f"已发起表决（第 {round_} 轮）：{topic}")
+        await self._drain(room_id)
+
+    async def _override_council(self, room_id, verdict):
+        round_raw = await self.cache.get(f'council:{room_id}:round')
+        if not round_raw:
+            return
+        raw = await self.cache.get(f'council:{room_id}:{int(round_raw)}')
+        if not raw:
+            return
+        ballot = Ballot.from_json(json.loads(raw))
+        label = "强制通过" if verdict == "force_pass" else "否决"
+        self._post_system(room_id, f"第 {ballot.round} 轮表决已由人{label}。")
+        async with self._room(room_id) as state:
+            if state.pending_step is not None:
+                state.pending_step['status'] = 'done' if verdict == 'force_pass' else 'cancelled'
+
+    async def _finish_ballot(self, room_id, ballot):
+        result = ballot.tally()
+        label = {'pass': '客观通过', 'reject': '客观不通过', 'invalid': '无效，交给人决定'}[result.outcome]
+        rejects = [f"{ballot.votes[s]['reason']}" for s in ballot.chairs
+                   if s in ballot.votes and ballot.votes[s]['verdict'] == 'reject']
+        content = f"表决「{ballot.topic}」：{label}。"
+        if rejects:
+            content += " 少数派意见：" + "；".join(rejects)
+        self._post_system(room_id, content)
+        if result.outcome == 'pass':
+            async with self._room(room_id) as state:
+                deadline = self.clock() + self.settings.council_timeout_seconds
+                state.pending_step = {
+                    'id': f'council:{ballot.round}', 'kind': 'council', 'risk': 'side_effect',
+                    'initiator': ballot.proposer, 'description': f'执行「{ballot.topic}」',
+                    'deadline': deadline, 'status': 'pending',
+                }
+                state.timer_due = deadline
+                self._post_pending_step(room_id, state.pending_step)
+
+    async def _run_vote(self, room_id, job):
+        state = await self._load(room_id)
+        ai = state.ai(job['slug'])
+        agent = self.agents.get(ai.model_slug or ai.slug) if ai else None
+        if ai is None or agent is None:
+            return
+        key = await self.keys.get(job['payer'][1], ai.provider)
+        if key is None:
+            return
+        system = council.VOTE_PROMPT.format(topic=job['topic'])
+        provider = self.providers.create(ai.provider)
+        try:
+            parts = []
+            async with asyncio.timeout(self.settings.generation_timeout):
+                async for piece in provider.stream(
+                        model=agent.model, system=system,
+                        messages=[ChatMessage("user", f"议题：{job['topic']}")],
+                        api_key=key, max_tokens=256):
+                    parts.append(piece)
+        except (KeyRejected, ProviderError, TimeoutError):
+            return
+        verdict = council.parse_vote_json("".join(parts))
+        if verdict is None:
+            return
+        raw = await self.cache.get(f'council:{room_id}:{job["ballot_round"]}')
+        if not raw:
+            return
+        ballot = Ballot.from_json(json.loads(raw))
+        if not ballot.record(job['slug'], verdict['verdict'], verdict['reason']):
+            return
+        await self.cache.set(f'council:{room_id}:{job["ballot_round"]}', json.dumps(ballot.to_json()))
+        if ballot.complete():
+            await self._finish_ballot(room_id, ballot)
 
     async def _pending_deadline(self, room_id, state):
         """Runs on a collaboration room's timer when a step waits for a human.
