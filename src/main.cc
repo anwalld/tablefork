@@ -59,7 +59,8 @@ int main()
         drogon::app().createRedisClient(resolveIpv4(queueHost ? queueHost : "queue-redis"),
             6379, "queue", queuePassword, 4, false, 2.0);
     }
-    // A broken table template file stops the server here, not on first use.
+    // A broken table template file stops the server here, not on first use;
+    // a missing one just means no templates.
     chat::TableTemplates::all();
     drogon::app()
         .addListener("0.0.0.0", 8000)

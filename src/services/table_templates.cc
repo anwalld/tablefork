@@ -72,8 +72,12 @@ std::vector<TableTemplate> TableTemplates::loadFile(const std::string &path)
 const std::vector<TableTemplate> &TableTemplates::all()
 {
     static const std::vector<TableTemplate> templates = [] {
-        const char *path = std::getenv("TABLE_TEMPLATES_FILE");
-        return loadFile(path && *path ? path : "/usr/local/share/chat/table-templates.json");
+        const char *configured = std::getenv("TABLE_TEMPLATES_FILE");
+        const std::string path = configured && *configured ? configured : "/usr/local/share/chat/table-templates.json";
+        // No file means no templates (say, a test image without data files);
+        // a file that is there but broken still stops the server.
+        if (!std::ifstream(path)) return std::vector<TableTemplate>{};
+        return loadFile(path);
     }();
     return templates;
 }
