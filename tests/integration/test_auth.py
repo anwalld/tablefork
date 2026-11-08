@@ -182,7 +182,9 @@ def test_login_with_control_characters_looks_like_unknown_user(anon):
 )
 def test_auth_attempts_are_rate_limited(anon):
     statuses = [login(anon, unique_name(), "wrong-password").status_code for _ in range(30)]
-    assert statuses[0] == 401
+    # Earlier strict-phase tests share this address's budget, so the first
+    # attempt may already be limited; only the two outcomes are allowed.
+    assert set(statuses) <= {401, 429}
     assert 429 in statuses
     limited = login(anon, unique_name(), "wrong-password")
     assert limited.status_code == 429
@@ -191,6 +193,16 @@ def test_auth_attempts_are_rate_limited(anon):
     assert error["retryable"]
     assert error["retry_after"] >= 1
     assert limited.headers["Retry-After"] == str(error["retry_after"])
+    # Password recovery shares the same per-address budget: each reset check
+    # costs a slow hash, and answers must not be sprayed across usernames.
+    for path, body in (
+        ("/api/auth/password-recovery/question", {"username": unique_name()}),
+        ("/api/auth/password-recovery/reset",
+         {"username": unique_name(), "answer": "x", "password": "irrelevant-password-1"}),
+    ):
+        recovery = anon.post(path, json=body)
+        assert recovery.status_code == 429
+        assert error_code(recovery) == "rate_limited"
     # Only the auth endpoints are limited.
     assert anon.get("/health").status_code == 200
     assert anon.get("/api/auth/me").status_code == 401

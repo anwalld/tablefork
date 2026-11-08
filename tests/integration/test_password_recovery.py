@@ -122,3 +122,20 @@ def test_recovery_reset_rejects_peer_password_as_new_password(anon):
     response = reset(anon, name, "fluffy", name)
     assert response.status_code == 400
     assert error_code(response) == "weak_password"
+
+def test_recovery_answer_ignores_case_and_surrounding_spaces(anon):
+    name = unique_name()
+    register(
+        anon,
+        name,
+        security_question="你出生在哪个城市？",
+        security_answer="  Beijing　",
+        password_confirm=PASSWORD,
+    )
+    assert reset(anon, name, "BEIJING", "brand-new-password-123").status_code == 200
+    assert reset(anon, name, "　beijing ", "another-new-password-456").status_code == 200
+    assert login(anon, name, "another-new-password-456").status_code == 200
+    # Inner characters still matter.
+    response = reset(anon, name, "bei jing", "third-new-password-789")
+    assert response.status_code == 401
+    assert error_code(response) == "invalid_answer"

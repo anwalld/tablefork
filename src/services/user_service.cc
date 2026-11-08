@@ -65,6 +65,39 @@ void validateQuestion(const std::string &question)
     }
 }
 
+// Answers are compared after trimming ASCII and full-width spaces and folding
+// ASCII letters to lower case, so "Fluffy " at reset matches "fluffy" set at
+// registration. Other scripts are kept as typed.
+std::string normalizeAnswer(const std::string &answer)
+{
+    static const std::string kIdeographicSpace = "\xe3\x80\x80";
+    const auto isSpace = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    size_t begin = 0;
+    size_t end = answer.size();
+    for (;;)
+    {
+        if (begin < end && isSpace(answer[begin])) ++begin;
+        else if (answer.compare(begin, kIdeographicSpace.size(), kIdeographicSpace) == 0 &&
+                 begin + kIdeographicSpace.size() <= end)
+            begin += kIdeographicSpace.size();
+        else break;
+    }
+    for (;;)
+    {
+        if (end > begin && isSpace(answer[end - 1])) --end;
+        else if (end >= begin + kIdeographicSpace.size() &&
+                 answer.compare(end - kIdeographicSpace.size(), kIdeographicSpace.size(), kIdeographicSpace) == 0)
+            end -= kIdeographicSpace.size();
+        else break;
+    }
+    auto normalized = answer.substr(begin, end - begin);
+    for (auto &c : normalized)
+    {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return normalized;
+}
+
 void validateAnswer(const std::string &answer)
 {
     if (answer.empty() || !isPrintableText(answer) || answer.size() > 255)
@@ -95,6 +128,7 @@ drogon::Task<> UserService::registerUser(std::string username,
     validate(username, password);
     if (!securityQuestion.empty())
     {
+        securityAnswer = normalizeAnswer(securityAnswer);
         validateQuestion(securityQuestion);
         validateAnswer(securityAnswer);
     }
@@ -200,7 +234,11 @@ drogon::Task<> UserService::resetPassword(std::string username,
         throw invalidAnswer();
     }
     const auto userId = rows[0]["id"].as<int64_t>();
-    if (!co_await verifyPassword(answer, rows[0]["security_answer_hash"].as<std::string>()))
+    const auto stored = rows[0]["security_answer_hash"].as<std::string>();
+    const auto normalized = normalizeAnswer(answer);
+    // Answers saved before normalization were hashed exactly as typed.
+    if (!co_await verifyPassword(normalized, stored) &&
+        (normalized == answer || !co_await verifyPassword(answer, stored)))
     {
         throw invalidAnswer();
     }

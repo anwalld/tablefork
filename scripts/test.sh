@@ -209,7 +209,8 @@ READY
             test_ai_replies.py::test_ais_pick_up_each_other \
             test_ai_replies.py::test_ai_replies_do_not_use_up_the_users_limit \
             test_sessions.py::test_refresh_is_not_rate_limited_by_nginx \
-            test_gateway.py::test_real_ip_rate_limit_across_new_connections
+            test_gateway.py::test_real_ip_rate_limit_across_new_connections \
+            test_auth.py::test_auth_attempts_are_rate_limited
     wait "$rate_peer_pid"
 )
 

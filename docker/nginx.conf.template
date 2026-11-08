@@ -50,7 +50,7 @@ server {
     # Retrying it would mark both instances failed during a shared Redis outage.
     proxy_next_upstream error timeout http_502;
 
-    location ~ ^/api/auth/(login|register)$ {
+    location ~ ^/api/auth/(login|register|password-recovery/question|password-recovery/reset)$ {
         limit_req zone=auth burst=${AUTH_BURST} nodelay;
         error_page 429 = @rate_limited;
         proxy_pass http://app_servers;

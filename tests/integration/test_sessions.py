@@ -67,6 +67,22 @@ def send(client, room_id, count):
     socket.close()
 
 
+def wait_counted(redis, client, expected, timeout=10):
+    """Waits until the device's sends are counted. The count is recorded in
+    the background after each message's ACK, so a refresh right after the
+    last ACK could otherwise see an older count."""
+    device = redis.get(session_key(redis, client)).split("|")[3]
+    deadline = time.time() + timeout
+    while True:
+        counted = sum(int(redis.get(key) or 0)
+                      for key in redis.scan_iter(match=f"device_sends:{device}:*"))
+        if counted >= expected:
+            assert counted == expected, counted
+            return
+        assert time.time() < deadline, f"{counted} of {expected} sends counted"
+        time.sleep(0.05)
+
+
 def wait_closed(socket, timeout):
     """The close code once the server closes the socket."""
     deadline = time.time() + timeout
@@ -103,21 +119,24 @@ def test_phone_and_computer_are_trusted_independently(redis):
     assert set(redis.hkeys(f"trusted:{user_id(phone)}")) == {"phone", "computer"}
 
 
-def test_new_phone_needs_more_than_one_and_a_half_times_the_messages():
+def test_new_phone_needs_more_than_one_and_a_half_times_the_messages(redis):
     username = register()
     old = device(username, PHONE)
     new = device(username, PHONE)
     room_id = room_of(old)
     old.post(f"/api/rooms/{room_id}/invites", json={"username": username})
     send(old, room_id, 2)
+    wait_counted(redis, old, 2)
 
     response = refresh(new)
     assert response.status_code == 403
     assert error_code(response) == "device_required"
 
     send(new, room_id, 3)  # 3 is exactly 1.5 times 2: not enough
+    wait_counted(redis, new, 3)
     assert refresh(new).status_code == 403
     send(new, room_id, 1)  # 4 is more than 1.5 times 2
+    wait_counted(redis, new, 4)
     assert refresh(new).status_code == 200
     assert refresh(old).status_code == 403
 
