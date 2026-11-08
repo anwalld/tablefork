@@ -17,6 +17,7 @@ from . import host
 from . import council
 from . import breakout
 from . import recall
+from . import knowledge
 from .council_state import Ballot
 from .controls import GenerationControls
 from .context import allocate, build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
@@ -82,6 +83,8 @@ class Engine:
         self.control_watchers = {}
         self.control_wakeup = asyncio.Event()
         self.control_monitor_task = None
+        self.vectors = (knowledge.VectorStore(settings.pgvector_dsn, settings.embedding_dimensions)
+                        if settings.knowledge_enabled and settings.pgvector_dsn else None)
 
     async def handle(self, event, ack: Callable[[], Awaitable[None]]) -> None:
         seen = f"ai:event:{event.instance_id}:{event.event_id}"
@@ -284,6 +287,7 @@ class Engine:
             try:
                 await self.recover_work()
                 await self.fire_due_timers()
+                await self.sweep_knowledge()
             except Exception:
                 log.exception('AI background work')
             await asyncio.sleep(self.settings.timer_poll_seconds)
@@ -1010,6 +1014,14 @@ class Engine:
                                            trigger.get('content', ''), settings.retrieval_top_k,
                                            settings.retrieval_chars)
             related = related_note(items)
+        if job['kind'] == 'reply' and trigger:
+            found = await self._knowledge_note(room_id, job.get('parent_room_id', 0),
+                                               job['payer'][1], trigger.get('content', ''))
+            if found is not None:
+                # Knowledge and message retrieval are both "retrieval": one
+                # reference block, dropped first when the budget is short.
+                related = found if related is None else ChatMessage(
+                    'user', found.content + "\n\n" + related.content)
         memory = recall.memory_block(list(room_memories), list(user_memories), settings.memory_chars)
         if summary or memory:
             measure = estimate_tokens if tokens else len
@@ -1033,6 +1045,94 @@ class Engine:
                 chars = max(1, chars - len(related.content))
         return to_chat(entries, member_id, count, chars, block=settings.context_block,
                        max_tokens=tokens), related, memory
+
+    async def _knowledge_note(self, room_id, parent_room_id, payer_user_id, query):
+        """Source-labelled chunks from the room's ready documents that match
+        the newest message; None when off, empty or on any failure."""
+        settings = self.settings
+        if not (settings.knowledge_enabled and self.vectors and self.pool is not None and query.strip()):
+            return None
+        rooms = [room_id] + ([parent_room_id] if parent_room_id else [])
+        try:
+            async with asyncio.timeout(5):
+                if not await knowledge.has_ready_documents(self.pool, rooms):
+                    return None
+                provider = self.providers.create(settings.embedding_provider)
+                key = await self.keys.get(payer_user_id, settings.embedding_provider)
+                if key is None or not hasattr(provider, 'embed'):
+                    return None
+                vector = (await provider.embed(model=settings.embedding_model, texts=[query[:2000]],
+                                               api_key=key, dimensions=settings.embedding_dimensions))[0]
+                ids = await self.vectors.search(rooms, vector, settings.knowledge_top_k)
+                hits = await knowledge.load_hits(self.pool, ids)
+                return knowledge.knowledge_note(knowledge.pick_hits(hits, settings.knowledge_chars))
+        except Exception as error:  # noqa: BLE001 - search never blocks a reply
+            log.warning('knowledge search in room %s failed: %s', room_id, type(error).__name__)
+            return None
+
+    async def sweep_knowledge(self):
+        """Ingests pending documents and clears deleted ones, one worker per
+        document at a time across AI instances."""
+        if not (self.settings.knowledge_enabled and self.vectors and self.pool is not None):
+            return
+        for document_id, status in await knowledge.documents_to_process(self.pool):
+            lock = f'ai:knowledge:lock:{document_id}'
+            if not await self.cache.set(lock, '1', nx=True, ex=600):
+                continue
+            try:
+                if status == 'deleted':
+                    await self.vectors.delete_document(document_id)
+                    await knowledge.drop_document(self.pool, document_id)
+                else:
+                    await self._ingest(document_id)
+            except Exception:
+                # Left as it was (pending or deleted); the next sweep retries.
+                log.exception('knowledge document %s', document_id)
+            finally:
+                await self.cache.delete(lock)
+
+    async def _ingest(self, document_id):
+        """Chunks a document, embeds it with the uploader's key and makes it
+        searchable. Without a usable key it stays not_ready and the uploader
+        is told why."""
+        settings = self.settings
+        document = await knowledge.load_document(self.pool, document_id)
+        if document is None or document['status'] != 'pending':
+            return
+        chunks = knowledge.chunk_document(document['kind'], document['content'])
+        if not chunks:
+            await knowledge.set_status(self.pool, document_id, 'failed', '没有可检索的内容')
+            return
+        ids = await knowledge.replace_chunks(self.pool, document, chunks)
+        provider = self.providers.create(settings.embedding_provider)
+        key = await self.keys.get(document['user_id'], settings.embedding_provider)
+        name = PROVIDER_NAMES.get(settings.embedding_provider, settings.embedding_provider)
+
+        async def not_ready(reason):
+            await knowledge.set_status(self.pool, document_id, 'not_ready', reason)
+            self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
+                room_id=document['room_id'], notify_member_id=document['member_id'],
+                code='embedding_key_required', provider=settings.embedding_provider,
+                message=f"资料「{document['name']}」未就绪：{reason}")))
+
+        if key is None or not hasattr(provider, 'embed'):
+            await not_ready(f'请先在设置里填写 {name} 的 API key，用于资料向量化')
+            return
+        rows = []
+        try:
+            for start in range(0, len(chunks), 64):
+                batch = [content for _, content in chunks[start:start + 64]]
+                vectors = await provider.embed(model=settings.embedding_model, texts=batch,
+                                               api_key=key, dimensions=settings.embedding_dimensions)
+                rows += [(ids[start + i], document_id, document['room_id'], v) for i, v in enumerate(vectors)]
+        except KeyRejected:
+            await not_ready(f'{name} 拒绝了你的 API key，请在设置里更新')
+            return
+        except ProviderError as error:
+            await knowledge.set_status(self.pool, document_id, 'failed', f'向量化失败：{error.kind}')
+            return
+        await self.vectors.upsert(rows)
+        await knowledge.set_status(self.pool, document_id, 'ready', None, len(chunks))
 
     async def _fail_classified(self, room_id, job, ai, error):
         backoff = self.settings.retry_base_seconds * 2 ** (job['attempt'] - 1)

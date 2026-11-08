@@ -66,6 +66,15 @@ class Settings:
     recall_model: str = "deepseek-flash"
     summary_block: int = 20
     memory_chars: int = 1500
+    # Room knowledge base (pgvector). Embeddings are paid by the uploader at
+    # import and by the reply's payer at search time.
+    knowledge_enabled: bool = False
+    pgvector_dsn: str = ""
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    knowledge_top_k: int = 5
+    knowledge_chars: int = 2000
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -119,4 +128,11 @@ class Settings:
             recall_model=os.environ.get("AI_RECALL_MODEL", os.environ.get("AI_HOST_MODEL", "deepseek-flash")),
             summary_block=max(1, _int("AI_SUMMARY_BLOCK", 20)),
             memory_chars=max(0, _int("AI_MEMORY_CHARS", 1500)),
+            knowledge_enabled=os.environ.get("AI_KNOWLEDGE_ENABLED", "") == "1",
+            pgvector_dsn=os.environ.get("AI_PGVECTOR_DSN", ""),
+            embedding_provider=os.environ.get("AI_EMBEDDING_PROVIDER", "openai"),
+            embedding_model=os.environ.get("AI_EMBEDDING_MODEL", "text-embedding-3-small"),
+            embedding_dimensions=max(8, _int("AI_EMBEDDING_DIMENSIONS", 1536)),
+            knowledge_top_k=max(1, min(20, _int("AI_KNOWLEDGE_TOP_K", 5))),
+            knowledge_chars=max(200, _int("AI_KNOWLEDGE_CHARS", 2000)),
         )

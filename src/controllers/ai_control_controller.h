@@ -16,6 +16,9 @@ class AiControlController : public drogon::HttpController<AiControlController>
     ADD_METHOD_TO(AiControlController::deleteRoomMemory, "/api/rooms/{1}/memories/{2}", drogon::Delete);
     ADD_METHOD_TO(AiControlController::myMemories, "/api/me/memories", drogon::Get);
     ADD_METHOD_TO(AiControlController::deleteMyMemory, "/api/me/memories/{1}", drogon::Delete);
+    ADD_METHOD_TO(AiControlController::importKnowledge, "/api/rooms/{1}/knowledge", drogon::Post);
+    ADD_METHOD_TO(AiControlController::listKnowledge, "/api/rooms/{1}/knowledge", drogon::Get);
+    ADD_METHOD_TO(AiControlController::deleteKnowledge, "/api/rooms/{1}/knowledge/{2}", drogon::Delete);
     METHOD_LIST_END
     using Response = drogon::Task<drogon::HttpResponsePtr>;
     Response state(drogon::HttpRequestPtr req, std::string room);
@@ -31,5 +34,11 @@ class AiControlController : public drogon::HttpController<AiControlController>
     Response deleteRoomMemory(drogon::HttpRequestPtr req, std::string room, std::string memory);
     Response myMemories(drogon::HttpRequestPtr req);
     Response deleteMyMemory(drogon::HttpRequestPtr req, std::string memory);
+    // Knowledge base: members import .txt/.md/.log text (JSON {name, content});
+    // the AI service chunks and embeds it. Readers of the room see the list;
+    // the uploader, owners and admins may delete a document.
+    Response importKnowledge(drogon::HttpRequestPtr req, std::string room);
+    Response listKnowledge(drogon::HttpRequestPtr req, std::string room);
+    Response deleteKnowledge(drogon::HttpRequestPtr req, std::string room, std::string document);
 };
 }

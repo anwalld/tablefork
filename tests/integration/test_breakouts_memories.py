@@ -101,3 +101,37 @@ def test_user_memories_are_private_to_their_user(make_user, db):
     assert [m["content"] for m in alice.get("/api/me/memories").json()["memories"]] == ["回答尽量简短"]
     assert alice.request("DELETE", f"/api/me/memories/{memory}").status_code == 200
     assert alice.get("/api/me/memories").json()["memories"] == []
+
+
+# --- knowledge base ------------------------------------------------------------
+
+def test_two_megabyte_log_is_imported_and_listed(make_user, make_room):
+    owner = make_user()
+    room = make_room(owner)
+    content = ("2026-11-08 14:02:00 INFO request handled in 12ms\n" * 50000)[: 2 * 1024 * 1024]
+    response = owner.post(f"/api/rooms/{room}/knowledge", json={"name": "app.log", "content": content})
+    assert response.status_code == 201, response.text
+    listed = owner.get(f"/api/rooms/{room}/knowledge").json()["documents"]
+    assert [(d["name"], d["kind"], d["size_bytes"]) for d in listed] == [("app.log", "log", len(content))]
+
+
+def test_oversized_and_unsupported_files_are_rejected(make_user, make_room):
+    owner = make_user()
+    room = make_room(owner)
+    big = owner.post(f"/api/rooms/{room}/knowledge",
+                     json={"name": "huge.log", "content": "x" * (5 * 1024 * 1024 + 1)})
+    assert big.status_code == 413 and error_code(big) == "file_too_large"
+    pdf = owner.post(f"/api/rooms/{room}/knowledge", json={"name": "a.pdf", "content": "%PDF"})
+    assert pdf.status_code == 415 and error_code(pdf) == "unsupported_file_type"
+
+
+def test_knowledge_is_room_private_and_deletable_by_uploader_or_admin(make_user, make_room):
+    owner, member, outsider = make_user(), make_user(), make_user()
+    room = make_room(owner, member)
+    document = owner.post(f"/api/rooms/{room}/knowledge",
+                          json={"name": "notes.md", "content": "# 部署\n用 compose"}).json()["id"]
+    assert outsider.get(f"/api/rooms/{room}/knowledge").status_code == 404
+    response = member.request("DELETE", f"/api/rooms/{room}/knowledge/{document}")
+    assert response.status_code == 403
+    assert owner.request("DELETE", f"/api/rooms/{room}/knowledge/{document}").status_code == 200
+    assert member.get(f"/api/rooms/{room}/knowledge").json()["documents"] == []

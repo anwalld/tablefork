@@ -27,6 +27,12 @@ drogon::Task<drogon::HttpResponsePtr> RequestBuffer::dispatch(drogon::HttpReques
         co_return co_await AiControlController().myMemories(req);
     if(route=="AiControlController::deleteMyMemory" && args.size()==1)
         co_return co_await AiControlController().deleteMyMemory(req, args[0]);
+    if(route=="AiControlController::importKnowledge" && args.size()==1)
+        co_return co_await AiControlController().importKnowledge(req, args[0]);
+    if(route=="AiControlController::listKnowledge" && args.size()==1)
+        co_return co_await AiControlController().listKnowledge(req, args[0]);
+    if(route=="AiControlController::deleteKnowledge" && args.size()==2)
+        co_return co_await AiControlController().deleteKnowledge(req, args[0], args[1]);
     if(route=="AuthController::registerUser" && args.size()==0)
         co_return co_await AuthController().registerUser(req);
     if(route=="AuthController::login" && args.size()==0)

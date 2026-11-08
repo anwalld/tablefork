@@ -61,6 +61,8 @@ int main()
     drogon::app()
         .addListener("0.0.0.0", 8000)
         .setThreadNum(0)
+        // Knowledge uploads are the largest bodies (5 MB of text plus JSON).
+        .setClientMaxBodySize(8 * 1024 * 1024)
         .createDbClient("mysql",
                         config.mysqlHost,
                         config.mysqlPort,

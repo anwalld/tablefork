@@ -55,6 +55,11 @@ server {
         error_page 429 = @rate_limited;
         proxy_pass http://app_servers;
     }
+    # Knowledge uploads carry a whole text file (up to 5 MB of content).
+    location ~ ^/api/rooms/[0-9]+/knowledge$ {
+        client_max_body_size 8m;
+        proxy_pass http://app_servers;
+    }
     location /api/ { proxy_pass http://app_servers; }
     location @rate_limited {
         default_type application/json;

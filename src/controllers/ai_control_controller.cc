@@ -1,5 +1,7 @@
 #include "controllers/ai_control_controller.h"
 #include <drogon/drogon.h>
+#include <algorithm>
+#include <cctype>
 #include <optional>
 #include "ai/ai_events.h"
 #include "buffering/request_buffer.h"
@@ -329,6 +331,124 @@ AiControlController::Response AiControlController::deleteMyMemory(drogon::HttpRe
     const auto session = co_await SessionStore::require(req);
     co_await drogon::app().getDbClient()->execSqlCoro(
         "DELETE FROM user_memories WHERE id = ? AND user_id = ?", parseMemoryId(memory), session.userId);
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
+
+namespace
+{
+constexpr std::size_t kKnowledgeMaxBytes = 5 * 1024 * 1024;
+
+// The document kind from its file name, or empty when unsupported.
+std::string knowledgeKind(const std::string &name)
+{
+    const auto dot = name.rfind('.');
+    if (dot == std::string::npos) return {};
+    std::string ext = name.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (ext == "txt" || ext == "text") return "text";
+    if (ext == "md" || ext == "markdown") return "markdown";
+    if (ext == "log") return "log";
+    return {};
+}
+}  // namespace
+
+AiControlController::Response AiControlController::importKnowledge(drogon::HttpRequestPtr req, std::string room)
+{
+    std::vector<std::string> args{room};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::importKnowledge", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    const auto &body = jsonBody(req);
+    if (!body["name"].isString() || !body["content"].isString())
+        throw ApiError::invalidArgument("name and content required");
+    const auto name = body["name"].asString();
+    const auto content = body["content"].asString();
+    if (name.empty() || !utf8Length(name) || *utf8Length(name) > 255)
+        throw ApiError::invalidArgument("name must be 1 to 255 characters");
+    const auto kind = knowledgeKind(name);
+    if (kind.empty())
+        throw ApiError(drogon::k415UnsupportedMediaType, "unsupported_file_type",
+                       "only .txt, .md and .log files can be imported");
+    if (content.size() > kKnowledgeMaxBytes)
+        throw ApiError(drogon::k413RequestEntityTooLarge, "file_too_large",
+                       "files may be at most 5 MB");
+    if (content.empty() || !utf8Length(content))
+        throw ApiError::invalidArgument("content must be non-empty UTF-8 text");
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    if (auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.knowledge.import"))
+        co_return jsonResponse(*prior, drogon::k201Created);
+    co_await lockActor(tx, id, session.memberId);  // members only, room locked
+    const auto now = trantor::Date::now().microSecondsSinceEpoch() / 1000;
+    const auto inserted = co_await tx->execSqlCoro(
+        "INSERT INTO knowledge_documents (room_id, uploader_member_id, uploader_user_id, name, kind, "
+        "size_bytes, content, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        id, session.memberId, session.userId, name, kind, static_cast<uint64_t>(content.size()), content, now);
+    Json::Value result;
+    result["id"] = Json::Int64(static_cast<int64_t>(inserted.insertId()));
+    result["name"] = name;
+    result["kind"] = kind;
+    result["status"] = "pending";
+    co_await RequestMemo::finish(tx, session.request, actor, result);
+    co_await commit(std::move(tx));
+    co_return jsonResponse(result, drogon::k201Created);
+}
+
+AiControlController::Response AiControlController::listKnowledge(drogon::HttpRequestPtr req, std::string room)
+{
+    std::vector<std::string> args{room};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::listKnowledge", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    co_await RoomService::requireVisible(session.memberId, id);
+    const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
+        "SELECT d.id, d.name, d.kind, d.size_bytes, d.status, d.status_reason, d.chunk_count, "
+        "d.created_at_ms, m.display_name FROM knowledge_documents d JOIN members m ON m.id = d.uploader_member_id "
+        "WHERE d.room_id = ? AND d.status <> 'deleted' ORDER BY d.id DESC LIMIT 200", id);
+    Json::Value list(Json::arrayValue);
+    for (const auto &row : rows)
+    {
+        Json::Value item;
+        item["id"] = Json::Int64(row["id"].as<int64_t>());
+        item["name"] = row["name"].as<std::string>();
+        item["kind"] = row["kind"].as<std::string>();
+        item["size_bytes"] = Json::Int64(row["size_bytes"].as<int64_t>());
+        item["status"] = row["status"].as<std::string>();
+        item["status_reason"] = row["status_reason"].isNull() ? Json::Value() : Json::Value(row["status_reason"].as<std::string>());
+        item["chunk_count"] = Json::Int64(row["chunk_count"].as<int64_t>());
+        item["created_at_ms"] = Json::Int64(row["created_at_ms"].as<int64_t>());
+        item["uploader"] = row["display_name"].as<std::string>();
+        list.append(item);
+    }
+    Json::Value body;
+    body["documents"] = list;
+    co_return jsonResponse(body);
+}
+
+AiControlController::Response AiControlController::deleteKnowledge(drogon::HttpRequestPtr req, std::string room,
+                                                                   std::string document)
+{
+    std::vector<std::string> args{room, document};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::deleteKnowledge", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    const auto documentId = parseMemoryId(document);
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto role = co_await lockActor(tx, id, session.memberId);
+    const auto rows = co_await tx->execSqlCoro(
+        "SELECT uploader_member_id FROM knowledge_documents WHERE id = ? AND room_id = ? FOR UPDATE",
+        documentId, id);
+    if (!rows.empty())
+    {
+        if (role != "owner" && role != "admin" && rows[0]["uploader_member_id"].as<int64_t>() != session.memberId)
+            throw ApiError::forbidden();
+        // Hidden from search at once; chunks go now, and the AI service drops
+        // the vectors and then the row.
+        co_await tx->execSqlCoro(
+            "UPDATE knowledge_documents SET status = 'deleted', content = '' WHERE id = ?", documentId);
+        co_await tx->execSqlCoro("DELETE FROM knowledge_chunks WHERE document_id = ?", documentId);
+    }
+    co_await commit(std::move(tx));
     co_return jsonResponse(Json::Value(Json::objectValue));
 }
 }

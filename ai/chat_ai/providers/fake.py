@@ -46,5 +46,23 @@ class FakeProvider:
             if index == 0 and "#restart" in last:
                 await asyncio.sleep(2)
 
+    async def embed(self, *, model: str, texts: list[str], api_key: str,
+                    dimensions: int | None = None) -> list[list[float]]:
+        """Deterministic bag-of-character-bigrams vectors: texts that share
+        words land close together, which is enough to test retrieval."""
+        self._check(api_key)
+        size = dimensions or 64
+        vectors = []
+        for text in texts:
+            if "#fail" in text:
+                raise ProviderError("fake embedding failure")
+            vector = [0.0] * size
+            lowered = text.lower()
+            for a, b in zip(lowered, lowered[1:]):
+                vector[(ord(a) * 31 + ord(b)) % size] += 1.0
+            norm = sum(v * v for v in vector) ** 0.5 or 1.0
+            vectors.append([v / norm for v in vector])
+        return vectors
+
     async def validate(self, api_key: str) -> None:
         self._check(api_key)

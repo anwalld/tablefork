@@ -49,6 +49,21 @@ class OpenAiCompatible:
         except openai.APIError as e:
             raise ProviderError(str(e)) from e
 
+    async def embed(self, *, model: str, texts: list[str], api_key: str,
+                    dimensions: int | None = None) -> list[list[float]]:
+        """Embeddings for `texts`, in order."""
+        options = {"dimensions": dimensions} if dimensions else {}
+        try:
+            response = await self._client(api_key).embeddings.create(model=model, input=texts, **options)
+        except openai.AuthenticationError as e:
+            raise KeyRejected(str(e)) from e
+        except openai.APIStatusError as e:
+            raise ProviderError(str(e), classify(e.status_code, str(e)),
+                                retry_after(e.response.headers)) from e
+        except openai.APIError as e:
+            raise ProviderError(str(e)) from e
+        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+
     async def validate(self, api_key: str) -> None:
         try:
             await self._client(api_key).models.list()
