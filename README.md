@@ -79,7 +79,7 @@ HTTP 入口 `http://localhost:8080` 仅做 301 跳转，不处理登录或 WebSo
 
 数据库结构来自 `migrations/`，由 [Flyway](https://documentation.red-gate.com/flyway) 管理。每次启动时 `migrate` 服务先执行还没执行过的迁移，记录在 `flyway_schema_history` 表里，完成后应用才会启动。Flyway 之前建的库会自动登记为版本 1。
 
-修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V12__add_message_reactions.sql`（当前最新为 V11）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
+修改表结构时新增一个文件，按 `V<版本>__<说明>.sql` 命名，例如 `migrations/V13__add_message_reactions.sql`（当前最新为 V12）。不要修改已执行过的文件，Flyway 会校验文件的校验和，不一致时拒绝执行。MySQL 的 DDL 不能回滚，一个迁移中途失败时，`migrate` 会停下并让应用不启动，需要手动修正数据库，再用 `repair` 清掉失败记录后重启。
 
 查看迁移状态，或在修正后清理失败记录：
 
@@ -165,7 +165,7 @@ docker compose down -v
 ### 填写 API key 和邀请 AI
 
 1. 登录后点左上角的“设置”，按服务商填写 API key。保存前会先向服务商验证，之后只显示末 4 位。
-2. 在房间里点“成员”，在“我的AI”里选底层模型、起名创建自己的角色。角色是私有的，只有创建者能邀请，邀请时填写本房间的人设，之后也只有创建者能修改。群主和管理员邀请自己的角色时直接加入；普通成员提交申请，由群主或管理员审批。邀请人必须有对应服务商的 key。创建者退出、被踢或被封禁时，他的 AI 一起离开房间，聊天记录保留。详见[私人AI角色与房间人设](docs/private-ai-personas.md)。
+2. 在房间里点“成员”，点“创建私人AI”，选底层模型、起名，可顺便写一份默认人设（支持 Markdown，可导入 .md 文件）。角色是私有的，只有创建者能邀请；邀请时按默认人设预填本房间的人设，之后也只有创建者能修改。群主和管理员邀请自己的角色时直接加入；普通成员提交申请，由群主或管理员审批。邀请人必须有对应服务商的 key。创建者退出、被踢或被封禁时，他的 AI 一起离开房间，聊天记录保留。详见[私人AI角色与房间人设](docs/private-ai-personas.md)。
 3. 只有一个人的房间里，AI 回复你的每条消息，冷场时还会主动说话，第 3 条主动发言是告别；多人房间里，用 `@` 选择 AI 成员才会回复，重名时按选中的成员区分。完整规则见 `openspec/specs/ai-replies/spec.md`。
 
 DeepSeek 默认使用 `deepseek-flash`，并在调用时显式关闭思考模式，减少日常聊天的 token 开销。模型与定价以 [DeepSeek 官方价格表](https://api-docs.deepseek.com/quick_start/pricing/) 为准。

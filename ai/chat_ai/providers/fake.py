@@ -40,8 +40,12 @@ class FakeProvider:
         name = system.split("，", 1)[0].removeprefix("你是 ").strip()
         text = f"{name}: {last}"
         third = max(1, len(text) // 3)
+        restart = "#restart" in last
         for index, piece in enumerate((text[:third], text[third : 2 * third], text[2 * third :])):
-            await asyncio.sleep(0.05)
+            # Arriving after the engine's chunk interval makes the first piece
+            # go out on its own, so the two second hold starts with a visible
+            # draft instead of ending just before the reply completes.
+            await asyncio.sleep(0.25 if restart and index == 0 else 0.05)
             yield piece
             if index == 0 and "#restart" in last:
                 await asyncio.sleep(2)

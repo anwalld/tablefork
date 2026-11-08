@@ -122,7 +122,8 @@ drogon::Task<Json::Value> AiService::models(Session session)
 drogon::Task<Json::Value> AiService::catalog(Session session)
 {
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT p.member_id,p.slug,p.model_slug,m.display_name,p.provider,p.creator_user_id,u.username,k.user_id IS NOT NULL AS has_key "
+        "SELECT p.member_id,p.slug,p.model_slug,m.display_name,p.provider,p.creator_user_id,u.username,k.user_id IS NOT NULL AS has_key,"
+        "COALESCE(p.default_persona,'') AS default_persona "
         "FROM ai_profiles p JOIN members m ON m.id=p.member_id JOIN users u ON u.id=p.creator_user_id "
         "LEFT JOIN user_api_keys k ON k.user_id=? AND k.provider=p.provider "
         "WHERE p.creator_user_id=? AND p.is_legacy=FALSE ORDER BY m.id", session.userId, session.userId);
@@ -137,13 +138,24 @@ drogon::Task<Json::Value> AiService::catalog(Session session)
         item["creator_user_id"]=Json::Int64(row["creator_user_id"].as<int64_t>());
         item["creator_name"]=row["username"].as<std::string>();
         item["has_key"]=row["has_key"].as<bool>();
+        item["persona"]=row["default_persona"].as<std::string>();
         body["agents"].append(item);
     }
     co_return body;
 }
 
-drogon::Task<Json::Value> AiService::createRole(Session session, std::string model, std::string name)
+namespace
 {
+void validatePersona(const std::string &persona)
+{
+    if (persona.size()>16384 || !utf8Length(persona)) throw ApiError::invalidArgument("invalid persona");
+}
+}  // namespace
+
+drogon::Task<Json::Value> AiService::createRole(Session session, std::string model, std::string name,
+                                                std::string persona)
+{
+    validatePersona(persona);
     const auto length=utf8Length(name);
     if (!length || *length==0 || *length>64 || name.find_first_not_of(" ")==std::string::npos || !isPrintableText(name))
         throw ApiError::invalidArgument("name must be 1 to 64 printable characters");
@@ -155,14 +167,29 @@ drogon::Task<Json::Value> AiService::createRole(Session session, std::string mod
     const auto inserted=co_await tx->execSqlCoro("INSERT INTO members (type,display_name) VALUES ('ai',?)",name);
     const auto member=static_cast<int64_t>(inserted.insertId());
     const auto slug="role_"+std::to_string(member);
-    co_await tx->execSqlCoro("INSERT INTO ai_profiles (member_id,slug,provider,model_slug,creator_user_id,is_legacy) VALUES (?,?,?,?,?,FALSE)",
-        member,slug,types[0]["provider"].as<std::string>(),model,session.userId);
+    co_await tx->execSqlCoro("INSERT INTO ai_profiles (member_id,slug,provider,model_slug,creator_user_id,is_legacy,default_persona) VALUES (?,?,?,?,?,FALSE,?)",
+        member,slug,types[0]["provider"].as<std::string>(),model,session.userId,persona);
     Json::Value result;
-    result["id"]=Json::Int64(member); result["slug"]=slug; result["name"]=name;
+    result["id"]=Json::Int64(member); result["slug"]=slug; result["name"]=name; result["persona"]=persona;
     result["model_slug"]=model; result["creator_user_id"]=Json::Int64(session.userId);
     result["creator_name"]=session.username;
     co_await RequestMemo::finish(tx,session.request,actor,result);
     co_await commit(std::move(tx)); co_return result;
+}
+
+drogon::Task<Json::Value> AiService::editRolePersona(Session session,int64_t memberId,std::string persona)
+{
+    validatePersona(persona);
+    auto tx=co_await newGuardedTransaction(session.request);
+    const auto actor="user:"+std::to_string(session.userId);
+    if(auto prior=co_await RequestMemo::begin(tx,session.request,actor,"ai.rolePersona")) co_return *prior;
+    const auto rows=co_await tx->execSqlCoro(
+        "SELECT creator_user_id FROM ai_profiles WHERE member_id=? AND is_legacy=FALSE FOR UPDATE",memberId);
+    if(rows.empty() || rows[0]["creator_user_id"].isNull() || rows[0]["creator_user_id"].as<int64_t>()!=session.userId)
+        throw ApiError::forbidden();
+    co_await tx->execSqlCoro("UPDATE ai_profiles SET default_persona=? WHERE member_id=?",persona,memberId);
+    Json::Value result;result["id"]=Json::Int64(memberId);result["persona"]=persona;
+    co_await RequestMemo::finish(tx,session.request,actor,result);co_await commit(std::move(tx));co_return result;
 }
 
 drogon::Task<Json::Value> AiService::editPersona(Session session,int64_t roomId,int64_t memberId,std::string persona,int64_t version)

@@ -194,3 +194,29 @@ def test_saved_message_retry_keeps_receipt_after_mentioned_role_leaves(make_user
     payload['client_msg_id'] = uuid.uuid4().hex
     socket.send(**payload)
     assert socket.expect('error')['error']['code'] == 'invalid_argument'
+
+
+def test_role_default_persona_is_private_and_editable_by_its_creator(make_user, db):
+    owner, other = make_user(), make_user()
+    created = owner.request('POST', '/api/ai/roles',
+                            json={'model_slug':'claude','name':'Claude M','persona':'# 角色\n- 说话简洁'},
+                            headers={'X-Request-Id':uuid.uuid4().hex})
+    assert created.status_code == 201, created.text
+    role = created.json()
+    assert role['persona'] == '# 角色\n- 说话简洁'
+    listed = {r['id']: r for r in owner.get('/api/ai/roles').json()['agents']}
+    assert listed[role['id']]['persona'] == '# 角色\n- 说话简洁'
+    assert create(owner, name='Plain')['persona'] == ''
+
+    path = f"/api/ai/roles/{role['id']}/persona"
+    changed = owner.request('PUT', path, json={'persona':'## 新的人设'}, headers={'X-Request-Id':uuid.uuid4().hex})
+    assert changed.status_code == 200, changed.text
+    assert {r['id']: r for r in owner.get('/api/ai/roles').json()['agents']}[role['id']]['persona'] == '## 新的人设'
+
+    denied = other.request('PUT', path, json={'persona':'x'}, headers={'X-Request-Id':uuid.uuid4().hex})
+    assert denied.status_code == 403
+    too_long = owner.request('PUT', path, json={'persona':'字' * 6000}, headers={'X-Request-Id':uuid.uuid4().hex})
+    assert too_long.status_code == 400
+    with db.cursor() as cursor:
+        cursor.execute('SELECT default_persona FROM ai_profiles WHERE member_id=%s', (role['id'],))
+        assert cursor.fetchone()[0] == '## 新的人设'

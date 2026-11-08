@@ -494,3 +494,136 @@ button.link {
     z-index: 5;
   }
 }
+
+/* Press feedback */
+
+button {
+  transition: transform 0.08s ease, opacity 0.15s ease, background-color 0.15s ease, filter 0.15s ease;
+}
+
+button:not(:disabled):active {
+  transform: scale(0.96);
+  filter: brightness(0.92);
+}
+
+button.link:not(:disabled):active {
+  transform: none;
+  opacity: 0.6;
+}
+
+button[aria-busy='true'] {
+  cursor: progress;
+}
+
+/* Dialog forms and persona editor */
+
+.dialog.wide {
+  width: min(720px, calc(100% - 32px));
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.dialog-form select {
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.persona-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.persona-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.persona-tools .spacer {
+  flex: 1;
+}
+
+.persona-tools button.active {
+  background: var(--sunken);
+  border-color: var(--accent);
+}
+
+.file-button {
+  position: relative;
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.file-button input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.persona-text,
+.persona-preview {
+  min-height: 260px;
+  max-height: 55vh;
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+.persona-text {
+  resize: vertical;
+}
+
+.persona-preview {
+  overflow: auto;
+  padding: 8px 12px;
+  background: var(--sunken);
+  border-radius: 8px;
+  font-family: inherit;
+}
+
+.persona-preview :is(h1, h2, h3) {
+  margin: 8px 0 4px;
+  font-size: 1.05rem;
+}
+
+.persona-preview :is(p, ul, ol) {
+  margin: 4px 0;
+}
+
+.role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.role-row span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.invite-name {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+  overflow-wrap: anywhere;
+}
+
+.new-room {
+  width: 100%;
+}
+
+.toast {
+  width: max-content;
+  max-width: min(480px, calc(100vw - 32px));
+  z-index: 5;
+}
