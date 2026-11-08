@@ -344,6 +344,10 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
     std::string response;
     if (content == "继续") response = "continue";
     else if (content == "否决") response = "cancel";
+    const bool councilStart = content.rfind("/表决", 0) == 0;
+    std::string councilVerdict;
+    if (content == "/否决") councilVerdict = "veto";
+    else if (content == "/强制通过") councilVerdict = "force_pass";
     auto message = co_await store(Author{session.memberId, session.username, "human"},
                               roomId,
                               std::move(clientMsgId),
@@ -356,6 +360,20 @@ drogon::Task<StoredMessage> MessageService::save(const Session &session,
         const bool privileged = !role.empty() &&
             (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
         co_await reportConfirmationInput(roomId, session.memberId, response, privileged);
+    }
+    if (councilStart)
+    {
+        // "表决 议题" → topic is everything after the command.
+        co_await reportCouncilStart(roomId, message.json["content"].asString(), session.memberId);
+    }
+    else if (!councilVerdict.empty())
+    {
+        const auto role = co_await drogon::app().getDbClient()->execSqlCoro(
+            "SELECT role FROM room_members WHERE room_id = ? AND member_id = ?",
+            roomId, session.memberId);
+        const bool privileged = !role.empty() &&
+            (role[0]["role"].as<std::string>() == "owner" || role[0]["role"].as<std::string>() == "admin");
+        co_await reportCouncilOverride(roomId, councilVerdict, session.memberId, privileged);
     }
     co_return message;
 }

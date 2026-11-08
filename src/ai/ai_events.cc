@@ -187,4 +187,31 @@ drogon::Task<> reportConfirmationInput(int64_t roomId, int64_t memberId,
         gateway->send(std::move(event));
     }
 }
+
+drogon::Task<> reportCouncilStart(int64_t roomId, const std::string &topic, int64_t proposerMemberId)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *start = event.mutable_council_start();
+        start->set_room_id(roomId);
+        start->set_topic(topic);
+        start->set_proposer_member_id(proposerMemberId);
+        gateway->send(std::move(event));
+    }
+}
+
+drogon::Task<> reportCouncilOverride(int64_t roomId, const std::string &verdict,
+                                     int64_t memberId, bool privileged)
+{
+    if (auto *gateway = aiGateway())
+    {
+        ai::GatewayEvent event;
+        auto *override_ = event.mutable_council_override();
+        override_->set_room_id(roomId);
+        override_->set_verdict(verdict);
+        override_->set_member_id(memberId);
+        gateway->send(std::move(event));
+    }
+}
 }
