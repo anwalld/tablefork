@@ -8,6 +8,7 @@ makes it fail, "#slow" makes it hang until the generation times out.
 """
 
 import asyncio
+import re
 from typing import AsyncIterator
 
 from .base import ChatMessage, KeyRejected, ProviderError
@@ -45,6 +46,24 @@ class FakeProvider:
             yield piece
             if index == 0 and "#restart" in last:
                 await asyncio.sleep(2)
+
+    async def complete(self, *, model: str, system: str, messages: list[ChatMessage], exchanges: list,
+                       tools: list[dict], api_key: str, max_tokens: int):
+        """Tool turns for tests: "#tool:name {json}" in the newest user message
+        asks for that tool once; after results arrive, the reply quotes them."""
+        import json
+        from .base import ToolCall, ToolTurn
+        self._check(api_key)
+        last = next((m.content for m in reversed(messages) if m.role == "user"), "")
+        name = system.split("，", 1)[0].removeprefix("你是 ").strip()
+        if exchanges:
+            results = "；".join(text for exchange in exchanges for _, text in exchange.results)
+            return ToolTurn(f"{name}: 工具结果：{results}")
+        match = re.search(r"#tool:(\w+)\s*(\{.*\})?", last)
+        if match:
+            arguments = json.loads(match.group(2)) if match.group(2) else {}
+            return ToolTurn("", (ToolCall("call-1", match.group(1), arguments),))
+        return ToolTurn(f"{name}: {last}")
 
     async def embed(self, *, model: str, texts: list[str], api_key: str,
                     dimensions: int | None = None) -> list[list[float]]:

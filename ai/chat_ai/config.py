@@ -75,6 +75,10 @@ class Settings:
     embedding_dimensions: int = 1536
     knowledge_top_k: int = 5
     knowledge_chars: int = 2000
+    # Tools and MCP servers registered in tools.toml (collaboration rooms only).
+    tools_enabled: bool = False
+    tools_file: str = "/app/tools.toml"
+    tool_timeout: float = 15.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -135,4 +139,7 @@ class Settings:
             embedding_dimensions=max(8, _int("AI_EMBEDDING_DIMENSIONS", 1536)),
             knowledge_top_k=max(1, min(20, _int("AI_KNOWLEDGE_TOP_K", 5))),
             knowledge_chars=max(200, _int("AI_KNOWLEDGE_CHARS", 2000)),
+            tools_enabled=os.environ.get("AI_TOOLS_ENABLED", "") == "1",
+            tools_file=os.environ.get("AI_TOOLS_FILE", "/app/tools.toml"),
+            tool_timeout=max(1.0, _float("AI_TOOL_TIMEOUT", 15)),
         )

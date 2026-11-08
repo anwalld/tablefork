@@ -315,6 +315,10 @@ def confirmation_text(step: dict) -> str:
     remaining = (step.get("deadline") or 0) - time.time()
     minutes = max(1, round(remaining / 60)) if remaining > 0 else 1
     action = step.get("description") or step.get("kind") or "继续下一步"
+    if not deadline_auto_continues(step.get("risk", "discuss")):
+        # Side effects never run on a timeout, so do not threaten to.
+        return (f"下一步要{action}，这一步有副作用，需要发起人或群主、管理员回复“继续”才会执行，"
+                "不回复不会执行。回复“否决”取消。")
     return (f"你还在吗？{minutes} 分钟内不回复，我就{action}。"
             "回复“继续”立即执行，回复“否决”取消。")
 

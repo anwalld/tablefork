@@ -7,7 +7,7 @@ COPY ai/chat_ai ./chat_ai
 RUN mkdir -p chat_ai/gen && touch chat_ai/gen/__init__.py \
     && python -m grpc_tools.protoc -I proto --python_out=chat_ai/gen --grpc_python_out=chat_ai/gen proto/ai.proto \
     && sed -i 's/^import ai_pb2/from . import ai_pb2/' chat_ai/gen/ai_pb2_grpc.py
-COPY ai/agents.toml ./
+COPY ai/agents.toml ai/tools.toml ./
 
 # test: unit tests, run while building.
 FROM base AS test

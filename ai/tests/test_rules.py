@@ -239,12 +239,21 @@ def test_pending_step_round_trips():
 
 def test_confirmation_text_names_the_action_and_deadline():
     import time
+    step = {"kind": "council", "risk": "discuss", "description": "按方案 A 继续",
+            "initiator": 10, "deadline": time.time() + 180}
+    text = rules.confirmation_text(step)
+    assert "你还在吗" in text and "3 分钟" in text
+    assert "方案 A" in text
+    assert "继续" in text and "否决" in text
+
+
+def test_side_effect_confirmation_does_not_promise_to_run_on_timeout():
+    import time
     step = {"kind": "tool", "risk": "side_effect", "description": "执行方案 A",
             "initiator": 10, "deadline": time.time() + 180}
     text = rules.confirmation_text(step)
-    assert "你还在吗" in text
-    assert "方案 A" in text
-    assert "继续" in text and "否决" in text
+    assert "方案 A" in text and "不回复不会执行" in text
+    assert "我就" not in text
 
 
 def test_deadline_auto_continues_only_discuss_and_readonly():

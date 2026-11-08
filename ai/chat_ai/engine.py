@@ -18,11 +18,12 @@ from . import council
 from . import breakout
 from . import recall
 from . import knowledge
+from . import tools
 from .council_state import Ballot
 from .controls import GenerationControls
-from .context import allocate, build_system_prompt, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
+from .context import allocate, build_system_prompt, date_text, estimate_tokens, parent_messages_until, recent_messages, related_messages, related_note, to_chat
 from .gen import ai_pb2
-from .providers.base import ChatMessage, KeyRejected, ProviderError
+from .providers.base import ChatMessage, KeyRejected, ProviderError, ToolExchange
 
 log = logging.getLogger(__name__)
 PROVIDER_NAMES = {"deepseek": "DeepSeek", "openai": "OpenAI", "anthropic": "Anthropic", "gemini": "Gemini"}
@@ -83,6 +84,9 @@ class Engine:
         self.control_watchers = {}
         self.control_wakeup = asyncio.Event()
         self.control_monitor_task = None
+        # Fixed at start: nobody can add a tool at runtime.
+        self.tools = tools.load(settings.tools_file) if settings.tools_enabled else {}
+        self.described_tools = None
         self.vectors = (knowledge.VectorStore(settings.pgvector_dsn, settings.embedding_dimensions)
                         if settings.knowledge_enabled and settings.pgvector_dsn else None)
 
@@ -111,12 +115,21 @@ class Engine:
             # The chat server checked the owner/admin role; here the step's own
             # initiator is also allowed. Only those responses touch the step.
             async with self._room(room_id, seen) as state:
-                if state is not None and state.pending_step is not None:
+                if (state is not None and state.pending_step is not None
+                        and state.pending_step.get('status') in ('pending', 'paused')):
                     step = state.pending_step
                     allowed = value.privileged or value.member_id == step.get('initiator')
-                    if allowed:
+                    if allowed and value.response in ('continue', 'cancel'):
                         step['status'] = 'done' if value.response == 'continue' else 'cancelled'
+                        state.timer_due = None
+                        if step['status'] == 'cancelled':
+                            self._post_system(room_id, f"已取消：{step.get('description') or '下一步'}。")
+                        elif step.get('kind') == 'tool':
+                            # Confirmed: the tool runs once, in a new job.
+                            self._enqueue_job(state, step['slug'], step['payer'], 'tool_continue',
+                                              tool=step['tool'], step_id=step['id'])
             await ack()
+            await self._drain(room_id)
             return
 
         if body == 'council_start':
@@ -240,6 +253,18 @@ class Engine:
                 'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
                 'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0,
             })
+
+    def _enqueue_job(self, state, slug, payer, kind, **extra):
+        ai = state.ai(slug)
+        if ai is None:
+            return
+        state.pending.append({
+            'id': uuid.uuid4().hex, 'slug': slug, 'payer': list(payer), 'kind': kind, 'hop': 1,
+            'epoch': state.epoch, 'slot': state.proactive_mask.bit_count(), 'attempt': 0,
+            'member_id': ai.member_id, 'admission_id': ai.admission_id, 'trigger': None,
+            'trigger_seq': state.last_trigger_seq, 'trigger_id': state.last_trigger_id,
+            'status': 'queued', 'owner': '', 'lease_until': 0, 'retry_at': 0, **extra,
+        })
 
     async def fire_due_timers(self):
         due = await self.cache.zrangebyscore('ai:timers', '-inf', self.clock())
@@ -524,6 +549,14 @@ class Engine:
         if related is not None:
             # Placed just before the newest turn, so the cached prefix stays the same.
             messages.insert(len(messages) - 1, related)
+        prefix = ''
+        if job['kind'] == 'tool_continue':
+            record, note = await self._run_confirmed_tool(room_id, job)
+            prefix = record + "\n"
+            messages.append(ChatMessage('user', note))
+        provider = self.providers.create(ai.provider)
+        use_tools = (bool(self.tools) and state.collaboration_enabled and job['kind'] != 'tool_continue'
+                     and hasattr(provider, 'complete'))
         strip = self.settings.strip_self_name
 
         def visible(text):
@@ -563,16 +596,24 @@ class Engine:
                 sequence=sequence, cumulative=True, admission_id=job.get("admission_id", ""))))
             last_flush = time.monotonic()
         await flush()  # clears the previous attempt even before the first token
+        if prefix:
+            parts.append(prefix)
+            buffered.append(prefix)
         try:
-            provider = self.providers.create(ai.provider)
-            async with asyncio.timeout(self.settings.generation_timeout):
-                async for piece in provider.stream(model=agent.model, system=system,
-                        messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens,
-                        cache_prefix=self.settings.context_block > 0):
-                    parts.append(piece)
-                    buffered.append(piece)
-                    if time.monotonic() - last_flush >= self.settings.chunk_interval:
-                        await flush()
+            if use_tools:
+                # Tool turns are not streamed; the reply arrives in one piece.
+                text = await self._tool_loop(room_id, job, state, agent, provider, system, messages, key)
+                parts.append(text)
+                buffered.append(text)
+            else:
+                async with asyncio.timeout(self.settings.generation_timeout):
+                    async for piece in provider.stream(model=agent.model, system=system,
+                            messages=messages, api_key=key, max_tokens=self.settings.max_output_tokens,
+                            cache_prefix=self.settings.context_block > 0):
+                        parts.append(piece)
+                        buffered.append(piece)
+                        if time.monotonic() - last_flush >= self.settings.chunk_interval:
+                            await flush()
             await flush()
         except KeyRejected:
             await flush()
@@ -612,6 +653,106 @@ class Engine:
         self._send_final(room_id, final)
         if state.collaboration_enabled and job.get('window_start'):
             self._spawn(self._process_segment(room_id, job['payer'][1], job['window_start']))
+
+    async def _tool_specs(self):
+        if self.described_tools is None:
+            self.described_tools = await tools.mcp_describe(self.tools, self.settings.tool_timeout)
+        return self.described_tools
+
+    async def _tool_loop(self, room_id, job, state, agent, provider, system, messages, key):
+        """Up to four model turns with tools. Read-only tools run at once and
+        are recorded in the reply; a side-effecting call stops the loop and
+        becomes a confirmation request instead."""
+        described = await self._tool_specs()
+        specs = tools.schemas(described)
+        exchanges, records, text = [], [], ''
+        for _ in range(4):
+            async with asyncio.timeout(self.settings.generation_timeout):
+                turn = await provider.complete(model=agent.model, system=system, messages=messages,
+                                               exchanges=exchanges, tools=specs, api_key=key,
+                                               max_tokens=self.settings.max_output_tokens)
+            if not turn.calls:
+                text = turn.text
+                break
+            results = []
+            for call in turn.calls:
+                tool = described.get(call.name)
+                if tool is None:
+                    results.append((call.id, f'错误：没有名为 {call.name} 的工具，不能调用'))
+                    continue
+                if tool.risk == 'side_effect':
+                    await self._ask_tool_confirmation(room_id, job, call)
+                    shown = tools.summarize(json.dumps(call.arguments, ensure_ascii=False), 120)
+                    text = (f"我需要调用「{call.name}」（参数：{shown}）。这一步有副作用，"
+                            "要等发起人或群主、管理员回复“继续”才会执行，回复“否决”取消。")
+                    return "\n".join(records + [text])
+                result = await self._run_tool(room_id, job, tool, call.arguments)
+                records.append(tools.call_record(call.name, call.arguments, result))
+                results.append((call.id, result))
+            exchanges.append(ToolExchange(tuple(turn.calls), tuple(results)))
+        else:
+            text = text or '（工具调用次数已达上限，先回复到这里。）'
+        return "\n".join(records + [text]) if records else text
+
+    async def _run_tool(self, room_id, job, tool, arguments):
+        """Runs one tool; failures and timeouts come back as text for the
+        model, never as exceptions."""
+        limit = self.settings.tool_timeout
+        try:
+            async with asyncio.timeout(limit):
+                if tool.kind == 'builtin':
+                    return await self._builtin(room_id, job, tool.name, arguments)
+                return await tools.call_mcp(tool, arguments, limit)
+        except TimeoutError:
+            return f'调用超时（超过 {limit:g} 秒）'
+        except Exception as error:  # noqa: BLE001 - reported to the model
+            return f'调用失败：{error or type(error).__name__}'[:500]
+
+    async def _builtin(self, room_id, job, name, arguments):
+        query = str(arguments.get('query', '')).strip()
+        if name == 'current_time':
+            return date_text()
+        if name == 'search_messages':
+            if self.pool is None or not query:
+                return '聊天记录搜索不可用'
+            items = await related_messages(self.pool, room_id, job.get('window_start') or 2 ** 62, query,
+                                           self.settings.retrieval_top_k, self.settings.retrieval_chars)
+            note = related_note(items)
+            return note.content if note else '没有找到相关的聊天记录'
+        if name == 'search_knowledge':
+            note = await self._knowledge_note(room_id, job.get('parent_room_id', 0), job['payer'][1], query)
+            return note.content if note else '没有找到相关资料'
+        raise tools.ToolError(f'未知的内置工具 {name}')
+
+    async def _ask_tool_confirmation(self, room_id, job, call):
+        async with self._room(room_id) as state:
+            deadline = self.clock() + self.settings.council_timeout_seconds
+            state.pending_step = {
+                'id': f"tool:{job['id']}", 'kind': 'tool', 'risk': 'side_effect',
+                'initiator': job['payer'][0], 'payer': job['payer'], 'slug': job['slug'],
+                'tool': {'name': call.name, 'arguments': call.arguments},
+                'description': f'调用工具「{call.name}」', 'deadline': deadline, 'status': 'pending',
+            }
+            state.timer_due = deadline
+            step = copy.deepcopy(state.pending_step)
+        self._post_pending_step(room_id, step)
+
+    async def _run_confirmed_tool(self, room_id, job):
+        """Runs a confirmed side-effecting tool at most once, even if this job
+        is retried: the first attempt claims it, later ones reuse its result."""
+        call = job['tool']
+        marker = f"ai:tool:run:{job.get('step_id', job['id'])}"
+        if await self.cache.set(marker, '', nx=True, ex=86400):
+            tool = (await self._tool_specs()).get(call['name'])
+            result = ('错误：这个工具已不在部署配置里' if tool is None
+                      else await self._run_tool(room_id, job, tool, call['arguments']))
+            await self.cache.set(marker, result or '（无输出）', ex=86400)
+        else:
+            result = await self.cache.get(marker) or '上一次执行的结果未知；为避免重复执行，没有再次调用'
+        record = tools.call_record(call['name'], call['arguments'], result)
+        note = (f"（你之前请求调用的工具「{call['name']}」已经人工确认并执行，结果：{result}。"
+                "请根据结果简短回复。）")
+        return record, note
 
     async def _recall(self, room_id, state):
         """The summary and memories to inject; empty when off or on error."""
