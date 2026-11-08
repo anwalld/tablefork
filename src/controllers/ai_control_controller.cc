@@ -190,4 +190,42 @@ AiControlController::Response AiControlController::collaboration(drogon::HttpReq
     co_await RoomHub::instance().publish(id, toJsonString(event), session.request);
     co_return jsonResponse(Json::Value(Json::objectValue));
 }
+
+AiControlController::Response AiControlController::council(drogon::HttpRequestPtr req, std::string room)
+{
+    std::vector<std::string> args{room};
+    if (auto queued = co_await RequestBuffer::instance().admit(req, "AiControlController::council", std::move(args))) co_return queued;
+    const auto session = co_await SessionStore::require(req);
+    const auto id = parseRoomId(room);
+    const auto &body = jsonBody(req);
+    if (!body["members"].isArray()) throw ApiError::invalidArgument("members required");
+    std::vector<int64_t> members;
+    for (const auto &item : body["members"])
+    {
+        if (!item.isInt64()) throw ApiError::invalidArgument("members must be member ids");
+        members.push_back(item.asInt64());
+    }
+    auto tx = co_await newGuardedTransaction(session.request);
+    const auto actor = "user:" + std::to_string(session.userId);
+    const auto prior = co_await RequestMemo::begin(tx, session.request, actor, "ai.council");
+    const auto role = co_await lockActor(tx, id, session.memberId);
+    if (role != "owner" && role != "admin") throw ApiError::forbidden();
+    if (!prior)
+    {
+        co_await tx->execSqlCoro("DELETE FROM room_council WHERE room_id = ?", id);
+        for (const auto memberId : members)
+        {
+            const auto rows = co_await tx->execSqlCoro(
+                "SELECT 1 FROM room_members rm JOIN members m ON m.id = rm.member_id "
+                "WHERE rm.room_id = ? AND rm.member_id = ? AND m.type = 'ai'", id, memberId);
+            if (rows.empty()) throw ApiError::invalidArgument("council members must be AIs in the room");
+            co_await tx->execSqlCoro("INSERT INTO room_council (room_id, member_id) VALUES (?, ?)", id, memberId);
+        }
+        co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
+    }
+    co_await commit(std::move(tx));
+    co_await reportControlChanged(id, session.request);
+    co_return jsonResponse(Json::Value(Json::objectValue));
+}
+
 }
