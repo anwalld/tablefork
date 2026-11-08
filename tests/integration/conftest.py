@@ -228,10 +228,15 @@ def make_user():
 
 @pytest.fixture
 def make_room():
-    def make(owner, *guests):
+    def make(owner, *guests, collaboration=False):
         response = owner.post("/api/rooms", json={"name": "room"})
         assert response.status_code == 201
         room_id = response.json()["id"]
+        if not collaboration:
+            # New rooms collaborate by default; most tests cover the plain
+            # multi-AI chat that a room falls back to with it off.
+            assert owner.request("PUT", f"/api/rooms/{room_id}/collaboration",
+                                 json={"enabled": False}).status_code == 200
         for guest in guests:
             assert owner.post(
                 f"/api/rooms/{room_id}/invites", json={"username": guest.username}

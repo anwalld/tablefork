@@ -7,7 +7,7 @@ import { api } from '../lib/api.js'
 const state = vi.hoisted(() => ({ handlers: null, sent: [] }))
 vi.mock('../lib/api.js', () => ({
   ApiError: class extends Error {},
-  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn(), createRoom: vi.fn(), markRead: vi.fn(), search: vi.fn(), aiState: vi.fn(), pauseAi: vi.fn(), stopAi: vi.fn() },
+  api: { rooms: vi.fn(), members: vi.fn(), history: vi.fn(), invite: vi.fn(), createRoom: vi.fn(), markRead: vi.fn(), search: vi.fn(), aiState: vi.fn(), pauseAi: vi.fn(), stopAi: vi.fn(), setCollaboration: vi.fn() },
 }))
 vi.mock('../lib/chat-socket.js', () => ({ ChatSocket: class {
   constructor(handlers) { state.handlers = handlers; this.handlers = handlers; this.rooms = new Set() }
@@ -45,6 +45,7 @@ beforeEach(() => {
   api.markRead.mockResolvedValue({})
   api.aiState.mockResolvedValue({ paused: false, generations: [] })
   api.pauseAi.mockResolvedValue({})
+  api.setCollaboration.mockResolvedValue({})
   api.stopAi.mockResolvedValue({})
   api.search.mockResolvedValue({ messages: [], next_before: null })
   api.rooms.mockResolvedValue({ rooms: [removed, other] })
@@ -224,6 +225,26 @@ it('renders a stopped reply from history and lets managers pause AI', async () =
   await button.trigger('click')
   await flushPromises()
   expect(api.pauseAi).toHaveBeenCalledWith(7, true)
+})
+
+it('lets managers turn collaboration off and follows the room event', async () => {
+  api.rooms.mockResolvedValue({ rooms: [{ ...removed, collaboration_enabled: true }] })
+  api.members.mockResolvedValue({ members: [{ id: 1, name: 'alice', type: 'human', role: 'owner' }] })
+  const view = await chat()
+  await view.findAll('button').find(b => b.text() === '关闭协作').trigger('click')
+  await flushPromises()
+  expect(api.setCollaboration).toHaveBeenCalledWith(7, false)
+  expect(view.findAll('button').some(b => b.text() === '开启协作')).toBe(true)
+  state.handlers.onEvent?.({ type: 'collaboration_changed', room_id: 7, enabled: true })
+  await flushPromises()
+  expect(view.findAll('button').some(b => b.text() === '关闭协作')).toBe(true)
+})
+
+it('hides the collaboration switch from ordinary members', async () => {
+  api.rooms.mockResolvedValue({ rooms: [{ ...removed, collaboration_enabled: true }] })
+  api.members.mockResolvedValue({ members: [{ id: 1, name: 'alice', type: 'human', role: 'member' }] })
+  const view = await chat()
+  expect(view.findAll('button').some(b => b.text() === '关闭协作')).toBe(false)
 })
 
 it('searches through the authenticated API and renders returned matches', async () => {

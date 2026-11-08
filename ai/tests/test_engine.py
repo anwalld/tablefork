@@ -729,3 +729,19 @@ async def test_root_rooms_ignore_breakout_closed():
     await h.send_event({"breakout_closed": ai_pb2.BreakoutClosed(room_id=1)})
     await h.settle()
     assert h.of("breakout_concluded") == []
+
+
+async def test_host_unavailable_is_told_once_an_hour_per_person():
+    # Collaboration is on by default; without a host key every message falls
+    # back to the old rules, but the notice is not repeated each time.
+    h = Harness()
+    room = h.snapshot([ALICE], [CLAUDE])
+    room.collaboration_enabled = True
+    for text in ("一", "二"):
+        await h.cache_message(ALICE[0], "alice", text)
+        await h.send_event({"message_saved": ai_pb2.MessageSaved(
+            room=room, seq=h.seq, content=text,
+            sender=ai_pb2.Sender(member_id=ALICE[0], user_id=ALICE[1], name="alice"))})
+        await h.settle()
+    assert [n.code for n in h.of("notice")].count("host_unavailable") == 1
+    assert len(h.of("final")) == 2          # still answered by the old rules

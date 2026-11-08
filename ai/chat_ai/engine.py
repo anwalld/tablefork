@@ -879,9 +879,12 @@ class Engine:
         if speakers is not None:
             return rules.on_host_decision(state, speakers, end, payer, available,
                                           mentioned, self.settings.round_max_replies)
-        self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
-            room_id=room_id, notify_member_id=payer.member_id,
-            code='host_unavailable', message='主持人暂时不可用，已按原规则回复')))
+        # Collaboration is on by default, so a missing host key would repeat
+        # this on every message: tell each person at most once an hour per room.
+        if await self.cache.set(f'ai:host-notice:{room_id}:{payer.member_id}', '1', nx=True, ex=3600):
+            self.send(ai_pb2.AiAction(notice=ai_pb2.Notice(
+                room_id=room_id, notify_member_id=payer.member_id,
+                code='host_unavailable', message='主持人暂时不可用，已按原规则回复')))
         return rules.on_human_message(state, payer, content, available, self.rng, mention_ids)
 
     def _post_pending_step(self, room_id, step):

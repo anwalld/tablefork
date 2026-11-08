@@ -35,9 +35,9 @@ def test_collaboration_switch_broadcasts_to_room(make_user, make_room, make_sock
     assert event["enabled"] is False
 
 
-def test_collaboration_off_by_default(make_user, make_room, db):
+def test_new_rooms_collaborate_by_default(make_user, db):
     owner = make_user()
-    room = make_room(owner)
+    room = owner.post("/api/rooms", json={"name": "协作"}).json()["id"]
     with db.cursor() as cursor:
         cursor.execute("SELECT collaboration_enabled FROM rooms WHERE id=%s", (room,))
-        assert cursor.fetchone()[0] == 0
+        assert cursor.fetchone()[0] == 1

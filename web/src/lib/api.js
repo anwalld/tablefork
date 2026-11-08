@@ -97,6 +97,7 @@ export const api = {
 
   aiState: (roomId) => request('GET', `/api/rooms/${roomId}/ai-state`),
   pauseAi: (roomId, paused) => request('PUT', `/api/rooms/${roomId}/ai-state`, { paused }),
+  setCollaboration: (roomId, enabled) => request('PUT', `/api/rooms/${roomId}/collaboration`, { enabled }),
   stopAi: (roomId, id) => request('POST', `/api/rooms/${roomId}/ai-generations/${encodeURIComponent(id)}/stop`),
   markRead: (roomId, seq) => request('PUT', `/api/rooms/${roomId}/read`, { seq }),
   search: (roomId, params = {}) => request('GET', `/api/rooms/${roomId}/search?${new URLSearchParams({ limit: 50, ...params })}`),
