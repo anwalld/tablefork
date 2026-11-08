@@ -607,6 +607,7 @@ onBeforeUnmount(() => {
           @click="openRoom(room)"
         >
           <span class="room-name">{{ room.name }}</span>
+          <span v-if="room.parent_room_id" class="tag" aria-label="小会">小会</span>
           <span v-if="room.unread_count" class="tag" aria-label="未读消息">{{ room.unread_count > 99 ? '99+' : room.unread_count }}</span>
           <span v-if="room.mention_seq" class="tag" role="button" tabindex="0"
             @click.stop="locateMessage(room.id, room.mention_seq, true)"
@@ -708,16 +709,16 @@ onBeforeUnmount(() => {
             <textarea
               ref="composerEl"
               v-model="draft"
-              :disabled="!!activeRemoval"
+              :disabled="!!activeRemoval || activeRoom?.status === 'readonly'"
               rows="2"
-              placeholder="输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员"
+              :placeholder="activeRoom?.status === 'readonly' ? '只读：你未参加这个小会' : '输入消息，Enter 发送，Shift + Enter 换行，@ 提及成员'"
               aria-label="消息内容"
               @keydown="onKeydown"
               @keyup="trackCaret"
               @click="trackCaret"
               @input="trackCaret"
             />
-            <button class="primary" :disabled="!!activeRemoval">发送</button>
+            <button class="primary" :disabled="!!activeRemoval || activeRoom?.status === 'readonly'">发送</button>
           </form>
         </template>
       </template>

@@ -179,6 +179,10 @@ AiControlController::Response AiControlController::collaboration(drogon::HttpReq
     if (!prior)
     {
         co_await tx->execSqlCoro("UPDATE rooms SET collaboration_enabled = ? WHERE id = ?", enabled, id);
+        if (!enabled)
+            // Closing collaboration cascades into the room's active breakouts.
+            co_await tx->execSqlCoro(
+                "UPDATE rooms SET status = 'closed' WHERE parent_room_id = ? AND status = 'active'", id);
         co_await RequestMemo::finish(tx, session.request, actor, Json::Value(Json::objectValue));
     }
     co_await commit(std::move(tx));

@@ -256,22 +256,31 @@ drogon::Task<Json::Value> RoomService::list(Session session,
                                             int64_t limit,
                                             int64_t offset)
 {
+    // A room a caller may read: one they joined, or any breakout below a room
+    // they can read. Breakouts they did not join are listed read-only.
     const auto rows = co_await drogon::app().getDbClient()->execSqlCoro(
-        "SELECT r.id, r.name, r.last_seq, m.member_id, "
+        "WITH RECURSIVE visible AS ("
+        "  SELECT r.id, r.parent_room_id FROM rooms r "
+        "  JOIN room_members m ON m.room_id = r.id WHERE m.member_id = ?"
+        "  UNION ALL"
+        "  SELECT c.id, c.parent_room_id FROM rooms c JOIN visible v ON c.parent_room_id = v.id"
+        ") "
+        "SELECT r.id, r.name, r.last_seq, r.parent_room_id, m.member_id, "
         "COALESCE(m.read_seq, r.last_seq) AS read_seq, "
         "(SELECT COUNT(*) FROM messages msg WHERE msg.room_id = r.id "
-        " AND msg.seq > m.read_seq AND msg.member_id <> m.member_id) AS unread_count, "
+        " AND msg.seq > COALESCE(m.read_seq, r.last_seq) AND msg.member_id <> ?) AS unread_count, "
         "(SELECT MIN(mm.seq) FROM message_mentions mm WHERE mm.room_id = r.id "
-        " AND mm.member_id = m.member_id AND mm.seq > m.read_seq) AS mention_seq, "
+        " AND mm.member_id = ? AND mm.seq > COALESCE(m.read_seq, r.last_seq)) AS mention_seq, "
         "       (SELECT COUNT(*) FROM room_members c WHERE c.room_id = r.id) "
         "           AS member_count "
-        "FROM rooms r "
+        "FROM visible v "
+        "JOIN rooms r ON r.id = v.id "
         "LEFT JOIN room_members m ON m.room_id = r.id AND m.member_id = ? "
-        "LEFT JOIN room_invites i ON i.room_id = r.id AND i.user_id = ? "
-        "WHERE m.member_id IS NOT NULL OR i.user_id IS NOT NULL "
         "ORDER BY r.id DESC LIMIT ? OFFSET ?",
         session.memberId,
-        session.userId,
+        session.memberId,
+        session.memberId,
+        session.memberId,
         limit,
         offset);
     Json::Value rooms(Json::arrayValue);
@@ -281,11 +290,17 @@ drogon::Task<Json::Value> RoomService::list(Session session,
         room["id"] = Json::Int64(row["id"].as<int64_t>());
         room["name"] = row["name"].as<std::string>();
         room["member_count"] = Json::Int64(row["member_count"].as<int64_t>());
-        room["status"] = row["member_id"].isNull() ? "invited" : "joined";
+        if (!row["member_id"].isNull())
+            room["status"] = "joined";
+        else if (!row["parent_room_id"].isNull())
+            room["status"] = "readonly";
+        else
+            room["status"] = "invited";
         room["last_seq"] = Json::Int64(row["last_seq"].as<int64_t>());
         room["read_seq"] = Json::Int64(row["read_seq"].as<int64_t>());
         room["unread_count"] = Json::Int64(row["unread_count"].as<int64_t>());
         room["mention_seq"] = row["mention_seq"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["mention_seq"].as<int64_t>()));
+        room["parent_room_id"] = row["parent_room_id"].isNull() ? Json::Value() : Json::Value(Json::Int64(row["parent_room_id"].as<int64_t>()));
         rooms.append(std::move(room));
     }
     Json::Value body;
