@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../lib/api.js'
 import { addRequest, providerName } from '../lib/providers.js'
 import { requestErrorText } from '../lib/request-errors.js'
+import AppDialog from './AppDialog.vue'
+import PersonaEditor from './PersonaEditor.vue'
 
 const props = defineProps({
   roomId: { type: Number, required: true },
@@ -20,26 +22,71 @@ const showMyAi = ref(false)
 const models = ref([])
 const model = ref('claude')
 const roleName = ref('')
-const invitationPersona = ref('')
+const rolePersona = ref('')
+const creating = ref(false)
 const roleBusy = ref(false)
 const editing = ref(null)
 const editText = ref('')
+const roleEditing = ref(null)
+const roleText = ref('')
+const inviting = ref(null)
+const invitationPersona = ref('')
+// Keys of the actions whose requests are still running, so their buttons
+// show progress instead of looking unresponsive.
+const busy = ref(new Set())
 
-async function openMyAi() {
+async function run(key, action) {
+  if (busy.value.has(key)) return
+  busy.value = new Set(busy.value).add(key)
+  try { await action() }
+  finally {
+    const next = new Set(busy.value)
+    next.delete(key)
+    busy.value = next
+  }
+}
+const isBusy = (key) => busy.value.has(key)
+
+function toggleMyAi() {
   showMyAi.value = !showMyAi.value
-  if (!showMyAi.value) return
-  try { models.value = (await api.aiModels()).models }
-  catch (e) { emit('notice', requestErrorText(e, '模型目录加载失败')) }
+}
+async function openCreate() {
+  roleName.value = ''
+  rolePersona.value = ''
+  creating.value = true
+  try {
+    models.value = (await api.aiModels()).models
+    if (!models.value.some((item) => item.model_slug === model.value)) model.value = models.value[0]?.model_slug ?? ''
+  } catch (e) { emit('notice', requestErrorText(e, '模型目录加载失败')) }
 }
 async function createRole() {
-  if (roleBusy.value) return
+  if (roleBusy.value || !roleName.value.trim()) return
   roleBusy.value = true
   try {
-    await api.createAiRole(model.value, roleName.value.trim())
+    await api.createAiRole(model.value, roleName.value.trim(), rolePersona.value)
+    creating.value = false
     roleName.value = ''
+    rolePersona.value = ''
+    showMyAi.value = true
     await loadAgents()
-    emit('notice', '私人AI已创建，请选择房间人设后邀请')
+    emit('notice', '私人AI已创建，可以邀请进房间了')
   } catch (e) { emit('notice', requestErrorText(e, '创建失败')) }
+  finally { roleBusy.value = false }
+}
+function editRolePersona(agent) {
+  roleEditing.value = agent
+  roleText.value = agent.persona ?? ''
+}
+async function saveRolePersona() {
+  const target = roleEditing.value
+  if (!target || roleBusy.value) return
+  roleBusy.value = true
+  try {
+    await api.editRolePersona(target.id, roleText.value)
+    roleEditing.value = null
+    await loadAgents()
+    emit('notice', '默认人设已保存，之后邀请时自动填入')
+  } catch (e) { emit('notice', requestErrorText(e, '人设保存失败')) }
   finally { roleBusy.value = false }
 }
 function editPersona(member) {
@@ -70,6 +117,12 @@ const isOwner = computed(() => myRole.value === 'owner')
 const canManage = computed(() => myRole.value === 'owner' || myRole.value === 'admin')
 const inRoom = computed(() => new Set(props.members.filter((m) => m.type === 'ai').map((m) => m.slug)))
 const addable = computed(() => agents.value.filter((a) => !inRoom.value.has(a.slug)))
+const selected = computed(() => addable.value.find((a) => a.slug === chosen.value) ?? null)
+// Preselect the first AI that can be invited; a placeholder adds a useless step.
+watch(addable, (list) => {
+  if (list.some((a) => a.slug === chosen.value)) return
+  chosen.value = (list.find((a) => a.has_key) ?? list[0])?.slug ?? ''
+}, { immediate: true })
 
 const ROLE_NAMES = { owner: '群主', admin: '管理员' }
 
@@ -138,6 +191,7 @@ async function unban(username) {
 
 watch(() => props.roomId, () => {
   editing.value = null
+  inviting.value = null
   invitationPersona.value = ''
   showBans.value = false
   bannedUsers.value = []
@@ -159,42 +213,56 @@ async function loadRequests() {
   requests.value = canManage.value ? (await api.aiRequests(props.roomId)).requests : []
 }
 
-async function addAi() {
-  const agent = agents.value.find((a) => a.slug === chosen.value)
+function openInvite() {
+  const agent = selected.value
   if (!agent) return
   if (!agent.has_key) {
     emit('notice', `请先在设置里填写 ${providerName(agent.provider)} 的 API key`)
     emit('open-settings')
     return
   }
+  inviting.value = agent
+  invitationPersona.value = agent.persona ?? ''
+}
+
+async function addAi() {
+  const agent = inviting.value
+  if (!agent || roleBusy.value) return
+  roleBusy.value = true
   try {
     const { status } = await api.requestAi(props.roomId, agent.id ?? agent.slug, invitationPersona.value)
     emit('notice', status === 'joined' ? `${agent.name} 已加入` : '已提交，等待群主或管理员审批')
-    chosen.value = ''
+    inviting.value = null
     invitationPersona.value = ''
     emit('changed')
   } catch (e) {
     emit('notice', requestErrorText(e, e.code === 'api_key_required' ? `请先填写 ${providerName(e.provider)} 的 API key` : '操作失败'))
-  }
+  } finally { roleBusy.value = false }
 }
 
-async function review(slug, approve) {
-  try {
-    await (approve ? api.approveAi : api.rejectAi)(props.roomId, slug)
-  } catch (error) {
-    emit('notice', requestErrorText(error, '这条申请已被处理'))
-  }
-  await loadRequests()
-  emit('changed')
-}
-
-async function act(action, member) {
-  try {
-    await action(props.roomId, member.type === 'ai' ? (member.id ?? member.slug) : member.name)
+function review(slug, approve) {
+  return run(`review:${slug}`, async () => {
+    try {
+      await (approve ? api.approveAi : api.rejectAi)(props.roomId, slug)
+      emit('notice', approve ? '已批准' : '已拒绝')
+    } catch (error) {
+      emit('notice', requestErrorText(error, '这条申请已被处理'))
+    }
+    await loadRequests()
     emit('changed')
-  } catch (e) {
-    emit('notice', requestErrorText(e, e.code === 'forbidden' ? '只有群主或管理员能这样做' : '操作失败'))
-  }
+  })
+}
+
+function act(action, member, done) {
+  return run(`act:${member.id}`, async () => {
+    try {
+      await action(props.roomId, member.type === 'ai' ? (member.id ?? member.slug) : member.name)
+      if (done) emit('notice', done)
+      emit('changed')
+    } catch (e) {
+      emit('notice', requestErrorText(e, e.code === 'forbidden' ? '只有群主或管理员能这样做' : '操作失败'))
+    }
+  })
 }
 
 watch(() => props.requestEvent, (frame) => {
@@ -222,13 +290,13 @@ defineExpose({ loadAgents })
         <span>{{ member.name }}</span>
         <span v-if="member.type === 'ai'" class="tag">{{ member.model_slug ?? 'AI' }}</span>
         <span v-if="member.type === 'ai'" class="hint">{{ member.is_legacy ? '旧版预置AI' : `created by ${member.creator_name ?? ''}` }}</span>
-        <button v-if="member.type === 'ai' && !member.is_legacy && member.creator_user_id === (me.user_id ?? me.id)" class="link" @click="editPersona(member)">编辑人设</button>
+        <button v-if="member.type === 'ai' && !member.is_legacy && member.creator_user_id === (me.user_id ?? me.id)" class="link" @click="editPersona(member)">人设</button>
         <span v-if="ROLE_NAMES[member.role]" class="tag">{{ ROLE_NAMES[member.role] }}</span>
         <span class="member-actions">
           <template v-if="isOwner && member.type === 'human' && member.id !== me.member_id">
-            <button class="link" @click="act(api.transferOwner, member)">转让群主</button>
-            <button v-if="member.role === 'admin'" class="link" @click="act(api.dismissAdmin, member)">取消管理员</button>
-            <button v-else class="link" @click="act(api.appointAdmin, member)">设为管理员</button>
+            <button class="link" :disabled="isBusy(`act:${member.id}`)" @click="act(api.transferOwner, member, `已把群主转让给 ${member.name}`)">转让群主</button>
+            <button v-if="member.role === 'admin'" class="link" :disabled="isBusy(`act:${member.id}`)" @click="act(api.dismissAdmin, member, `已取消 ${member.name} 的管理员`)">取消管理员</button>
+            <button v-else class="link" :disabled="isBusy(`act:${member.id}`)" @click="act(api.appointAdmin, member, `已设 ${member.name} 为管理员`)">设为管理员</button>
           </template>
           <template v-if="canModerate(member)">
             <button class="link danger" :disabled="moderationBusy" :aria-label="`踢出 ${member.name}`"
@@ -239,9 +307,11 @@ defineExpose({ loadAgents })
           <button
             v-if="canManage && member.type === 'ai'"
             class="link danger"
-            @click="act(api.removeAi, member)"
+            :disabled="isBusy(`act:${member.id}`)"
+            :aria-busy="isBusy(`act:${member.id}`)"
+            @click="act(api.removeAi, member, `${member.name} 已移出`)"
           >
-            移出
+            {{ isBusy(`act:${member.id}`) ? '移出中…' : '移出' }}
           </button>
         </span>
       </li>
@@ -269,39 +339,86 @@ defineExpose({ loadAgents })
       </form>
     </section>
 
-    <button class="link" @click="openMyAi">我的AI</button>
+    <div class="role-row">
+      <button class="link" @click="toggleMyAi">我的AI</button>
+      <button class="link" @click="openCreate">创建私人AI</button>
+    </div>
     <section v-if="showMyAi" aria-label="我的AI">
       <h3>我的AI · 仅自己可邀请</h3>
-      <ul><li v-for="agent in agents" :key="agent.id ?? agent.slug">{{ agent.name }} · {{ agent.model_slug }}</li></ul>
-      <form @submit.prevent="createRole">
-        <select v-model="model" aria-label="底层模型"><option v-for="item in models" :key="item.model_slug" :value="item.model_slug">{{ item.name }}</option></select>
-        <input v-model="roleName" aria-label="AI角色名称" maxlength="64" placeholder="例如：Claude A" />
-        <button :disabled="roleBusy || !roleName.trim()">创建私人AI</button>
-      </form>
+      <ul class="member-list">
+        <li v-for="agent in agents" :key="agent.id ?? agent.slug" class="role-row">
+          <span>{{ agent.name }} · {{ agent.model_slug }}</span>
+          <button class="link" :aria-label="`${agent.name} 人设`" @click="editRolePersona(agent)">人设</button>
+        </li>
+      </ul>
+      <p v-if="!agents.length" class="hint">还没有私人AI</p>
     </section>
-    <form v-if="editing" aria-label="编辑房间人设" @submit.prevent="savePersona">
-      <h3>{{ editing.name }} · 本房间人设</h3>
-      <textarea v-model="editText" aria-label="编辑人设正文" placeholder="描述角色的性格与说话方式" />
-      <button :disabled="roleBusy">保存人设</button><button type="button" class="link" @click="editing = null">取消</button>
-    </form>
-    <form v-if="addable.length" class="inline-form" @submit.prevent="addAi">
-      <select v-model="chosen" aria-label="选择 AI">
-        <option value="" disabled>邀请 AI</option>
+
+    <form v-if="addable.length" class="inline-form" aria-label="邀请AI" @submit.prevent="openInvite">
+      <span v-if="addable.length === 1" class="invite-name">
+        {{ addable[0].name }}{{ addable[0].has_key ? '' : `（需要 ${providerName(addable[0].provider)} key）` }}
+      </span>
+      <select v-else v-model="chosen" aria-label="选择 AI">
         <option v-for="agent in addable" :key="agent.slug" :value="agent.slug" :disabled="!agent.has_key">
           {{ agent.name }}{{ agent.has_key ? '' : `（需要 ${providerName(agent.provider)} key）` }}
         </option>
       </select>
-      <textarea v-model="invitationPersona" aria-label="邀请房间人设" placeholder="这个AI在本房间的人设，可留空" />
-      <button :disabled="!chosen">{{ canManage ? '邀请' : '申请' }}</button>
+      <button :disabled="!selected">{{ canManage ? '邀请' : '申请' }}</button>
     </form>
+
+    <AppDialog v-if="creating" title="创建私人AI" wide @close="creating = false">
+      <form class="dialog-form" aria-label="创建私人AI" @submit.prevent="createRole">
+        <select v-model="model" aria-label="底层模型">
+          <option v-for="item in models" :key="item.model_slug" :value="item.model_slug">{{ item.name }}</option>
+        </select>
+        <input v-model="roleName" aria-label="AI角色名称" maxlength="64" placeholder="名称，例如：Claude A" />
+        <PersonaEditor v-model="rolePersona" label="默认人设" />
+        <div class="dialog-actions">
+          <button type="button" @click="creating = false">取消</button>
+          <button class="primary" :disabled="roleBusy || !roleName.trim()" :aria-busy="roleBusy">{{ roleBusy ? '创建中…' : '创建' }}</button>
+        </div>
+      </form>
+    </AppDialog>
+
+    <AppDialog v-if="roleEditing" :title="`${roleEditing.name} · 默认人设`" wide @close="roleEditing = null">
+      <form class="dialog-form" aria-label="编辑默认人设" @submit.prevent="saveRolePersona">
+        <p class="hint">邀请进新房间时自动填入；已在房间里的人设不受影响。</p>
+        <PersonaEditor v-model="roleText" label="默认人设" />
+        <div class="dialog-actions">
+          <button type="button" @click="roleEditing = null">取消</button>
+          <button class="primary" :disabled="roleBusy" :aria-busy="roleBusy">{{ roleBusy ? '保存中…' : '保存' }}</button>
+        </div>
+      </form>
+    </AppDialog>
+
+    <AppDialog v-if="inviting" :title="`${canManage ? '邀请' : '申请邀请'} ${inviting.name}`" wide @close="inviting = null">
+      <form class="dialog-form" aria-label="邀请AI人设" @submit.prevent="addAi">
+        <p class="hint">本房间人设，已按默认人设填好，可以修改或留空。</p>
+        <PersonaEditor v-model="invitationPersona" label="邀请房间人设" />
+        <div class="dialog-actions">
+          <button type="button" @click="inviting = null">取消</button>
+          <button class="primary" :disabled="roleBusy" :aria-busy="roleBusy">{{ roleBusy ? '提交中…' : (canManage ? '邀请' : '申请') }}</button>
+        </div>
+      </form>
+    </AppDialog>
+
+    <AppDialog v-if="editing" :title="`${editing.name} · 本房间人设`" wide @close="editing = null">
+      <form class="dialog-form" aria-label="编辑房间人设" @submit.prevent="savePersona">
+        <PersonaEditor v-model="editText" label="编辑人设正文" />
+        <div class="dialog-actions">
+          <button type="button" @click="editing = null">取消</button>
+          <button class="primary" :disabled="roleBusy" :aria-busy="roleBusy">{{ roleBusy ? '保存中…' : '保存' }}</button>
+        </div>
+      </form>
+    </AppDialog>
 
     <section v-if="canManage && requests.length" class="requests">
       <h3>待审批（{{ requests.length }}）</h3>
       <div v-for="request in requests" :key="request.slug" class="request">
         <span>{{ request.name ?? agents.find((a) => a.slug === request.slug)?.name ?? request.slug }}</span>
         <span v-if="request.requested_by?.name" class="hint">{{ request.requested_by.name }} 申请</span>
-        <button v-if="!request.is_legacy" class="link" @click="review(request.id ?? request.slug, true)">批准</button>
-        <button class="link danger" @click="review(request.id ?? request.slug, false)">拒绝</button>
+        <button v-if="!request.is_legacy" class="link" :disabled="isBusy(`review:${request.id ?? request.slug}`)" @click="review(request.id ?? request.slug, true)">批准</button>
+        <button class="link danger" :disabled="isBusy(`review:${request.id ?? request.slug}`)" @click="review(request.id ?? request.slug, false)">拒绝</button>
       </div>
     </section>
   </aside>

@@ -18,7 +18,9 @@
 
 ## 页面操作
 
-打开房间的“成员”面板，在“我的AI”中选择底层模型并填写名称创建。创建角色不要求已有key；邀请时需要创建者有对应服务商key，并填写本房间人设（可留空）。普通成员申请需审批，群主/管理员仅对自己的角色可直接邀请。
+打开房间的“成员”面板，点“创建私人AI”，在弹窗里选择底层模型、填写名称，可同时写一份默认人设。创建角色不要求已有key；邀请时需要创建者有对应服务商key，弹窗会按默认人设预填本房间人设，可修改或留空。之后在“我的AI”列表里点角色旁的“人设”修改默认人设，只影响以后的邀请，不改已在房间里的人设。
+
+人设编辑器支持Markdown：编辑/预览两个标签页（预览经DOMPurify清洗）、导入 .md 文件、一份示例模板，并按UTF-8字节显示与16KiB上限的对比。模型收到的是原始Markdown文本。普通成员申请需审批，群主/管理员仅对自己的角色可直接邀请。
 
 成员列表显示模型类型和created by。仍在房间内的创建者可编辑对应人设，管理员不能替别人编辑；提交携带当前版本，过期页面收到冲突后须重新加载。保存只影响下一轮开始的回复。
 
@@ -31,12 +33,13 @@
 | 操作 | 接口与参数 | 结果 |
 | --- | --- | --- |
 | 模型目录 | GET `/api/ai/models` | `models`数组，含model_slug/name/provider/has_key |
-| 我的角色 | GET `/api/ai/roles` | 为兼容旧客户端，数组字段名仍是`agents`；只列自己的私人角色 |
-| 创建角色 | POST `/api/ai/roles`，`{model_slug,name}` | 201，包含id/slug/name/model_slug/creator_user_id/creator_name |
+| 我的角色 | GET `/api/ai/roles` | 为兼容旧客户端，数组字段名仍是`agents`；只列自己的私人角色，每项含默认人设`persona`（没有时为空串） |
+| 创建角色 | POST `/api/ai/roles`，`{model_slug,name,persona?}` | 201，包含id/slug/name/model_slug/creator_user_id/creator_name/persona；persona为默认人设，可省略 |
 | 邀请自己的角色 | POST `/api/rooms/{room}/ai-members`，`{member_id,persona}` | joined或pending；member_id为正整数 |
 | 审批列表 | GET `/api/rooms/{room}/ai-requests` | 仅群主/管理员可读，包含具体角色id和申请者 |
 | 批准/拒绝 | POST `/api/rooms/{room}/ai-requests/{member}/approve`或reject | 沿用审批规则，批准不能改写申请人设 |
 | 修改本房间人设 | PUT `/api/rooms/{room}/ais/{member}/persona`，`{persona,persona_version}` | 返回递增后的persona_version；旧版本409 |
+| 修改角色默认人设 | PUT `/api/ai/roles/{member}/persona`，`{persona}` | 仅创建者；只影响之后邀请时的预填，返回`{id,persona}` |
 | 移出角色 | DELETE `/api/rooms/{room}/ai-members/{member}` | 群主/管理员可移出本房间角色 |
 
 `GET /api/ai-agents`保留为私人角色目录的兼容入口。旧slug形式仅对调用者自己的具体私人角色保留兼容，不能据此邀请四个公共预置AI。旧预置AI已有房间可继续聊天、可移出，不能新增邀请或批准旧申请。

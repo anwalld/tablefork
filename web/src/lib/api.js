@@ -82,7 +82,8 @@ export const api = {
 
   aiAgents: () => request('GET', '/api/ai/roles'),
   aiModels: () => request('GET', '/api/ai/models'),
-  createAiRole: (model_slug, name) => request('POST', '/api/ai/roles', { model_slug, name }),
+  createAiRole: (model_slug, name, persona = '') => request('POST', '/api/ai/roles', { model_slug, name, persona }),
+  editRolePersona: (memberId, persona) => request('PUT', `/api/ai/roles/${memberId}/persona`, { persona }),
   editAiPersona: (roomId, memberId, persona, persona_version) => request('PUT', `/api/rooms/${roomId}/ais/${memberId}/persona`, { persona, persona_version }),
   requestAi: (roomId, member, persona = '') => request('POST', `/api/rooms/${roomId}/ai-members`, typeof member === 'number' ? { member_id: member, persona } : { slug: member, persona }),
   removeAi: (roomId, slug) => request('DELETE', `/api/rooms/${roomId}/ai-members/${slug}`),
