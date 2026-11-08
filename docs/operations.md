@@ -166,6 +166,14 @@ docker compose up -d --wait
 - `WORKER_QUEUE_LIMIT=1024`：单个 worker 约每秒处理 500 条，排满时最多积压约 2 秒。超过后返回可重试错误。
 - `HOT_CACHE_SIZE=200`：足够覆盖两页最大分页，这个值按分页大小确定，没有压测。
 
+## 提交署名
+
+仓库自带一个 `prepare-commit-msg` 钩子，给每个提交补上 Claude 和 Codex 的 `Co-authored-by`，GitHub 会把它们显示为共同作者。每个克隆启用一次：
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
 ## CLion 开发
 
 日常开发在容器内构建，和部署使用同一份依赖。

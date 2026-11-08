@@ -1,0 +1,10 @@
+#!/bin/sh
+# Adds the AI co-author trailers to every commit message that lacks them, so
+# GitHub shows Claude and Codex next to the author. Enable once per clone:
+#   git config core.hooksPath scripts/git-hooks
+msg="$1"
+add() {
+    grep -qi "^Co-authored-by: .*<$2>" "$msg" || git interpret-trailers --in-place --trailer "Co-authored-by: $1 <$2>" "$msg"
+}
+add "Claude" "noreply@anthropic.com"
+add "Codex" "codex@openai.com"

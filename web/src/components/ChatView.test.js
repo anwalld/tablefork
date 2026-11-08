@@ -247,6 +247,53 @@ it('hides the collaboration switch from ordinary members', async () => {
   expect(view.findAll('button').some(b => b.text() === '关闭协作')).toBe(false)
 })
 
+it('offers slash commands in collaboration rooms and picks one with the keyboard', async () => {
+  api.rooms.mockResolvedValue({ rooms: [{ ...removed, collaboration_enabled: true }] })
+  api.members.mockResolvedValue({ members: [{ id: 1, name: 'alice', type: 'human', role: 'owner' }] })
+  const view = await chat()
+  const box = view.find('textarea')
+  await box.setValue('/')
+  await box.trigger('input')
+  const names = () => view.findAll('.command-name').map(n => n.text())
+  expect(names()).toEqual(['/vote', '/breakout', '/continue', '/cancel', '/veto', '/force-pass'])
+  expect(view.find('.command-hint').text()).toContain('表决')
+  await box.trigger('keydown', { key: 'ArrowDown' })
+  expect(view.find('.command-hint').text()).toContain('小会')
+  await poll()                                   // a room refresh keeps the highlight
+  expect(view.find('.command-hint').text()).toContain('小会')
+  await box.trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+  expect(box.element.value).toBe('/breakout ')
+  expect(view.find('.command-list').exists()).toBe(false)
+  expect(state.sent).toEqual([])                 // Enter picked the command, it did not send
+})
+
+it('has no slash commands where collaboration is off', async () => {
+  api.rooms.mockResolvedValue({ rooms: [{ ...removed, collaboration_enabled: false }] })
+  const view = await chat()
+  const box = view.find('textarea')
+  await box.setValue('/')
+  await box.trigger('input')
+  expect(view.find('.command-list').exists()).toBe(false)
+})
+
+it('lists breakouts under their room with the AIs at each table', async () => {
+  api.rooms.mockResolvedValue({ rooms: [
+    { ...other, id: 9, name: '小会二', parent_room_id: 10, ai_names: ['审查者'], room_status: 'closed' },
+    { ...other, id: 10, name: '小会一', parent_room_id: 7, ai_names: ['分析者', '审查者'] },
+    { ...removed, ai_names: ['主持', '分析者', '审查者'] },
+  ] })
+  const view = await chat()
+  const rows = view.findAll('.room')
+  expect(rows.map(r => r.find('.room-name').text())).toEqual(['测试房间', '└ 小会一', '└ 小会二'])
+  expect(rows[1].attributes('style')).toContain('padding-left: 24px')
+  expect(rows[2].attributes('style')).toContain('padding-left: 40px')
+  expect(rows[1].text()).toContain('AI：分析者、审查者')
+  expect(rows[2].text()).toContain('已结束')
+  await select(view, '小会二')
+  expect(view.find('.chat-head h1').text().replace(/\s+/g, ' ')).toContain('测试房间 › 小会一 › 小会二')
+})
+
 it('searches through the authenticated API and renders returned matches', async () => {
   api.search.mockResolvedValue({ messages: [saved], next_before: 1 })
   const view = await chat()
